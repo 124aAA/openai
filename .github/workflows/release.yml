@@ -1,0 +1,61 @@
+name: Publish verified release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: qingnode-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine the installer release
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -nE 's/^REPO=.* VERSION=(v[0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' install.sh)
+          [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "$version" ]]; then
+            echo 'Tag and installer version disagree' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > /tmp/qingnode-releases.json
+          if jq -e --arg tag "$version" '.[] | select(.tag_name == $tag)' /tmp/qingnode-releases.json >/dev/null; then
+            echo "Release $version already exists; it will not be overwritten."
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@v5
+        if: steps.target.outputs.publish == 'true'
+        with:
+          go-version: '1.27.1'
+      - if: steps.target.outputs.publish == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends shellcheck
+          shellcheck install.sh scripts/*.sh
+          go vet ./...
+          go test -race -count=1 ./...
+          sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
+          python3 scripts/fetch-test-core.py
+      - name: Official core syntax and REALITY, SS2022, Hysteria2 TCP/UDP
+        if: steps.target.outputs.publish == 'true'
+        run: go test ./internal/node -run 'OfficialCore|OfficialArchive' -v -count=1
+      - if: steps.target.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.target.outputs.version }}
+        run: bash scripts/build.sh "${RELEASE_VERSION#v}"
+      - name: Publish only after integration tests pass
+        if: steps.target.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.target.outputs.version }}
+        run: gh release create "$RELEASE_VERSION" dist/* --target "$GITHUB_SHA" --prerelease --title "QingNode $RELEASE_VERSION" --notes-file docs/RELEASE_NOTES.md

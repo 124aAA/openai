@@ -1,0 +1,32 @@
+# Managed by QingNode
+[Unit]
+Description=QingNode sing-box proxy service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=qingnode
+Group=qingnode
+ExecStart=/usr/local/bin/qingnode serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/qingnode/acme
+
+[Install]
+WantedBy=multi-user.target

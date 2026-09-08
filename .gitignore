@@ -1,0 +1,7 @@
+/dist/
+/artifacts/
+/coverage.out
+/qingnode
+*.qnbak
+*.test
+__pycache__/

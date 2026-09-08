@@ -1,0 +1,27 @@
+name: Verify QingNode
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck
+      - run: shellcheck install.sh scripts/*.sh
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
+      - run: python3 scripts/fetch-test-core.py
+      - name: Official core syntax and REALITY, SS2022, Hysteria2 TCP/UDP
+        run: go test ./internal/node -run 'OfficialCore|OfficialArchive' -v -count=1
+      - run: bash scripts/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qingnode-preview
+          path: dist/
