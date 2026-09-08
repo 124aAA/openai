@@ -48,7 +48,13 @@ step 1 "检测系统、权限与架构"
 . /etc/os-release
 case "$ID:$VERSION_ID" in debian:12|debian:13|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;; *) echo "未验收的系统：$ID $VERSION_ID" >&2; exit 1;; esac
 case "$(uname -m)" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) echo '仅支持 x86_64 和 ARM64。' >&2; exit 1;; esac
-[[ $PORT =~ ^[0-9]+$ && ${#PORT} -le 5 ]] && PORT=$((10#$PORT)) && [[ $PORT -ge 1 && $PORT -le 65535 ]] || { echo '端口无效。' >&2; exit 1; }
+if [[ ! $PORT =~ ^[0-9]+$ || ${#PORT} -gt 5 ]]; then
+  echo '端口无效。' >&2; exit 1
+fi
+PORT=$((10#$PORT))
+if ((PORT < 1 || PORT > 65535)); then
+  echo '端口无效。' >&2; exit 1
+fi
 check_owned_paths() {
 if [[ -e $ROOT || -L $ROOT ]]; then
   [[ -d $ROOT && ! -L $ROOT && -f $ROOT/.qingnode-owner && $(cat "$ROOT/.qingnode-owner") == "$OWNER" ]] || { echo '状态目录已有其他内容，拒绝接管。' >&2; exit 1; }

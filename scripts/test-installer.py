@@ -243,6 +243,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('\ncurl ', (f.root/'commands.log').read_text())
                 self.assertFalse(f.state.exists())
 
+    def test_invalid_ports_fail_before_host_changes(self):
+        for port in ('0', '65536', '-1', '443x', '000443', '443; exit 0'):
+            with self.subTest(port=port):
+                f = self.fixture()
+                self.assertIn('端口无效', f.run('--port', port, ok=False))
+                self.assertFalse(f.state.exists())
+                self.assertFalse(f.bin.exists())
+                self.assertNotIn('apt-get ', (f.root/'commands.log').read_text())
+
     def test_five_os_identifiers_and_repeat_install_keep_every_parameter(self):
         for distro, version in [('debian','12'), ('debian','13'), ('ubuntu','22.04'),
                                 ('ubuntu','24.04'), ('ubuntu','26.04')]:
