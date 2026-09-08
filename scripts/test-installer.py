@@ -38,7 +38,7 @@ elif name=='sshd': print('port 22')
 elif name=='getent':
  if a[0]=='ahosts':
   if os.environ.get('QN_DNS_FAIL'): sys.exit(2)
-  print('192.0.2.1 STREAM github.com')
+  print('192.0.2.2 STREAM github.com')
  elif a[0] in ('passwd','group'):
   if not s.get(a[0]): sys.exit(2)
   print('qingnode:x:999:999::/nonexistent:/usr/sbin/nologin' if a[0]=='passwd' else 'qingnode:x:999:')
@@ -71,11 +71,11 @@ elif name=='systemctl':
 elif name=='apt-get': fail('apt')
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
- prefix='https://github.com/124aAA/openai/releases/download/v0.2.1/'
+ prefix='https://github.com/124aAA/openai/releases/download/v0.2.2/'
  if len(urls)!=1 or not urls[0].startswith(prefix) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset=urls[0][len(prefix):]
- if asset not in ('qingnode-0.2.1-linux-amd64.tar.gz','SHA256SUMS'):
+ if asset not in ('qingnode-0.2.2-linux-amd64.tar.gz','SHA256SUMS'):
   raise RuntimeError('unexpected remote asset '+asset)
  dest=pathlib.Path(a[a.index('-o')+1])
  if not str(dest).startswith(str(r)+'/'):
@@ -120,7 +120,11 @@ class Fixture:
             path.mkdir(parents=True, exist_ok=True)
         (self.root/'host.json').write_text(json.dumps(dict(active=False, enabled=False)))
         release = self.root/'os-release'
-        release.write_text(f'ID={distro}\nVERSION_ID={version}\n')
+        # os-release contains a human-readable VERSION as well as VERSION_ID.
+        # Omitting it hides collisions with the installer's release tag variable.
+        release.write_text(f'ID={distro}\nVERSION_ID="{version}"\n'
+                           f'VERSION="{version} (distribution release)"\n'
+                           f'PRETTY_NAME="{distro} {version}"\n')
         code = (SOURCE/'install.sh').read_text()
         for old, new in {
             '/var/lib/qingnode': self.state,
@@ -157,7 +161,7 @@ class Fixture:
         release.mkdir()
         if corrupt == 'inner':
             self.manager.write_text(MOCK+'\n# corrupted after inner checksum\n')
-        archive = release/'qingnode-0.2.1-linux-amd64.tar.gz'
+        archive = release/'qingnode-0.2.2-linux-amd64.tar.gz'
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
@@ -212,7 +216,7 @@ class InstallerTests(unittest.TestCase):
         before = f.data()
         calls = (f.root/'commands.log').read_text()
         self.assertEqual(2, calls.count('\ncurl '))
-        self.assertIn('124aAA/openai/releases/download/v0.2.1/', calls)
+        self.assertIn('124aAA/openai/releases/download/v0.2.2/', calls)
         self.assertIn('菜单需要交互终端', f.run(online=True, ok=False))
         self.assertEqual(before, f.data())
         self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))
@@ -223,6 +227,42 @@ class InstallerTests(unittest.TestCase):
         standalone.write_bytes(f.installer.read_bytes())
         f.installer = standalone
         self.assertIn('[8/8]', f.install())
+
+    def test_online_install_with_full_os_release_fields_on_five_versions(self):
+        for distro, version in [('debian','12'), ('debian','13'), ('ubuntu','22.04'),
+                                ('ubuntu','24.04'), ('ubuntu','26.04')]:
+            with self.subTest(distro=distro, version=version):
+                f = self.fixture(distro, version); f.remote_release()
+                self.assertIn('[8/8]', f.install(online=True))
+                before = f.data()
+                f.run('--reinstall', online=True)
+                self.assertEqual(before, f.data())
+
+    def test_online_install_reads_actual_host_os_release_without_overwriting_tag(self):
+        f = self.fixture(); f.remote_release()
+        # Read the real file, but keep all host mutations and downloads simulated.
+        (f.root/'os-release').write_bytes(Path('/etc/os-release').read_bytes())
+        self.assertIn('[8/8]', f.install(online=True))
+
+    def test_explicit_release_tag_survives_os_detection(self):
+        f = self.fixture(); f.remote_release()
+        # The mock intentionally has no old release; reaching this exact URL
+        # proves --version was preserved, before any installation could happen.
+        f.run('--repo', '124aAA/openai', '--version', 'v0.1.0', online=True, ok=False)
+        calls = (f.root/'commands.log').read_text()
+        self.assertIn('/releases/download/v0.1.0/qingnode-0.1.0-linux-amd64.tar.gz', calls)
+        self.assertFalse(f.state.exists())
+
+    def test_invalid_repository_and_tag_are_still_rejected(self):
+        for args, message in [(('--repo', '../bad'), '仓库名无效'),
+                              (('--repo', 'owner/..'), '仓库名无效'),
+                              (('--repo', 'owner/.'), '仓库名无效'),
+                              (('--version', 'v1.2.3; exit 0'), '管理器版本号无效')]:
+            with self.subTest(args=args):
+                f = self.fixture(); f.remote_release()
+                self.assertIn(message, f.run(*args, online=True, ok=False))
+                self.assertNotIn('\ncurl ', (f.root/'commands.log').read_text())
+                self.assertFalse(f.state.exists())
 
     def test_online_failed_download_or_invalid_package_never_installs(self):
         for corrupt in ('download', 'outer', 'inner', 'path'):

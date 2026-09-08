@@ -122,7 +122,7 @@ func (a *app) selfUpdate(args []string) error {
 	f := fs("self-update")
 	bundle := f.String("bundle", "", "已解压并核验来源的新版发行包目录")
 	repo := f.String("repo", "", "GitHub 仓库 owner/repo；默认 124aAA/openai")
-	v := f.String("version", "", "明确目标 tag，例如 v0.2.1")
+	v := f.String("version", "", "明确目标 tag，例如 v0.2.2")
 	if e := parse(f, args); e != nil {
 		return e
 	}

@@ -9,7 +9,7 @@ UNIT=/etc/systemd/system/qingnode.service
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.2.1 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.2.2 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 INIT_ARGS=()
 LIB=/usr/local/lib/qingnode
 ACCOUNT_RECORD=/var/backups/qingnode/.qingnode-account
@@ -32,7 +32,7 @@ while (($#)); do
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.1 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.2 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
@@ -43,10 +43,15 @@ if ((HAS_ARGS==0 && REINSTALL==0)) && [[ -x $BIN && -f $ROOT/.qingnode-owner && 
 step 1 "检测系统、权限与架构"
 [[ $(ps -p 1 -o comm=) == systemd ]] || { echo '需要以 systemd 启动的 Debian/Ubuntu 主机。' >&2; exit 1; }
 [[ -r /etc/os-release ]] || exit 1
-# os-release is a local root-owned operating-system file.
-# shellcheck source=/dev/null
-. /etc/os-release
-case "$ID:$VERSION_ID" in debian:12|debian:13|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;; *) echo "未验收的系统：$ID $VERSION_ID" >&2; exit 1;; esac
+# Isolate all os-release assignments: its VERSION must not replace our tag.
+QN_OS_INFO=$(
+  # os-release is a local root-owned operating-system file.
+  # shellcheck source=/dev/null
+  . /etc/os-release || exit 1
+  printf '%s %s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}"
+)
+read -r QN_OS_ID QN_OS_VERSION_ID <<< "$QN_OS_INFO"
+case "$QN_OS_ID:$QN_OS_VERSION_ID" in debian:12|debian:13|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;; *) echo "未验收的系统：$QN_OS_ID $QN_OS_VERSION_ID" >&2; exit 1;; esac
 case "$(uname -m)" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) echo '仅支持 x86_64 和 ARM64。' >&2; exit 1;; esac
 if [[ ! $PORT =~ ^[0-9]+$ || ${#PORT} -gt 5 ]]; then
   echo '端口无效。' >&2; exit 1
@@ -124,7 +129,7 @@ systemctl is-active --quiet qingnode.service && old_active=1
 if [[ -f $BIN ]]; then cp -p "$BIN" "$TEMP_DIR/old-bin"; old_bin=1; fi
 if [[ -f $UNIT ]]; then cp -p "$UNIT" "$TEMP_DIR/old-unit"; old_unit=1; fi
 if [[ -f $LIB/install.sh ]]; then cp -p "$LIB/install.sh" "$TEMP_DIR/old-installer"; fi
-printf '[INFO] %s %s / %s；该系统的实机验收情况见 TEST_REPORT.md。\n' "$ID" "$VERSION_ID" "$ARCH"
+printf '[INFO] %s %s / %s；该系统的实机验收情况见 TEST_REPORT.md。\n' "$QN_OS_ID" "$QN_OS_VERSION_ID" "$ARCH"
 if command -v sing-box >/dev/null; then echo '[INFO] 检测到已有 sing-box；本项目使用自己的目录，不接管其他安装。'; fi
 if ! getent ahosts github.com >"$TEMP_DIR/dns"; then echo '[WARN] GitHub DNS 查询失败；在线下载可能失败，可使用完整本地包和 --core-archive。' >&2; fi
 ss -H -lntup >>"$LOG" 2>&1 || true
@@ -135,7 +140,8 @@ if [[ -z $REPO && ! -e $BUNDLE/qingnode && ! -L $BUNDLE/qingnode && ! -e $BUNDLE
   REPO=$DEFAULT_REPO
 fi
 if [[ -n $REPO ]]; then
-  [[ $REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '仓库名或正式版本号无效。' >&2; exit 1; }
+  [[ $REPO =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+$ && ${REPO##*/} != . && ${REPO##*/} != .. ]] || { echo '仓库名无效，格式应为 owner/repo。' >&2; exit 1; }
+  [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '管理器版本号无效，格式应为 v数字.数字.数字。' >&2; exit 1; }
   asset="qingnode-${VERSION#v}-linux-$ARCH.tar.gz"
   base="https://github.com/$REPO/releases/download/$VERSION"
   printf '[INFO] 下载 QingNode %s（%s，%s）\n' "$VERSION" "$ARCH" "$REPO"
