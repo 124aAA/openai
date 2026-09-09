@@ -321,9 +321,46 @@ func (b SystemBackend) Active() bool {
 	_, e := b.run(10*time.Second, "systemctl", "is-active", "--quiet", "qingnode.service")
 	return e == nil
 }
+func (b SystemBackend) restartService(s State) error {
+	commandError := func(action string, out []byte, err error) error {
+		detail := strings.TrimSpace(Redact(string(out), s))
+		if detail == "" {
+			return fmt.Errorf("systemctl %s qingnode.service 失败：%w", action, err)
+		}
+		return fmt.Errorf("systemctl %s qingnode.service 失败：%w；%s", action, err, detail)
+	}
+	restart := func() error {
+		out, err := b.run(35*time.Second, "systemctl", "restart", "qingnode.service")
+		if err != nil {
+			return commandError("restart", out, err)
+		}
+		return nil
+	}
+	firstErr := restart()
+	if firstErr == nil {
+		return nil
+	}
+	result, err := b.run(10*time.Second, "systemctl", "show", "qingnode.service", "--property=Result", "--value")
+	if err != nil {
+		return errors.Join(firstErr, commandError("show --property=Result --value", result, err))
+	}
+	if strings.TrimSpace(string(result)) != "start-limit-hit" {
+		return firstErr
+	}
+	// Manual configuration changes also consume systemd's start-rate budget.
+	// Recover only this confirmed limit, once; automatic crash-loop limits remain intact.
+	out, err := b.run(10*time.Second, "systemctl", "reset-failed", "qingnode.service")
+	if err != nil {
+		return errors.Join(firstErr, commandError("reset-failed", out, err))
+	}
+	if err = restart(); err != nil {
+		return errors.Join(firstErr, fmt.Errorf("已清除启动限流，重试一次后仍失败：%w", err))
+	}
+	return nil
+}
 func (b SystemBackend) Activate(s State) error {
 	// The service invokes the manager's serve command, which reads the same atomic generation.
-	if _, e := b.run(35*time.Second, "systemctl", "restart", "qingnode.service"); e != nil {
+	if e := b.restartService(s); e != nil {
 		return e
 	}
 	deadline := time.Now().Add(45 * time.Second)

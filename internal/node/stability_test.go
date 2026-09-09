@@ -45,7 +45,7 @@ func TestRestartDoesNotEnableAutostart(t *testing.T) {
 	if b.Activate(fixture(t)) == nil {
 		t.Fatal("restart failure ignored")
 	}
-	if len(commands) != 1 || strings.Contains(commands[0], " enable ") {
+	if len(commands) != 2 || commands[0] != "systemctl restart qingnode.service" || commands[1] != "systemctl show qingnode.service --property=Result --value" {
 		t.Fatal(commands)
 	}
 }
