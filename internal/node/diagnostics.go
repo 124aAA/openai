@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -94,17 +93,6 @@ func PublicIP(family string) (string, error) {
 	return ip.String(), nil
 }
 func CheckReality(r *Reality) error {
-	if r == nil {
-		return errors.New("缺少 REALITY 参数")
-	}
-	d := &net.Dialer{Timeout: 6 * time.Second}
-	c, e := tls.DialWithDialer(d, "tcp", r.Target, &tls.Config{ServerName: r.ServerName, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}})
-	if e != nil {
-		return errors.New("目标 TLS 握手失败（检查 DNS、网络、SNI 和证书匹配）")
-	}
-	defer c.Close()
-	if c.ConnectionState().NegotiatedProtocol != "h2" {
-		return errors.New("目标未协商 HTTP/2")
-	}
-	return nil
+	_, e := ProbeReality(r)
+	return e
 }

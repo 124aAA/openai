@@ -92,6 +92,10 @@ func (a *app) addWithProbes(cmd string, args []string, probes autoProbes) error 
 			n.Reality, e = node.NewReality(*sni, *target)
 			if e == nil {
 				n.Reality.Fingerprint = *fingerprint
+				e = node.RealityTargetPolicy(n.Reality)
+				if e == nil && !*auto && !a.offline {
+					e = node.CheckReality(n.Reality)
+				}
 			}
 		} else if *protocol == "hysteria2" {
 			n.Certificate, e = loadCert(*sni, *cert, *key, *email)
@@ -274,6 +278,16 @@ func (a *app) edit(args []string) error {
 			}
 			if *target != "" {
 				n.Reality.Target = *target
+			}
+			if *sni != "" || *target != "" {
+				if e = node.RealityTargetPolicy(n.Reality); e != nil {
+					return e
+				}
+				if !a.offline {
+					if e = node.CheckReality(n.Reality); e != nil {
+						return e
+					}
+				}
 			}
 		} else if n.Protocol == "hysteria2" {
 			if *target != "" {

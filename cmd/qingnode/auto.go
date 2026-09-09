@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"time"
 
 	"qingnode/internal/node"
 )
@@ -13,13 +15,14 @@ import (
 type autoProbes struct {
 	publicIP      func(string) (string, error)
 	checkReality  func(*node.Reality) error
+	probeReality  func(*node.Reality) (time.Duration, error)
 	availablePort func(node.Node) error
 	sshPorts      func() []int
 	randomPort    func(node.State, node.Node, []int) (int, error)
 }
 
 func defaultAutoProbes() autoProbes {
-	return autoProbes{node.PublicIP, node.CheckReality, node.AvailablePort, node.SSHPorts, node.RandomPort}
+	return autoProbes{publicIP: node.PublicIP, checkReality: node.CheckReality, probeReality: node.ProbeReality, availablePort: node.AvailablePort, sshPorts: node.SSHPorts, randomPort: node.RandomPort}
 }
 
 func autoEndpoint(protocol, host, sni, target string, probes autoProbes) (string, string, string, error) {
@@ -49,16 +52,19 @@ func autoEndpoint(protocol, host, sni, target string, probes autoProbes) (string
 		if target == "" {
 			target = net.JoinHostPort(sni, "443")
 		}
+		if e := node.RealityTargetPolicy(&node.Reality{ServerName: sni, Target: target}); e != nil {
+			return fail(e)
+		}
 		if e := probes.checkReality(&node.Reality{ServerName: sni, Target: target}); e != nil {
 			return fail(fmt.Errorf("指定 REALITY 目标验证失败；检查 --sni、--target 和服务器出站网络：%w", e))
 		}
 		return host, sni, target, nil
 	}
-	for _, candidate := range []string{"www.microsoft.com", "www.apple.com", "www.cloudflare.com"} {
-		r := &node.Reality{ServerName: candidate, Target: net.JoinHostPort(candidate, "443")}
-		if probes.checkReality(r) == nil {
-			return host, r.ServerName, r.Target, nil
-		}
+	fmt.Fprintln(os.Stderr, "[INFO] 正在筛选并测速 REALITY 目标…")
+	results := rankRealityTargets(probes.probeReality)
+	printRealityTargets(os.Stderr, results, 3)
+	if results[0].err == nil {
+		return host, results[0].name, net.JoinHostPort(results[0].name, "443"), nil
 	}
 	return fail(errors.New("所有自动 REALITY 目标均未通过 TLS 1.3 / HTTP2 验证；检查服务器出站网络，或用 --sni 域名（可加 --target 主机:端口）重试"))
 }

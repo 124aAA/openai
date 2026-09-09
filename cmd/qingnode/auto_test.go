@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"qingnode/internal/node"
 )
@@ -51,10 +52,6 @@ func TestAutoRealitySelectionAndExplicitTarget(t *testing.T) {
 		wantCalls                         int
 		fails                             bool
 	}{
-		{"first", "", "", "www.microsoft.com", "www.microsoft.com", 1, false},
-		{"fallback", "", "", "www.apple.com", "www.apple.com", 2, false},
-		{"last", "", "", "www.cloudflare.com", "www.cloudflare.com", 3, false},
-		{"all fail", "", "", "", "", 3, true},
 		{"explicit", "custom.example.com", "192.0.2.8:8443", "custom.example.com", "custom.example.com", 1, false},
 		{"explicit fail", "custom.example.com", "", "www.microsoft.com", "", 1, true},
 		{"target without sni", "", "192.0.2.8:8443", "", "", 0, true},
@@ -159,11 +156,11 @@ func TestAutoInitAppliesOnceAndRepeatsWithoutProbes(t *testing.T) {
 			}
 			return "2001:db8::8", nil
 		},
-		checkReality: func(r *node.Reality) error {
-			if r.ServerName == "www.microsoft.com" {
-				return errors.New("unreachable")
+		probeReality: func(r *node.Reality) (time.Duration, error) {
+			if r.ServerName == "www.apple.com" {
+				return time.Millisecond, nil
 			}
-			return nil
+			return 0, errors.New("unreachable")
 		},
 		sshPorts:      func() []int { return []int{22} },
 		availablePort: func(node.Node) error { return errors.New("busy") },

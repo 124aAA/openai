@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-VERSION=${1:-0.2.3}
+VERSION=${1:-0.2.4}
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '需要三段数字版本号' >&2; exit 2; }
 REVISION=$(git rev-parse --short=12 HEAD 2>/dev/null || printf source)
 command -v go >/dev/null || { echo '构建需要 Go 1.25 或更新版本。' >&2; exit 1; }

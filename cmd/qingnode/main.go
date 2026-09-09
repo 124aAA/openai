@@ -16,7 +16,7 @@ import (
 	"qingnode/internal/node"
 )
 
-var version = "0.2.3"
+var version = "0.2.4"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -69,6 +69,12 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "version" {
 		fmt.Printf("QingNode %s (%s)\n", version, revision)
 		return nil
+	}
+	if len(args) > 0 && args[0] == "reality-targets" {
+		if *offline {
+			return errors.New("目标测速需要联网，请移除 --offline")
+		}
+		return realityTargets(args[1:])
 	}
 	if len(args) > 0 && (args[0] == "help" || args[0] == "--help") {
 		help()
@@ -146,6 +152,7 @@ func help() {
  restore      恢复加密备份，须 --yes
  service      start / stop / restart / status / enable / disable
  ports        查看监听端口及进程
+ reality-targets  筛选并显示延迟最低的 REALITY 目标，默认前三名；不修改节点
  firewall     status / enable / disable / sync（已启用的 UFW）
  network      status / bbr（仅系统内核）
  recover      恢复中断的配置或卸载事务
