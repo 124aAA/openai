@@ -134,6 +134,7 @@ func (a *app) info(args []string) error {
 		}
 		for _, n := range nodes {
 			fmt.Printf("\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s:%d (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, n.Listen, n.Port, strings.Join(node.Networks(n), "+"), n.Enabled)
+			fmt.Printf("导出链接：qingnode export --id %s --format uri\n", n.ID)
 			if r := n.Reality; r != nil {
 				fmt.Printf("Reality Public Key：%s\nShort ID：%s\nSNI：%s\n握手目标：%s\nFlow：xtls-rprx-vision\nFingerprint：%s\n", r.PublicKey, r.ShortID, r.ServerName, r.Target, node.Fingerprint(r))
 				if *private {

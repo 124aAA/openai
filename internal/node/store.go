@@ -144,6 +144,10 @@ func (s *Store) ensure() error {
 				return e
 			}
 		}
+		// MkdirAll applies the caller's umask; the service group needs traversal.
+		if e := os.Chmod(p, 0750); e != nil {
+			return e
+		}
 	}
 	return nil
 }
@@ -308,6 +312,10 @@ func (s *Store) Apply(st State) error {
 		if e = os.Chown(dir, 0, s.GID); e != nil {
 			return e
 		}
+	}
+	// The bootstrap uses umask 0077, so explicitly grant service-group traversal.
+	if e = os.Chmod(dir, 0750); e != nil {
+		return e
 	}
 	config, e := Server(st, s.Root)
 	if e != nil {

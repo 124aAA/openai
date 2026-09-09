@@ -16,7 +16,7 @@ import (
 	"qingnode/internal/node"
 )
 
-var version = "0.2.2"
+var version = "0.2.3"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -120,7 +120,7 @@ func help() {
 用法：qingnode [--offline --root 目录] 命令 [参数]
 不带命令进入中文菜单。离线模式只生成配置，不部署服务。
 
- init         初始化 REALITY（重复执行保留原节点）
+ init         初始化节点；--auto 自动探测地址/目标/端口，重复执行保留原节点
  add          添加 reality / ss2022 / hysteria2 节点
  list / info  查看节点概要（凭据脱敏）
  edit         修改名称、地址、端口、证书或目标
@@ -201,6 +201,19 @@ func (a *app) mutate(fn func(*node.State) error) error {
 	})
 }
 func fs(name string) *flag.FlagSet { return flag.NewFlagSet(name, flag.ContinueOnError) }
+func portFlag(f *flag.FlagSet, defaultValue int) *int {
+	value := defaultValue
+	f.Func("port", "监听端口（十进制，1–65535）", func(raw string) error {
+		n, e := strconv.Atoi(raw)
+		if e != nil || n < 1 || n > 65535 {
+			return errors.New("端口须为十进制 1–65535")
+		}
+		value = n
+		return nil
+	})
+	f.Lookup("port").DefValue = strconv.Itoa(defaultValue)
+	return &value
+}
 func parse(f *flag.FlagSet, args []string) error {
 	if e := f.Parse(args); e != nil {
 		return e

@@ -9,7 +9,7 @@ UNIT=/etc/systemd/system/qingnode.service
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.2.2 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.2.3 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 INIT_ARGS=()
 LIB=/usr/local/lib/qingnode
 ACCOUNT_RECORD=/var/backups/qingnode/.qingnode-account
@@ -24,15 +24,16 @@ while (($#)); do
       esac
       case "$1" in --repo|--version|--core-archive) ;; *) INIT_ARGS+=("$1" "$2");; esac
       shift 2;;
-    --random-port) INIT_ARGS+=("$1"); shift;;
+    --auto|--random-port) INIT_ARGS+=("$1"); shift;;
     --debug) DEBUG=1; shift;;
     --reinstall) REINSTALL=1; shift;;
     install) REINSTALL=1; shift;;
     --help)
+      echo '一键安装：sudo bash install.sh --auto（自动探测地址、验证 REALITY 目标并选择可用端口）'
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.2 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.3 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
@@ -113,6 +114,26 @@ trap finish EXIT
 logged() {
   if [[ -n $REDACTOR ]]; then "$@" 2>&1 | "$REDACTOR" redact-log >>"$LOG"; else "$@" >>"$LOG" 2>&1; fi
 }
+download_release() {
+  local rc hint
+  if logged curl -sS --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 15 --max-time "$3" "$1" -o "$2"; then
+    return 0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    6) hint='DNS 解析失败：检查 github.com 的解析和服务器 DNS';;
+    7) hint='无法连接下载服务器：检查出站 HTTPS 网络';;
+    18) hint='下载内容不完整：检查网络稳定性后重试';;
+    22) hint='HTTP 请求失败：查看日志中的状态码，确认该版本已发布';;
+    23) hint='无法写入下载文件：检查磁盘空间及临时目录权限';;
+    28) hint='下载超时：检查网络后重试，或使用完整本地发行包';;
+    35|51|60) hint='TLS 或证书验证失败：检查系统时间、CA 证书与网络';;
+    *) hint="下载失败（curl 退出码 $rc）：查看安装日志";;
+  esac
+  printf '[ERROR] %s。也可上传已校验的完整发行包运行 install.sh。\n' "$hint" >&2
+  return "$rc"
+}
 step 2 "检测并安装基础依赖"
 missing=0
 for tool in curl wget jq openssl tar unzip sha256sum flock getent useradd ss; do command -v "$tool" >/dev/null || missing=1; done
@@ -145,8 +166,8 @@ if [[ -n $REPO ]]; then
   asset="qingnode-${VERSION#v}-linux-$ARCH.tar.gz"
   base="https://github.com/$REPO/releases/download/$VERSION"
   printf '[INFO] 下载 QingNode %s（%s，%s）\n' "$VERSION" "$ARCH" "$REPO"
-  logged curl -sS --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 15 --max-time 300 "$base/$asset" -o "$TEMP_DIR/$asset"
-  logged curl -sS --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 15 --max-time 60 "$base/SHA256SUMS" -o "$TEMP_DIR/release-sums"
+  download_release "$base/$asset" "$TEMP_DIR/$asset" 300
+  download_release "$base/SHA256SUMS" "$TEMP_DIR/release-sums" 60
   expected=$(awk -v f="$asset" '$2==f {print $1}' "$TEMP_DIR/release-sums")
   [[ $expected =~ ^[a-fA-F0-9]{64}$ ]] || { echo '缺少唯一的发行包摘要。' >&2; exit 1; }
   actual=$(sha256sum "$TEMP_DIR/$asset"); actual=${actual%% *}
@@ -233,5 +254,5 @@ fi
 changed=0
 step 8 "安装完成，输出节点信息"
 "$BIN" info --show-secrets
-echo '安装完成。运行 qingnode 打开菜单，或 qingnode export --id main 导出链接。'
-echo '请根据 qingnode doctor 的结果核对防火墙和云安全组，再用客户端验证。'
+echo '安装完成。运行 qingnode 打开菜单；对应节点的链接和导出命令见上方。'
+echo '请在已启用的防火墙和云安全组放行上方实际监听端口及协议，再用客户端验证；故障时运行 qingnode diagnose。'

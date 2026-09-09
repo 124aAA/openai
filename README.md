@@ -1,7 +1,7 @@
 # QingNode 青节点
 
 [![CI](https://github.com/124aAA/openai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/124aAA/openai/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.2.2--preview-blue)](https://github.com/124aAA/openai/releases/tag/v0.2.2)
+[![Version](https://img.shields.io/badge/version-0.2.3--preview-blue)](https://github.com/124aAA/openai/releases/tag/v0.2.3)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **一条命令安装，中文菜单管理，随时找回节点链接。**
@@ -10,25 +10,29 @@ QingNode 是基于官方 sing-box 的轻量 VPS 代理节点管理器，支持 V
 
 安装入口使用 Bash，管理程序为静态 Go CLI，服务由 systemd 托管。VPS 上无需编译 Go，也无需安装 Web 面板。
 
-> 当前版本为 **v0.2.2 预发行版**，修复系统版本字段覆盖安装器版本、导致第 3 步报错的问题。真实 VPS 安装、云防火墙、ACME、BBR、ARM64 执行和公网客户端连接仍未完整验证，详见[验证范围](#验证范围)。
+> 当前版本为 **v0.2.3 预发行版**，新增 `--auto` 一键安装，修复真实 VPS 第 7 步的目录权限错误、明文日志脱敏与安装提示。已完成的实机结果及尚未验证的平台见[验证范围](#验证范围)；服务启动成功后仍应在自己的客户端验证连接。
 
 [快速安装](#快速安装) · [功能一览](#功能一览) · [菜单与 CLI](#菜单与-cli) · [客户端导出](#链接二维码和配置导出) · [备份恢复](#备份与恢复) · [更新](#更新与-010-迁移) · [常见问题](#常见问题) · [反馈](#反馈与许可)
 
 ## 快速安装
 
-以 **root** 登录 VPS 的 SSH 终端，运行：
+以 **root** 登录 VPS 的 SSH 终端，复制这一整行执行。入口会先完整下载，下载失败不执行，结束后清理临时文件：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/124aAA/openai/main/install.sh)
+bash -c 'set -e; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL --retry 3 https://raw.githubusercontent.com/124aAA/openai/main/install.sh -o "$f"; bash "$f" --auto'
 ```
 
-系统只有 curl 时也可以：
+只有 wget 的系统可将上面 `curl -fsSL --retry 3 URL -o "$f"` 换成 `wget -O "$f" URL`。也保留常见短入口，想自己选择协议和参数时运行：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/124aAA/openai/main/install.sh)
 ```
 
-首次运行自动下载对应架构的发行包，校验后进入中文安装向导。已有 QingNode 时进入管理菜单。以后直接运行 `qingnode` 即可查看链接、管理节点和诊断故障。
+`--auto` 首次运行无需逐项输入：下载并校验发行包和官方核心，优先探测公网 IPv4，失败再试 IPv6；选择通过 TLS 1.3 / HTTP2 检查的 REALITY 目标，优先使用 443，冲突时选择避开监听及 SSH 的随机端口，生成并保存凭据，启动服务并输出分享链接和该节点的导出命令。没有可用地址或目标时会给出具体重试参数并停止。
+
+显式提供的 `--server`、`--sni`、`--target`、`--port` 不会被自动替换；显式端口冲突会报错。可用 `--auto --protocol ss2022` 自动创建 SS2022。Hysteria2 仍需明确提供域名及证书/ACME 参数。自动模式不修改 SSH 或全机防火墙，云安全组/NAT 端口映射仍需满足安装条件。
+
+再次运行带 `--auto` 的入口会更新管理器并保留现有节点、凭据及运行/自启状态；不重新探测已有节点地址，也不轮换身份。不带 `--auto` 时，首次安装保留中文向导，已有安装进入菜单。以后直接运行 `qingnode` 管理节点：
 
 ```bash
 qingnode
@@ -71,10 +75,10 @@ qingnode
 
 | CPU | 安装包 |
 | --- | --- |
-| Intel / AMD / x86_64 | [qingnode-0.2.2-linux-amd64.tar.gz](https://github.com/124aAA/openai/releases/download/v0.2.2/qingnode-0.2.2-linux-amd64.tar.gz) |
-| ARM / Ampere / aarch64 | [qingnode-0.2.2-linux-arm64.tar.gz](https://github.com/124aAA/openai/releases/download/v0.2.2/qingnode-0.2.2-linux-arm64.tar.gz) |
+| Intel / AMD / x86_64 | [qingnode-0.2.3-linux-amd64.tar.gz](https://github.com/124aAA/openai/releases/download/v0.2.3/qingnode-0.2.3-linux-amd64.tar.gz) |
+| ARM / Ampere / aarch64 | [qingnode-0.2.3-linux-arm64.tar.gz](https://github.com/124aAA/openai/releases/download/v0.2.3/qingnode-0.2.3-linux-arm64.tar.gz) |
 
-压缩包外层校验清单：[SHA256SUMS](https://github.com/124aAA/openai/releases/download/v0.2.2/SHA256SUMS)。包内另有文件级清单，安装器会验证完整性。
+压缩包外层校验清单：[SHA256SUMS](https://github.com/124aAA/openai/releases/download/v0.2.3/SHA256SUMS)。包内另有文件级清单，安装器会验证完整性。
 
 安装器识别 Debian 12、13，Ubuntu 22.04、24.04、26.04，要求 PID 1 为 systemd。识别列表不代表这五种系统均已实机验收；其他系统会明确停止。缺少的基础依赖通过系统 apt 安装，正常输出分八个阶段，错误日志保存在 `/var/log/qingnode-install-XXXXXXXX.log`，权限 600。
 
@@ -93,15 +97,17 @@ sudo bash install.sh --protocol ss2022 --name SS-01 --server 203.0.113.10 --rand
 
 ## 下载和重复安装
 
-### v0.2.1 安装器报“仓库名或正式版本号无效”
+### 旧版本安装失败时的恢复
 
-旧安装器读取 `/etc/os-release` 时，系统的 `VERSION` 会覆盖管理器的发行版本。v0.2.2 已隔离这部分读取逻辑。以 root 重新下载修复版安装器即可重试；`--reinstall` 也会更新已有安装的辅助脚本并保留节点参数：
+v0.2.1 读取 `/etc/os-release` 时会被系统的 `VERSION` 覆盖发行版本，导致第 3 步失败；v0.2.2 已修复该问题。真实 VPS 后续又暴露出第 7 步 `core-version: permission denied`：安装器的 `umask 077` 使配置代目录成为 0700，专用服务账户无法进入。v0.2.3 显式设置受管目录权限为 0750，并保留 State 0600、核心配置 0640 与专用服务账户。
+
+以 root 使用最新固定版本入口恢复；`--reinstall` 更新辅助脚本并保留已有节点参数，`--auto` 使尚未完成初始化的机器也可继续自动安装：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/124aAA/openai/v0.2.2/install.sh) --reinstall
+bash -c 'set -e; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL --retry 3 https://raw.githubusercontent.com/124aAA/openai/v0.2.3/install.sh -o "$f"; bash "$f" --reinstall --auto'
 ```
 
-旧版已安装的辅助脚本也有同一问题，因此这次从 v0.2.1 升级请使用上面的新入口。截图中的内核更新/重启提示不是该报错的原因。
+旧版的在线 self-update 可能调用旧辅助脚本，因此从旧版或临时修复版恢复时优先使用上面的新入口。系统提示需要重启不是这两项安装错误的根因；不要为此删除节点数据库或更换凭据。
 
 默认核心锁定官方 sing-box 1.14.0，验证官方归档 SHA-256 后才执行。GitHub 不通时不会切换未知镜像，可上传本架构官方归档并使用：
 
@@ -111,7 +117,7 @@ sudo bash install.sh --core-archive /root/sing-box-1.14.0-linux-amd64.tar.gz
 
 已有其他 sing-box 不会被接管。重新安装管理器保留已有节点、核心版本、UUID、密码、REALITY 密钥、short ID、端口和服务的运行/停止状态。无参数进入菜单；强制重新安装使用 `--reinstall`。
 
-默认发行仓库为 `124aAA/openai`。需要指定仓库或版本时，使用 `install.sh --repo 124aAA/openai --version v0.2.2`。本地完整发行包优先使用相邻文件；本地包损坏或缺少部分文件时会报错，不会悄悄改为在线下载。
+默认发行仓库为 `124aAA/openai`。需要指定仓库或版本时，使用 `install.sh --repo 124aAA/openai --version v0.2.3`。本地完整发行包优先使用相邻文件；本地包损坏或缺少部分文件时会报错，不会悄悄改为在线下载。
 
 ## 功能一览
 
@@ -169,7 +175,7 @@ sudo bash install.sh --core-archive /root/sing-box-1.14.0-linux-amd64.tar.gz
 | 配置检查 / 回退 | `check` / `rollback` / `recover` |
 | 备份 / 恢复 | `backup` / `restore --file 文件 --yes` |
 | 核心版本 / 更新 | `core versions` / `update` |
-| 管理器更新 | `self-update --version v0.2.2` 或 `self-update --bundle 新版解压目录` |
+| 管理器更新 | `self-update --version v0.2.3` 或 `self-update --bundle 新版解压目录` |
 | 网络 / 防火墙 | `network status` / `network bbr` / `firewall status` |
 
 以上命令前加 `sudo qingnode`；每个命令附 `--help` 查看参数。`--debug` 是全局参数，应放在命令前，例如 `sudo qingnode --debug diagnose`。非交互执行使用 CLI，不会等待菜单输入。环境变量 `NO_COLOR` 或不支持颜色的终端会禁用颜色。
@@ -300,7 +306,7 @@ sudo qingnode restore --snapshot --file /var/backups/qingnode/before-uninstall-�
 
 `core versions` 显示当前及官方最新稳定版；`update` 获取官方 Release，校验归档并保留旧核心，通过配置检查和服务就绪后提交。只接受已适配的 1.14.x 正式版，不会自动跨版本。也可显式指定 `core update --version ... --sha256 ... --archive ...`；降级需 `--allow-downgrade`。
 
-管理器使用 `self-update --bundle /绝对路径/新版解压包`，或 `self-update --version v0.2.2` 从 `124aAA/openai` 下载指定版本，不覆盖节点、凭据和备份。可加 `--repo owner/repo` 显式指定其他发行仓库。建议 0.1.0 用户先备份，再运行新包 `install.sh --reinstall`；旧的 State 字段和 v1 备份兼容，新字段按需补充，历史未知创建时间保持为空。使用 0.2.0 新字段后，0.1.0 会拒绝读取未知字段，不能直接降级管理器。
+管理器使用 `self-update --bundle /绝对路径/新版解压包`，或 `self-update --version v0.2.3` 从 `124aAA/openai` 下载指定版本，不覆盖节点、凭据和备份。可加 `--repo owner/repo` 显式指定其他发行仓库。建议 0.1.0 用户先备份，再运行新包 `install.sh --reinstall`；旧的 State 字段和 v1 备份兼容，新字段按需补充，历史未知创建时间保持为空。使用 0.2.0 新字段后，0.1.0 会拒绝读取未知字段，不能直接降级管理器。
 
 核心与管理器是两个独立更新：
 
@@ -308,7 +314,7 @@ sudo qingnode restore --snapshot --file /var/backups/qingnode/before-uninstall-�
 | --- | --- |
 | 查看 sing-box 当前及官方最新稳定版 | `sudo qingnode core versions` |
 | 更新已适配的 sing-box 稳定核心 | `sudo qingnode update` |
-| 安装或重新安装管理器 v0.2.2 | `sudo qingnode self-update --version v0.2.2` |
+| 安装或重新安装管理器 v0.2.3 | `sudo qingnode self-update --version v0.2.3` |
 | 用本地完整包更新管理器 | `sudo qingnode self-update --bundle /root/qingnode-release` |
 
 未来更新管理器时，先查看 [Releases](https://github.com/124aAA/openai/releases)，再指定实际目标版本。菜单中的“更新管理器”目前使用本地包目录；在线指定版本使用 CLI。更新完成后重新打开 `qingnode` 菜单。
@@ -325,13 +331,14 @@ sudo qingnode diagnose
 
 | 现象 | 处理方法 |
 | --- | --- |
-| 第 3 步提示仓库名或正式版本号无效 | v0.2.1 安装器存在系统字段冲突；按“下载和重复安装”中的命令使用 v0.2.2 修复入口 |
+| 第 3 步提示仓库名或正式版本号无效 | v0.2.1 安装器存在系统字段冲突；按“下载和重复安装”中的命令使用 v0.2.3 修复入口 |
 | wget 或 curl 找不到 | 改用另一条入口命令；两者都没有时，先通过 apt 安装其中一种 |
 | 下载报 HTTP 404 | 检查指定版本与发行资产是否存在，确认使用本仓库的安装地址 |
 | 下载超时 / DNS 错误 | 核对 VPS DNS、GitHub 连通性和软件源；也可使用完整本地包与官方核心归档 |
 | 端口被占用 | 运行 `sudo qingnode ports` 查看进程，选择新端口或随机端口 |
 | 找不到 main 节点 | 运行 `sudo qingnode list`，把示例名称换成实际节点 ID 或名称 |
 | 服务运行但客户端连不上 | 核对服务器地址、端口、协议、链接是否更新，以及主机防火墙和云安全组 |
+| 第 7 步 core-version 权限被拒绝 | v0.2.2 的目录 umask 问题；使用 v0.2.3 新入口加 --reinstall --auto，保留原数据 |
 | REALITY 目标连接失败 | 核对 SNI 和握手目标，确认 VPS 能访问目标，检查时间同步 |
 | HY2 无法连接 | 检查 UDP 放行、证书域名和有效期；ACME 签发还需检查 TCP 80 |
 | 提示 IPv6 不可用 | 仅 IPv4 VPS 可继续使用 IPv4；不要填写不可达的 IPv6 地址 |
@@ -368,6 +375,8 @@ sudo qingnode --debug diagnose
 
 ## 验证范围
 
+v0.2.3 增加自动安装选择逻辑、root 降权权限检查、明文脱敏与端口边界回归。此前已在 Ubuntu 24.04.4 amd64 VPS 完成目录权限修复版的安装、重装保留身份、专用账户访问检查及 Windows 官方客户端公网 HTTPS/UDP 验收；新版本的具体执行记录见[测试报告](docs/TEST_REPORT.md)。其他系统、ARM64、ACME、BBR、复杂防火墙及移动端仍有未验证项，不能用单台 VPS 结果概括所有环境。
+
 v0.2.2 针对系统字段冲突补充回归：测试夹具包含带空格的 `VERSION`，覆盖五种系统标识的在线首装/重装、真实宿主 `/etc/os-release`、显式 `--version` 保持，以及无效仓库与版本参数拒绝。完整安装器测试扩展为 19 组；提交前的实测结果见 [测试报告](docs/TEST_REPORT.md)，远端状态见 [Actions](https://github.com/124aAA/openai/actions)。这仍不能代替各系统的真实 VPS 全流程验收。
 
 以下保留 v0.2.1 发布时的验证记录；原夹具缺少 `VERSION` 字段，未覆盖本次发现的冲突：
@@ -396,7 +405,7 @@ shellcheck install.sh scripts/*.sh
 sudo env GO="$(command -v go)" python3 scripts/test-installer.py
 python3 scripts/fetch-test-core.py
 SING_BOX_BIN="$PWD/artifacts/test-core/sing-box" go test ./internal/node -run OfficialCore -v -count=1
-bash scripts/build.sh 0.2.2
+bash scripts/build.sh 0.2.3
 ```
 
 构建需要 Go 1.25+、Python3、GNU tar，本次使用 Go 1.27.1。vendor 随源码提供。安装器测试使用临时路径、真实 Bash/CLI 与模拟系统命令，不操作测试机账户和服务。`scripts/acceptance-vps.sh` 是显式空白 VPS 验收入口，本轮仅验证其拒绝非 systemd 环境，完整流程未验证。

@@ -71,15 +71,18 @@ elif name=='systemctl':
 elif name=='apt-get': fail('apt')
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
- prefix='https://github.com/124aAA/openai/releases/download/v0.2.2/'
+ prefix='https://github.com/124aAA/openai/releases/download/v0.2.3/'
  if len(urls)!=1 or not urls[0].startswith(prefix) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset=urls[0][len(prefix):]
- if asset not in ('qingnode-0.2.2-linux-amd64.tar.gz','SHA256SUMS'):
+ if asset not in ('qingnode-0.2.3-linux-amd64.tar.gz','SHA256SUMS'):
   raise RuntimeError('unexpected remote asset '+asset)
  dest=pathlib.Path(a[a.index('-o')+1])
  if not str(dest).startswith(str(r)+'/'):
   raise RuntimeError('refusing download outside fixture')
+ if os.environ.get('QN_CURL_CODE'):
+  code=int(os.environ['QN_CURL_CODE'])
+  print('curl: (%d) simulated transport failure'%code,file=sys.stderr); sys.exit(code)
  if os.environ.get('QN_FAULT')=='download':
   dest.write_bytes(b'partial download'); fail('download')
  shutil.copyfile(r/'release'/asset,dest)
@@ -94,6 +97,13 @@ elif name=='qingnode':
   sys.exit(subprocess.call(['systemctl','restart','qingnode.service']))
  elif a==['recover']: pass
  else:
+  # Network discovery is a simulated host effect here; auto CLI tests exercise
+  # the real selection logic with explicit probe dependencies.
+  if a and a[0]=='init' and '--auto' in a:
+   a.remove('--auto')
+   if '--server' not in a: a+=['--server','203.0.113.7']
+   protocol=a[a.index('--protocol')+1] if '--protocol' in a else 'reality'
+   if protocol=='reality' and '--sni' not in a: a+=['--sni','example.com']
   direct=a and a[0] in ('redact-log','validate-state','version','service')
   argv=[os.environ['QN_REAL_BIN']]+([] if direct else ['--offline','--root',str(root)])+a
   rc=subprocess.call(argv)
@@ -161,7 +171,7 @@ class Fixture:
         release.mkdir()
         if corrupt == 'inner':
             self.manager.write_text(MOCK+'\n# corrupted after inner checksum\n')
-        archive = release/'qingnode-0.2.2-linux-amd64.tar.gz'
+        archive = release/'qingnode-0.2.3-linux-amd64.tar.gz'
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
@@ -172,17 +182,20 @@ class Fixture:
         if corrupt == 'outer':
             archive.write_bytes(b'corrupted after outer checksum')
 
-    def run(self, *args, fault='', dns=False, ok=True, online=False):
+    def run(self, *args, fault='', dns=False, ok=True, online=False, curl_code=0):
         env = dict(self.env, QN_FAULT=fault)
         if dns:
             env['QN_DNS_FAIL'] = '1'
+        if curl_code:
+            env['QN_CURL_CODE'] = str(curl_code)
         command = ['bash', str(self.installer), *args]
         if online:
             # Preserve the actual /dev/fd entry semantics used by bash <(curl ...).
             command = ['bash', '-c', 'exec bash <(cat "$1") "${@:2}"',
                        'qingnode-online-test', str(self.installer), *args]
         p = subprocess.run(command, env=env,
-                           text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=35)
+                           stdin=subprocess.DEVNULL, text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=35)
         if (p.returncode == 0) != ok:
             raise AssertionError(f'installer returned {p.returncode}:\n{p.stdout}')
         return p.stdout
@@ -216,10 +229,43 @@ class InstallerTests(unittest.TestCase):
         before = f.data()
         calls = (f.root/'commands.log').read_text()
         self.assertEqual(2, calls.count('\ncurl '))
-        self.assertIn('124aAA/openai/releases/download/v0.2.2/', calls)
+        self.assertIn('124aAA/openai/releases/download/v0.2.3/', calls)
         self.assertIn('菜单需要交互终端', f.run(online=True, ok=False))
         self.assertEqual(before, f.data())
         self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))
+
+    def test_auto_entry_and_custom_node_export_hint(self):
+        f = self.fixture(); f.remote_release()
+        out = f.run('--auto', '--name', 'custom-node', '--port', '9443', online=True)
+        state = json.loads(f.data())
+        n = state['nodes'][0]
+        self.assertEqual(('custom-node', 9443), (n['name'], n['port']))
+        self.assertIn(f'qingnode export --id {n["id"]} --format uri', out)
+        self.assertNotIn('qingnode export --id main', out)
+        self.assertIn('qingnode init --auto', (f.root/'commands.log').read_text())
+        before = f.data()
+        f.run('--auto', online=True)
+        self.assertEqual(before, f.data())
+
+    def test_download_failures_have_specific_advice_before_mutation(self):
+        for code, advice in [(6, 'DNS 解析失败'), (7, '无法连接下载服务器'),
+                             (18, '下载内容不完整'), (22, 'HTTP 请求失败'),
+                             (23, '无法写入下载文件'), (28, '下载超时'),
+                             (35, 'TLS 或证书验证失败'), (60, 'TLS 或证书验证失败')]:
+            with self.subTest(code=code):
+                f = self.fixture(); f.remote_release()
+                out = f.run('--auto', online=True, curl_code=code, ok=False)
+                self.assertIn(advice, out)
+                self.assertFalse(f.bin.exists())
+                self.assertFalse(f.state.exists())
+                self.assertFalse(f.host()['active'])
+
+    def test_explicit_port_with_leading_zero_remains_decimal(self):
+        for raw, expected in [('0443', 443), ('08443', 8443)]:
+            with self.subTest(port=raw):
+                f = self.fixture()
+                f.run('--auto', '--protocol', 'ss2022', '--port', raw)
+                self.assertEqual(expected, json.loads(f.data())['nodes'][0]['port'])
 
     def test_standalone_download_defaults_to_bound_release(self):
         f = self.fixture(); f.remote_release()

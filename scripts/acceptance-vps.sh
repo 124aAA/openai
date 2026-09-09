@@ -27,7 +27,7 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
-bash "$BUNDLE/install.sh" --protocol ss2022 --name acceptance-ss --server 127.0.0.1 --listen 127.0.0.1 --random-port "${INSTALL_EXTRA[@]}"
+bash "$BUNDLE/install.sh" --auto --protocol ss2022 --name acceptance-ss --server 127.0.0.1 --listen 127.0.0.1 --random-port "${INSTALL_EXTRA[@]}"
 cp /var/lib/qingnode/current/state.json "$TEMP_DIR/original.json"
 bash "$BUNDLE/install.sh" --reinstall "${INSTALL_EXTRA[@]}"
 cmp /var/lib/qingnode/current/state.json "$TEMP_DIR/original.json"
@@ -41,7 +41,7 @@ bash "$BUNDLE/install.sh" --reinstall "${INSTALL_EXTRA[@]}"
 if systemctl is-active --quiet qingnode.service; then echo '重复安装改变了停止状态。' >&2; exit 1; fi
 qingnode start
 qingnode service enable
-qingnode add --protocol reality --name acceptance-reality --server 127.0.0.1 --listen 127.0.0.1 --random-port --sni example.com --quiet
+qingnode add --auto --protocol reality --name acceptance-reality --server 127.0.0.1 --listen 127.0.0.1 --random-port --quiet
 qingnode export --id acceptance-ss --format sing-box --out "$TEMP_DIR/client.json"
 qingnode export --id acceptance-reality --format uri --out "$TEMP_DIR/client.uri"
 openssl rand -base64 32 > "$TEMP_DIR/pass"
@@ -58,6 +58,11 @@ qingnode info --id acceptance-ss
 qingnode uninstall --yes
 qingnode core install "${CORE_EXTRA[@]}"
 qingnode start
+qingnode check
+qingnode uninstall --purge --yes
+[[ ! -e /var/lib/qingnode && ! -e /usr/local/bin/qingnode && ! -e /etc/systemd/system/qingnode.service ]]
+# Exercise the default REALITY installer on a clean host too, including retained account reuse.
+bash "$BUNDLE/install.sh" --auto --server 127.0.0.1 --listen 127.0.0.1 "${INSTALL_EXTRA[@]}"
 qingnode check
 qingnode uninstall --purge --yes
 [[ ! -e /var/lib/qingnode && ! -e /usr/local/bin/qingnode && ! -e /etc/systemd/system/qingnode.service ]]

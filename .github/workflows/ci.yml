@@ -16,11 +16,22 @@ jobs:
       - run: shellcheck install.sh scripts/*.sh
       - run: go vet ./...
       - run: go test -race ./...
+      - name: Service-user permissions with restrictive umask
+        run: sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStorePermissionsUnderRestrictiveUmask$" -v -count=1'
       - run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
       - run: python3 scripts/fetch-test-core.py
       - name: Official core syntax and REALITY, SS2022, Hysteria2 TCP/UDP
         run: go test ./internal/node -run 'OfficialCore|OfficialArchive' -v -count=1
       - run: bash scripts/build.sh
+      - name: Real systemd lifecycle on disposable runner
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          bundle="$RUNNER_TEMP/qingnode-acceptance"
+          mkdir "$bundle"
+          version=$(sed -nE 's/^REPO=.* VERSION=v([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' install.sh)
+          tar -xzf "dist/qingnode-$version-linux-amd64.tar.gz" -C "$bundle"
+          sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
       - uses: actions/upload-artifact@v4
         with:
           name: qingnode-preview

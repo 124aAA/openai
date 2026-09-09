@@ -44,6 +44,7 @@ jobs:
           shellcheck install.sh scripts/*.sh
           go vet ./...
           go test -race -count=1 ./...
+          sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStorePermissionsUnderRestrictiveUmask$" -v -count=1'
           sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
           python3 scripts/fetch-test-core.py
       - name: Official core syntax and REALITY, SS2022, Hysteria2 TCP/UDP
@@ -53,6 +54,17 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.target.outputs.version }}
         run: bash scripts/build.sh "${RELEASE_VERSION#v}"
+      - name: Real systemd lifecycle on disposable runner
+        shell: bash
+        timeout-minutes: 10
+        if: steps.target.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          bundle="$RUNNER_TEMP/qingnode-acceptance"
+          mkdir "$bundle"
+          tar -xzf "dist/qingnode-${RELEASE_VERSION#v}-linux-amd64.tar.gz" -C "$bundle"
+          sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
       - name: Publish only after integration tests pass
         if: steps.target.outputs.publish == 'true'
         env:

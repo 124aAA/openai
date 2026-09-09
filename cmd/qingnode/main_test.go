@@ -82,6 +82,37 @@ func TestOfflineModeCannotTouchSystemState(t *testing.T) {
 	}
 }
 
+func TestExplicitPortsUseDecimalAndRejectInvalidValues(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	call := func(args ...string) error {
+		return run(append([]string{"--offline", "--root", root}, args...))
+	}
+	if e := call("init", "--protocol", "ss2022", "--server", "203.0.113.8", "--port", "0443", "--quiet"); e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(root, "current", "state.json")
+	s, e := node.ReadState(path)
+	if e != nil || s.Nodes[0].Port != 443 {
+		t.Fatal("leading-zero init port was not decimal", e)
+	}
+	if e = call("edit", "--id", "main", "--port", "08443"); e != nil {
+		t.Fatal(e)
+	}
+	s, e = node.ReadState(path)
+	if e != nil || s.Nodes[0].Port != 8443 {
+		t.Fatal("leading-zero edit port was not decimal", e)
+	}
+	for _, raw := range []string{"0", "-1", "65536", "0x1bb", "invalid"} {
+		if e = call("edit", "--id", "main", "--port", raw); e == nil {
+			t.Fatalf("invalid explicit port accepted: %s", raw)
+		}
+	}
+	s, e = node.ReadState(path)
+	if e != nil || s.Nodes[0].Port != 8443 {
+		t.Fatal("rejected edit changed port", e)
+	}
+}
+
 func TestParameterEditsAndIndependentRotations(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	call := func(args ...string) {

@@ -17,11 +17,19 @@ import (
 var secretPEM = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
 var secretURI = regexp.MustCompile(`(?i)(?:vless|hysteria2|hy2|ss|tuic)://[^\s"'<>]+`)
 var secretJSON = regexp.MustCompile(`(?i)("(?:private_key|password|uuid|key_pem|server_key)"\s*:\s*)"(?:\\.|[^"\\])*"`)
+var secretUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+// Match credential labels at line starts, retaining the label for diagnostics.
+// Horizontal whitespace and the value must not consume the next error line;
+// the entire value is secret, including both halves of an SS2022 password.
+var secretText = regexp.MustCompile(`(?im)^([ \t]*(?:(?:reality[ \t]+)?private[ _-]?key|server[ _-]?key|key_pem|password|uuid|服务密钥|密码|私钥)[ \t]*[:：=][ \t]*)[^\r\n]+`)
 
 func Redact(text string, states ...State) string {
 	text = secretPEM.ReplaceAllString(text, "[私钥已隐藏]")
 	text = secretURI.ReplaceAllString(text, "[节点链接已隐藏]")
 	text = secretJSON.ReplaceAllString(text, `${1}"[凭据已隐藏]"`)
+	text = secretUUID.ReplaceAllString(text, "[凭据已隐藏]")
+	text = secretText.ReplaceAllString(text, `${1}[凭据已隐藏]`)
 	for _, s := range states {
 		for _, n := range s.Nodes {
 			for _, u := range n.Users {

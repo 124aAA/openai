@@ -14,12 +14,17 @@ import (
 )
 
 func (a *app) add(cmd string, args []string) error {
+	return a.addWithProbes(cmd, args, defaultAutoProbes())
+}
+
+func (a *app) addWithProbes(cmd string, args []string, probes autoProbes) error {
 	f := fs(cmd)
+	auto := f.Bool("auto", false, "无交互发现公网地址、验证 REALITY 目标并避开默认端口冲突")
 	name := f.String("name", "main", "节点名称")
 	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2")
 	host := f.String("server", "", "客户端连接的公网 IP 或域名")
 	listen := f.String("listen", "", "监听 IP，默认按公网地址选择通配地址")
-	port := f.Int("port", 443, "监听端口")
+	port := portFlag(f, 443)
 	randomPort := f.Bool("random-port", false, "选择避开已有节点、监听和 SSH 的随机端口")
 	fingerprint := f.String("fingerprint", "chrome", "REALITY 客户端指纹")
 	sni := f.String("sni", "", "REALITY 目标域名 / Hysteria2 证书名称")
@@ -32,6 +37,9 @@ func (a *app) add(cmd string, args []string) error {
 	if e := parse(f, args); e != nil {
 		return e
 	}
+	if *auto && a.offline {
+		return errors.New("--auto 需要在线部署；离线生成请移除 --auto 并显式提供 --server 和协议参数")
+	}
 	created := ""
 	err := a.mutate(func(s *node.State) error {
 		if cmd == "init" && len(s.Nodes) > 0 {
@@ -39,6 +47,19 @@ func (a *app) add(cmd string, args []string) error {
 			return nil
 		}
 		var e error
+		if *auto {
+			if *protocol == "hysteria2" && (*sni == "" || (*email == "" && (*cert == "" || *key == ""))) {
+				return errors.New("Hysteria2 自动安装需要 --sni 证书域名，以及 --cert/--key 或 --acme-email；免证书安装可用 --protocol reality")
+			}
+			*host, *sni, *target, e = autoEndpoint(*protocol, *host, *sni, *target, probes)
+			if e != nil {
+				return e
+			}
+			fmt.Fprintln(os.Stderr, "[INFO] 客户端连接地址："+*host)
+			if *protocol == "reality" {
+				fmt.Fprintf(os.Stderr, "[INFO] REALITY 目标已通过 TLS 1.3 / HTTP2 验证：%s（SNI %s）\n", *target, *sni)
+			}
+		}
 		if *host == "" {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return errors.New("缺少 --server 公网 IP 或域名")
@@ -85,7 +106,13 @@ func (a *app) add(cmd string, args []string) error {
 		if e != nil {
 			return e
 		}
-		if *randomPort {
+		if *auto {
+			n.Port, e = autoPort(*s, n, flagSet(f, "port"), *randomPort, probes)
+			if e != nil {
+				return e
+			}
+			fmt.Fprintf(os.Stderr, "[INFO] 监听端口：%s\n", node.PortLabel(n))
+		} else if *randomPort {
 			if flagSet(f, "port") {
 				return errors.New("--port 与 --random-port 不能同时使用")
 			}
@@ -94,7 +121,7 @@ func (a *app) add(cmd string, args []string) error {
 				return e
 			}
 		}
-		if !a.offline && node.AvailablePort(n) != nil {
+		if !*auto && !a.offline && node.AvailablePort(n) != nil {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return fmt.Errorf("端口 %s 被占用；运行 qingnode ports 查看进程，或使用 --random-port", node.PortLabel(n))
 			}
@@ -191,7 +218,7 @@ func (a *app) edit(args []string) error {
 	name := f.String("name", "", "新名称")
 	host := f.String("server", "", "新公网 IP/域名")
 	listen := f.String("listen", "", "新监听 IP")
-	port := f.Int("port", 0, "新端口")
+	port := portFlag(f, 0)
 	randomPort := f.Bool("random-port", false, "选择随机端口")
 	fingerprint := f.String("fingerprint", "", "新 REALITY 客户端指纹")
 	sni := f.String("sni", "", "新 SNI")
