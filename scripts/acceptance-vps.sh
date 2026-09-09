@@ -23,7 +23,11 @@ cleanup() {
   rc=$?
   trap - EXIT
   rm -rf -- "$TEMP_DIR"
-  if ((rc)); then echo '验收失败：保留项目安装现场，请检查 qingnode diagnose；未自动删除节点。' >&2; fi
+  if ((rc)); then
+    echo '验收失败：保留项目安装现场，请检查 qingnode diagnose；未自动删除节点。' >&2
+    systemctl status qingnode.service --no-pager --full || true
+    journalctl -u qingnode.service -n 80 --no-pager || true
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
