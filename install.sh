@@ -9,8 +9,9 @@ UNIT=/etc/systemd/system/qingnode.service
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.2.4 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.2.5 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 INIT_ARGS=()
+WIZARD_PROTOCOL=''
 LIB=/usr/local/lib/qingnode
 ACCOUNT_RECORD=/var/backups/qingnode/.qingnode-account
 step() { printf '[%s/8] %s\n' "$1" "$2"; }
@@ -29,11 +30,12 @@ while (($#)); do
     --reinstall) REINSTALL=1; shift;;
     install) REINSTALL=1; shift;;
     --help)
-      echo '一键安装：sudo bash install.sh --auto（自动探测地址、验证 REALITY 目标并选择可用端口）'
+      echo '一键安装：sudo bash install.sh（先选择协议，再搭建并显示连接信息）'
+      echo '自动安装：sudo bash install.sh --auto（跳过选择，自动搭建 REALITY）'
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.4 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.5 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
@@ -41,6 +43,21 @@ while (($#)); do
 done
 [[ $EUID == 0 ]] || { echo '请使用 sudo 或 root 运行。' >&2; exit 1; }
 if ((HAS_ARGS==0 && REINSTALL==0)) && [[ -x $BIN && -f $ROOT/.qingnode-owner && $(cat "$ROOT/.qingnode-owner") == "$OWNER" ]]; then exec "$BIN"; fi
+if ((${#INIT_ARGS[@]}==0)) && [[ ! -e $ROOT/current ]]; then
+  [[ -t 0 ]] || { echo '首次安装需要交互终端选择协议；无人值守请加 --auto，或提供完整初始化参数。' >&2; exit 2; }
+  printf '\nQingNode 青节点 — 请选择要搭建的节点\n1. VLESS REALITY / Vision（无需自己的域名，自动筛选伪装目标）\n2. Shadowsocks 2022（无需域名，客户端需支持 SS2022）\n3. Hysteria2（UDP，需要域名及证书）\n0. 退出，不安装\n'
+  while :; do
+    printf '选择 [1/2/3/0]：'
+    if ! read -r choice; then echo '已取消，未开始安装。'; exit 0; fi
+    case "$choice" in
+      1) INIT_ARGS=(--auto --protocol reality); break;;
+      2) INIT_ARGS=(--auto --protocol ss2022); break;;
+      3) WIZARD_PROTOCOL=hysteria2; break;;
+      0) echo '已取消，未开始安装。'; exit 0;;
+      *) echo '请输入 1、2、3 或 0；尚未开始安装。';;
+    esac
+  done
+fi
 step 1 "检测系统、权限与架构"
 [[ $(ps -p 1 -o comm=) == systemd ]] || { echo '需要以 systemd 启动的 Debian/Ubuntu 主机。' >&2; exit 1; }
 [[ -r /etc/os-release ]] || exit 1
@@ -244,15 +261,15 @@ if [[ -e $ROOT/current ]]; then
 else
   if [[ -n $CORE_ARCHIVE ]]; then logged "$BIN" core install --archive "$CORE_ARCHIVE"; else logged "$BIN" core install; fi
   step 7 "创建首个节点并校验配置"
-  if ((${#INIT_ARGS[@]}==0)) && [[ -t 0 ]]; then
-    "$BIN" wizard 2> >(tee -a "$LOG" >&2)
+  if [[ -n $WIZARD_PROTOCOL ]]; then
+    "$BIN" wizard --protocol "$WIZARD_PROTOCOL" --quiet 2> >(tee -a "$LOG" >&2)
   else
     "$BIN" init "${INIT_ARGS[@]}" --quiet 2> >(tee -a "$LOG" >&2)
   fi
   logged systemctl enable qingnode.service
 fi
 changed=0
-step 8 "安装完成，输出节点信息"
+step 8 "安装完成，以下为客户端连接信息"
 "$BIN" info --show-secrets
 echo '安装完成。运行 qingnode 打开菜单；对应节点的链接和导出命令见上方。'
 echo '请在已启用的防火墙和云安全组放行上方实际监听端口及协议，再用客户端验证；故障时运行 qingnode diagnose。'

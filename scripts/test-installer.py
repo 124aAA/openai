@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pty
 import subprocess
 import tarfile
 import tempfile
@@ -71,11 +72,11 @@ elif name=='systemctl':
 elif name=='apt-get': fail('apt')
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
- prefix='https://github.com/124aAA/openai/releases/download/v0.2.4/'
+ prefix='https://github.com/124aAA/openai/releases/download/v0.2.5/'
  if len(urls)!=1 or not urls[0].startswith(prefix) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset=urls[0][len(prefix):]
- if asset not in ('qingnode-0.2.4-linux-amd64.tar.gz','SHA256SUMS'):
+ if asset not in ('qingnode-0.2.5-linux-amd64.tar.gz','SHA256SUMS'):
   raise RuntimeError('unexpected remote asset '+asset)
  dest=pathlib.Path(a[a.index('-o')+1])
  if not str(dest).startswith(str(r)+'/'):
@@ -107,7 +108,7 @@ elif name=='qingnode':
   direct=a and a[0] in ('redact-log','validate-state','version','service')
   argv=[os.environ['QN_REAL_BIN']]+([] if direct else ['--offline','--root',str(root)])+a
   rc=subprocess.call(argv)
-  if rc==0 and a and a[0]=='init': rc=subprocess.call(['systemctl','restart','qingnode.service'])
+  if rc==0 and a and a[0] in ('init','wizard'): rc=subprocess.call(['systemctl','restart','qingnode.service'])
   sys.exit(rc)
 else: raise RuntimeError('unknown mocked command '+name)
 '''
@@ -171,7 +172,7 @@ class Fixture:
         release.mkdir()
         if corrupt == 'inner':
             self.manager.write_text(MOCK+'\n# corrupted after inner checksum\n')
-        archive = release/'qingnode-0.2.4-linux-amd64.tar.gz'
+        archive = release/'qingnode-0.2.5-linux-amd64.tar.gz'
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
@@ -182,7 +183,7 @@ class Fixture:
         if corrupt == 'outer':
             archive.write_bytes(b'corrupted after outer checksum')
 
-    def run(self, *args, fault='', dns=False, ok=True, online=False, curl_code=0):
+    def run(self, *args, fault='', dns=False, ok=True, online=False, curl_code=0, tty_input=None):
         env = dict(self.env, QN_FAULT=fault)
         if dns:
             env['QN_DNS_FAIL'] = '1'
@@ -193,12 +194,31 @@ class Fixture:
             # Preserve the actual /dev/fd entry semantics used by bash <(curl ...).
             command = ['bash', '-c', 'exec bash <(cat "$1") "${@:2}"',
                        'qingnode-online-test', str(self.installer), *args]
-        p = subprocess.run(command, env=env,
-                           stdin=subprocess.DEVNULL, text=True, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, timeout=35)
+        if tty_input is None:
+            p = subprocess.run(command, env=env,
+                               stdin=subprocess.DEVNULL, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=35)
+            output = p.stdout
+        else:
+            # Bash/Go see a real terminal while output remains bounded/captured.
+            # Ctrl-D on the empty canonical input line models terminal EOF.
+            master, slave = pty.openpty()
+            try:
+                p = subprocess.Popen(command, env=env, stdin=slave, text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                os.close(slave); slave = -1
+                os.write(master, tty_input.encode())
+                try:
+                    output, _ = p.communicate(timeout=35)
+                except subprocess.TimeoutExpired:
+                    p.kill(); output, _ = p.communicate()
+                    raise AssertionError('interactive installer did not finish:\n'+output)
+            finally:
+                os.close(master)
+                if slave >= 0: os.close(slave)
         if (p.returncode == 0) != ok:
-            raise AssertionError(f'installer returned {p.returncode}:\n{p.stdout}')
-        return p.stdout
+            raise AssertionError(f'installer returned {p.returncode}:\n{output}')
+        return output
 
     def install(self, **kw):
         return self.run('--server', '203.0.113.7', '--sni', 'example.com', **kw)
@@ -223,14 +243,85 @@ class InstallerTests(unittest.TestCase):
     def fixture(self, *args):
         return Fixture(self.tmp.name, *args)
 
+    def assert_untouched(self, f):
+        self.assertEqual(dict(active=False, enabled=False), f.host())
+        for path in (f.state, f.bin, f.unit, f.lib, f.root/'commands.log'):
+            self.assertFalse(path.exists(), str(path))
+        self.assertEqual([], list((f.root/'tmp').iterdir()))
+        self.assertEqual([], list((f.root/'system/var/log').iterdir()))
+
+    def test_first_screen_cancel_and_eof_precede_every_host_operation(self):
+        for answer, args in [('0\n', ()), ('\x04', ()),
+                             ('\n9\n0\n', ('--reinstall', '--repo', '124aAA/openai',
+                                           '--version', 'v0.2.5', '--core-archive', '/unused.tar.gz'))]:
+            with self.subTest(answer=repr(answer), args=args):
+                f = self.fixture(); f.remote_release()
+                out = f.run(*args, online=True, tty_input=answer)
+                self.assertNotIn('[1/8]', out)
+                self.assertNotIn('安装完成', out)
+                self.assert_untouched(f)
+
+    def test_fresh_nonterminal_entry_needs_explicit_intent_before_mutation(self):
+        for args in [(), ('--reinstall',), ('--repo', '124aAA/openai'),
+                     ('--version', 'v0.2.5'), ('--core-archive', '/unused.tar.gz')]:
+            with self.subTest(args=args):
+                f = self.fixture(); f.remote_release()
+                out = f.run(*args, online=True, ok=False)
+                self.assertIn('交互', out)
+                self.assertIn('--auto', out)
+                self.assert_untouched(f)
+
+    def test_first_screen_protocol_selection_and_invalid_input_retry(self):
+        for answer, protocol, scheme, args in [
+                ('1\n', 'reality', 'vless://', ()),
+                ('\n9\n2\n', 'ss2022', 'ss://',
+                 ('--reinstall', '--repo', '124aAA/openai', '--version', 'v0.2.5'))]:
+            with self.subTest(protocol=protocol):
+                f = self.fixture(); f.remote_release()
+                out = f.run(*args, online=True, tty_input=answer)
+                n = json.loads(f.data())['nodes'][0]
+                self.assertEqual(protocol, n['protocol'])
+                calls = (f.root/'commands.log').read_text().splitlines()
+                init = [c.split() for c in calls if c.startswith('qingnode init ')]
+                self.assertEqual(1, len(init))
+                self.assertIn('--auto', init[0])
+                self.assertEqual(protocol, init[0][init[0].index('--protocol')+1])
+                self.assertNotIn('qingnode wizard', '\n'.join(calls))
+                self.assertTrue(f.host()['active'])
+                self.assertTrue(f.host()['enabled'])
+                self.assertEqual(1, out.count(scheme))
+                self.assertGreater(out.index('节点：'), out.index('[8/8]'))
+                self.assertIn(f'qingnode export --id {n["id"]} --format uri', out)
+
+    def test_hysteria_selection_reaches_quiet_wizard_with_selected_protocol(self):
+        f = self.fixture()
+        out = f.run(tty_input='3\nHY2-test\n203.0.113.7\n8443\nexample.com\nacme\nadmin@example.com\n')
+        n = json.loads(f.data())['nodes'][0]
+        self.assertEqual(('hysteria2', 'HY2-test', 8443), (n['protocol'], n['name'], n['port']))
+        self.assertEqual('acme', n['certificate']['mode'])
+        self.assertEqual('example.com', n['certificate']['server_name'])
+        calls = (f.root/'commands.log').read_text().splitlines()
+        wizard = [c.split() for c in calls if c.startswith('qingnode wizard ')]
+        self.assertEqual(1, len(wizard))
+        self.assertEqual('hysteria2', wizard[0][wizard[0].index('--protocol')+1])
+        self.assertIn('--quiet', wizard[0])
+        self.assertTrue(f.host()['active'])
+        self.assertTrue(f.host()['enabled'])
+        self.assertEqual(1, out.count('hysteria2://'))
+        self.assertGreater(out.index('节点：'), out.index('[8/8]'))
+
     def test_online_entry_fetches_bound_release_and_repeated_entry_opens_menu(self):
         f = self.fixture(); f.remote_release()
         self.assertIn('[8/8]', f.install(online=True))
         before = f.data()
         calls = (f.root/'commands.log').read_text()
         self.assertEqual(2, calls.count('\ncurl '))
-        self.assertIn('124aAA/openai/releases/download/v0.2.4/', calls)
+        self.assertIn('124aAA/openai/releases/download/v0.2.5/', calls)
         self.assertIn('菜单需要交互终端', f.run(online=True, ok=False))
+        self.assertEqual(before, f.data())
+        self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))
+        out = f.run(online=True, tty_input='0\n')
+        self.assertIn('节点管理', out)
         self.assertEqual(before, f.data())
         self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))
 
@@ -294,7 +385,7 @@ class InstallerTests(unittest.TestCase):
         f = self.fixture(); f.remote_release()
         # The mock intentionally has no old release; reaching this exact URL
         # proves --version was preserved, before any installation could happen.
-        f.run('--repo', '124aAA/openai', '--version', 'v0.1.0', online=True, ok=False)
+        f.run('--auto', '--repo', '124aAA/openai', '--version', 'v0.1.0', online=True, ok=False)
         calls = (f.root/'commands.log').read_text()
         self.assertIn('/releases/download/v0.1.0/qingnode-0.1.0-linux-amd64.tar.gz', calls)
         self.assertFalse(f.state.exists())
@@ -306,7 +397,7 @@ class InstallerTests(unittest.TestCase):
                               (('--version', 'v1.2.3; exit 0'), '管理器版本号无效')]:
             with self.subTest(args=args):
                 f = self.fixture(); f.remote_release()
-                self.assertIn(message, f.run(*args, online=True, ok=False))
+                self.assertIn(message, f.run('--auto', *args, online=True, ok=False))
                 self.assertNotIn('\ncurl ', (f.root/'commands.log').read_text())
                 self.assertFalse(f.state.exists())
 

@@ -35,7 +35,7 @@ func (a *app) menu() error {
 		a.message("ERROR", node.Redact(e.Error()))
 	} else if empty {
 		a.message("INFO", "尚无节点，进入首次安装向导")
-		if e := a.installWizard(true); e != nil {
+		if e := a.installWizard(true, "", false); e != nil {
 			a.message("WARN", e.Error())
 		}
 	}
@@ -60,6 +60,8 @@ func (a *app) menu() error {
 			e = a.maintenanceMenu()
 		case "5":
 			e = a.systemMenu()
+		case "6":
+			e = a.installWizard(false, "", false)
 		default:
 			a.message("WARN", "请选择菜单中的数字")
 		}
@@ -112,12 +114,54 @@ func (a *app) selectUser(n node.Node) (string, error) {
 	}
 	return n.Users[i-1].ID, nil
 }
-func (a *app) installWizard(first bool) error {
-	protocol, e := a.prompt("协议 "+strings.Join(node.Protocols(), " / "), "reality")
-	if e != nil {
+func (a *app) selectProtocol() (string, error) {
+	fmt.Fprintln(os.Stderr, "\n请选择要搭建的节点\n1. VLESS REALITY / Vision（无需自己的域名）\n2. Shadowsocks 2022（客户端需支持 SS2022）\n3. Hysteria2（UDP，需要域名及证书）\n0. 返回，不创建")
+	for {
+		choice, e := a.prompt("选择 1/2/3/0", "")
+		if e != nil {
+			return "", e
+		}
+		switch choice {
+		case "1", "reality":
+			return "reality", nil
+		case "2", "ss2022":
+			return "ss2022", nil
+		case "3", "hysteria2":
+			return "hysteria2", nil
+		case "0":
+			return "", nil
+		default:
+			a.message("WARN", "请输入 1、2、3 或 0；尚未创建节点")
+		}
+	}
+}
+func (a *app) installWizard(first bool, protocol string, quiet bool) error {
+	if protocol == "" {
+		var e error
+		protocol, e = a.selectProtocol()
+		if e != nil || protocol == "" {
+			return e
+		}
+	}
+	if _, ok := node.Protocol(protocol); !ok {
+		return errors.New("不支持该协议；可用 reality、ss2022 或 hysteria2")
+	}
+	defaultName := "main"
+	if e := a.store.Inspect(func() error {
+		s, e := a.store.Load()
+		if e != nil {
+			return e
+		}
+		for i := 2; ; i++ {
+			if _, e := s.Find(defaultName); e != nil {
+				return nil
+			}
+			defaultName = fmt.Sprintf("main-%d", i)
+		}
+	}); e != nil {
 		return e
 	}
-	name, e := a.prompt("节点名称", "main")
+	name, e := a.prompt("节点名称", defaultName)
 	if e != nil {
 		return e
 	}
@@ -133,7 +177,11 @@ func (a *app) installWizard(first bool) error {
 	if e != nil {
 		return e
 	}
-	port, e := a.prompt("端口（r 随机）", "443")
+	defaultPort := "443"
+	if !a.offline {
+		defaultPort = "auto"
+	}
+	port, e := a.prompt("端口（auto 优先443并避开冲突 / r 随机 / 指定数字）", defaultPort)
 	if e != nil {
 		return e
 	}
@@ -142,17 +190,32 @@ func (a *app) installWizard(first bool) error {
 		cmd = "init"
 	}
 	args := []string{cmd, "--name", name, "--protocol", protocol, "--server", host}
+	if quiet {
+		args = append(args, "--quiet")
+	}
+	if !a.offline {
+		args = append(args, "--auto")
+	}
 	if port == "r" {
 		args = append(args, "--random-port")
-	} else {
+	} else if port != "auto" || a.offline {
 		args = append(args, "--port", port)
 	}
 	if protocol != "ss2022" {
-		sni, e := a.prompt("REALITY 目标域名 / 证书域名", "")
+		label, def := "Hysteria2 证书域名（须指向本机）", ""
+		if protocol == "reality" {
+			label = "REALITY 伪装目标域名"
+			if !a.offline {
+				label, def = label+"（auto 自动筛选并测速）", "auto"
+			}
+		}
+		sni, e := a.prompt(label, def)
 		if e != nil {
 			return e
 		}
-		args = append(args, "--sni", sni)
+		if protocol != "reality" || sni != "auto" || a.offline {
+			args = append(args, "--sni", sni)
+		}
 	}
 	if protocol == "hysteria2" {
 		mode, e := a.prompt("证书方式：acme 自动签发 / pem 导入", "acme")
@@ -200,7 +263,7 @@ func (a *app) nodeMenu() error {
 			continue
 		}
 		if choice == "2" {
-			if e = a.installWizard(false); e != nil {
+			if e = a.installWizard(false, "", false); e != nil {
 				a.message("ERROR", e.Error())
 			}
 			continue

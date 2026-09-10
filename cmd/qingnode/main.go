@@ -16,7 +16,7 @@ import (
 	"qingnode/internal/node"
 )
 
-var version = "0.2.4"
+var version = "0.2.5"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -245,10 +245,13 @@ func (a *app) command(args []string) error {
 		cmd = "init"
 	}
 	if cmd == "wizard" {
-		if len(rest) != 0 {
-			return errors.New("wizard 不接受参数")
+		f := fs(cmd)
+		protocol := f.String("protocol", "", "已选择的协议；留空显示选择菜单")
+		quiet := f.Bool("quiet", false, "由安装器统一显示完成结果")
+		if e := parse(f, rest); e != nil {
+			return e
 		}
-		return a.installWizard(true)
+		return a.installWizard(true, *protocol, *quiet)
 	}
 	if cmd == "update" {
 		return a.core(append([]string{"update"}, rest...))

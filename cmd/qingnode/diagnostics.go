@@ -134,7 +134,10 @@ func (a *app) info(args []string) error {
 		}
 		for _, n := range nodes {
 			fmt.Printf("\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s:%d (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, n.Listen, n.Port, strings.Join(node.Networks(n), "+"), n.Enabled)
-			fmt.Printf("导出链接：qingnode export --id %s --format uri\n", n.ID)
+			fmt.Printf("客户端端口：%d\n传输协议：%s\n", n.Port, strings.Join(node.Networks(n), "+"))
+			if c := n.Certificate; c != nil {
+				fmt.Printf("TLS：启用，校验证书\nSNI：%s\n证书方式：%s\n", c.ServerName, c.Mode)
+			}
 			if r := n.Reality; r != nil {
 				fmt.Printf("Reality Public Key：%s\nShort ID：%s\nSNI：%s\n握手目标：%s\nFlow：xtls-rprx-vision\nFingerprint：%s\n", r.PublicKey, r.ShortID, r.ServerName, r.Target, node.Fingerprint(r))
 				if *private {
@@ -144,6 +147,8 @@ func (a *app) info(args []string) error {
 			fmt.Printf("创建时间：%s\n更新时间：%s\n", n.CreatedAt, n.UpdatedAt)
 			for _, u := range n.Users {
 				fmt.Printf("凭据：%s (%s)\n", u.Name, u.ID)
+				fmt.Printf("导出链接：qingnode export --id %s --format uri --user %s\n", n.ID, u.ID)
+				fmt.Printf("导出配置：qingnode export --id %s --format sing-box --user %s --out client.json\n", n.ID, u.ID)
 				if *secrets {
 					if u.UUID != "" {
 						fmt.Printf("UUID：%s\n", u.UUID)
@@ -154,7 +159,7 @@ func (a *app) info(args []string) error {
 							fmt.Printf("Password：%s\n", u.Password)
 						}
 					}
-					fmt.Println(node.URI(n, u))
+					fmt.Printf("分享链接：\n%s\n", node.URI(n, u))
 				}
 			}
 		}
