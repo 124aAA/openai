@@ -267,6 +267,11 @@ func (a *app) doctor(s node.State, loadErr error) error {
 		a.recentLogs(s)
 	}
 	fmt.Fprintf(os.Stderr, "诊断结果：%d 项错误，%d 项警告。公网客户端握手与 UDP 传输需另行实测。\n", errorsFound, warnings)
+	if e := a.noteHistory(func(h *dashboardHistory) {
+		h.Diagnostic = &checkRecord{At: time.Now().UTC(), Fingerprint: stateFingerprint(s), Errors: errorsFound, Warnings: warnings, Offline: a.offline}
+	}); e != nil {
+		a.message("WARN", "检查已完成，但首页记录保存失败："+node.Redact(e.Error()))
+	}
 	if errorsFound > 0 {
 		return fmt.Errorf("发现 %d 项错误，请按上方建议处理", errorsFound)
 	}

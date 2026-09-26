@@ -1,4 +1,4 @@
-# QingNode 0.2.0 架构
+# QingNode 0.2.6 架构
 
 ## 保留的主干
 
@@ -10,6 +10,7 @@ Bash 引导 → Go 管理器 → 统一 State 与配置代 → 官方 sing-box �
 | cmd/qingnode/main.go | 参数分派、全局选项、核心安装/更新 |
 | nodes.go / menu.go | 节点与凭据生命周期、分级交互 |
 | diagnostics.go / operations.go | 状态、诊断、日志、服务及卸载 |
+| dashboard*.go / internal/node/overview.go | 只读本机总览、独立观测历史、显式更新查询与公网实测登记 |
 | backup.go / system.go | 快照 CLI、网络、防火墙、管理器更新 |
 | internal/node/model.go | schema=1 State、稳定 ID、结构校验 |
 | protocol_*.go / protocols.go | 各协议认证、校验、配置、URI、客户端格式与网络类型 |
@@ -40,6 +41,7 @@ REALITY 以 X25519 私钥、公钥、short ID、SNI、握手目标和 fingerprin
 | generations/g-ID/parent | 上一代名称，root 600 |
 | current | 受控相对符号链接，只允许指向合法配置代 |
 | transaction.json / uninstall.json | 持久事务记录，root 600 |
+| observations.json | 首页观测历史，root 600；不属于 State、配置代或备份 |
 | cores/版本/sing-box 与 .sha256 | 官方核心及本地完整性摘要 |
 | acme | 服务账户可写，750；不在快照中 |
 | backups | 加密快照，目录 700 / 文件 600 |
@@ -54,7 +56,15 @@ REALITY 以 X25519 私钥、公钥、short ID、SNI、握手目标和 fingerprin
 
 原状态和派生文件均未改变时不新建配置代、不换参数；只有派生文件损坏时可用保存的身份重建。失败候选未被事务引用则清理。提交前出错回退指针、UFW 和之前的运行/停止状态；若恢复也失败保留记录并报告。断电后下一次写操作恢复未提交事务。
 
-status、logs、doctor 使用 Inspect 互斥读取，不创建核心目录、不自动恢复或重启。状态损坏不会伪报数据库正常。严重损坏的数据库/历史代不能凭空恢复，拒绝猜测参数。
+status、logs、doctor、overview 使用 Inspect 读取节点状态，不创建核心目录、不自动恢复或重启；doctor 完成后在同一锁内另存自检历史。状态损坏不会伪报数据库正常。严重损坏的数据库/历史代不能凭空恢复，拒绝猜测参数。
+
+## 首页与观测历史
+
+首页只读 State、私有 observations.json、/proc 与本地文件系统；systemd 属性查询最多等待 650ms。服务状态与客户端公网结果分开渲染。资源缺失显示未知，证书从 PEM 解析，ACME 实际签发期限未知时不猜测。
+
+自检、成功备份、显式更新查询、管理员登记公网测试分别更新观测文件，在 Inspect 或已有操作锁内以 0600 原子写入，不改变配置代。读取拒绝符号链接、宽松权限、超限文件及未知字段。自检绑定完整 State 摘要；公网记录绑定节点、核心和 Firewall 模式，配置变化提示重验。历史不进入备份，不作为配置恢复依据，也不代表持续可用。
+
+check-updates 在释放管理锁后并行查询两个固定 GitHub Release API，再持锁合并结果。首页仅显示缓存；失败保留上次成功内容并标记最新失败，不会触发升级。
 
 ## 系统边界
 

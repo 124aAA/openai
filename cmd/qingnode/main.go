@@ -16,7 +16,7 @@ import (
 	"qingnode/internal/node"
 )
 
-var version = "0.2.5"
+var version = "0.2.6"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -146,6 +146,9 @@ func help() {
  update       更新官方核心；旧版本和配置代保留
  self-update  更新管理器，使用 --bundle 或 --repo/--version
  status       本机服务状态
+ overview     首页状态总览，只读本机，不联网
+ check-updates  主动联网查询管理器及适配核心更新，保存查询结果
+ public-check  登记已完成的客户端实测（管理员记录，非自动公网检测）
  doctor       检查配置、DNS、证书、监听和防火墙
  logs         查看脱敏后的最近日志
  backup       导出 AES-GCM 加密配置快照
@@ -235,6 +238,12 @@ func (a *app) command(args []string) error {
 		return nil
 	}
 	cmd, rest := args[0], args[1:]
+	if cmd == "overview" || cmd == "check-updates" {
+		if len(rest) != 0 { return errors.New("该命令不接受参数") }
+		if cmd == "overview" { return a.overview(os.Stdout) }
+		return a.checkUpdates()
+	}
+	if cmd == "public-check" { return a.publicCheck(rest) }
 	if cmd == "diagnose" {
 		cmd = "doctor"
 	}

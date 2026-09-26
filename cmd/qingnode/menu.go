@@ -30,16 +30,10 @@ func (a *app) menu() error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("菜单需要交互终端；自动化请使用 CLI 命令，例如 qingnode status")
 	}
-	var empty bool
-	if e := a.store.Inspect(func() error { s, e := a.store.Load(); empty = len(s.Nodes) == 0; return e }); e != nil {
-		a.message("ERROR", node.Redact(e.Error()))
-	} else if empty {
-		a.message("INFO", "尚无节点，进入首次安装向导")
-		if e := a.installWizard(true, "", false); e != nil {
+	for {
+		if e := a.overview(os.Stderr); e != nil {
 			a.message("WARN", e.Error())
 		}
-	}
-	for {
 		choice, e := a.menuChoice("main")
 		if errors.Is(e, io.EOF) {
 			return nil
@@ -62,6 +56,12 @@ func (a *app) menu() error {
 			e = a.systemMenu()
 		case "6":
 			e = a.installWizard(false, "", false)
+		case "7":
+			continue
+		case "8":
+			e = a.checkUpdates()
+		case "9":
+			e = a.command([]string{"diagnose"})
 		default:
 			a.message("WARN", "请选择菜单中的数字")
 		}
@@ -561,6 +561,8 @@ func (a *app) systemMenu() error {
 			a.executeMenu("ports")
 		case "5":
 			a.executeMenu("logs")
+		case "6":
+			e = a.publicCheckWizard()
 		case "3":
 			c, e := a.menuChoice("firewall")
 			if e != nil {

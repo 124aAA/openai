@@ -78,6 +78,7 @@ func (a *app) backup(cmd string, args []string) error {
 			if e = writeOutput(*file, b); e != nil {
 				return e
 			}
+			a.noteBackup(*file)
 			fmt.Println("加密备份：" + *file)
 			return nil
 		}
@@ -108,6 +109,7 @@ func (a *app) backup(cmd string, args []string) error {
 		if e = writeOutput(before, old); e != nil {
 			return e
 		}
+		a.noteBackup(before)
 		a.message("INFO", "当前配置已自动加密备份到："+before+"；口令与本次恢复使用的口令相同")
 		// Backed-up unit/config are evidence. Only typed State is restored; no executable unit from an archive is run.
 		if e = a.store.Apply(restored.State); e != nil {

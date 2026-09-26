@@ -9,7 +9,7 @@ UNIT=/etc/systemd/system/qingnode.service
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.2.5 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.2.6 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 INIT_ARGS=()
 WIZARD_PROTOCOL=''
 LIB=/usr/local/lib/qingnode
@@ -35,7 +35,7 @@ while (($#)); do
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.5 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.6 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;

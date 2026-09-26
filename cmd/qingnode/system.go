@@ -122,7 +122,7 @@ func (a *app) selfUpdate(args []string) error {
 	f := fs("self-update")
 	bundle := f.String("bundle", "", "已解压并核验来源的新版发行包目录")
 	repo := f.String("repo", "", "GitHub 仓库 owner/repo；默认 124aAA/openai")
-	v := f.String("version", "", "明确目标 tag，例如 v0.2.5")
+	v := f.String("version", "", "明确目标 tag，例如 v0.2.6")
 	if e := parse(f, args); e != nil {
 		return e
 	}
@@ -169,7 +169,9 @@ func (a *app) selfUpdate(args []string) error {
 	return nil
 }
 func (a *app) coreVersions() error {
-	return a.locked(func(s *node.State) error {
+	return a.store.Inspect(func() error {
+		s, e := a.store.Load()
+		if e != nil { return e }
 		fmt.Println("当前版本：" + s.CoreVersion)
 		r, e := node.LatestStable("SagerNet/sing-box")
 		if e != nil {
