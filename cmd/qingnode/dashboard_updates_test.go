@@ -1,7 +1,9 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -41,13 +43,61 @@ func TestDashboardUpdateSelection(t *testing.T) {
 	}
 }
 
+func TestDashboardUpdateLargeCompressedCoreResponse(t *testing.T) {
+	body := `[{"tag_name":"v1.15.0","body":"` + strings.Repeat("x", 3<<20) + `"},{"tag_name":"v1.14.12"}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		compressed := gzip.NewWriter(w)
+		_, _ = io.WriteString(compressed, body)
+		_ = compressed.Close()
+	}))
+	defer srv.Close()
+	r, e := fetchDashboardUpdates(srv.Client(), srv.URL, "test/repo", false)
+	if e != nil || r.Latest != "1.15.0" || r.Compatible != "1.14.12" {
+		t.Fatalf("large core response: %+v, %v", r, e)
+	}
+	if _, e = fetchDashboardUpdates(srv.Client(), srv.URL, "test/repo", true); e == nil || !strings.Contains(e.Error(), "超过 2 MiB") {
+		t.Fatalf("manager accepted oversized decompressed response: %v", e)
+	}
+}
+
+func TestDashboardUpdateResponseSizeLimits(t *testing.T) {
+	prefix := `[{"tag_name":"v1.14.12","assets":[{"name":"qingnode-1.14.12-linux-` + runtime.GOARCH + `.tar.gz"},{"name":"SHA256SUMS"}]}]`
+	padding := strings.Repeat(" ", 32<<10)
+	for _, tc := range []struct {
+		name, want string
+		manager    bool
+		limit      int
+	}{{"manager", "超过 2 MiB", true, 2 << 20}, {"core", "超过 64 MiB", false, 64 << 20}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, e := io.WriteString(w, prefix); e != nil {
+					return
+				}
+				// Valid JSON with trailing whitespace, streamed without Content-Length.
+				for remaining := tc.limit + 1 - len(prefix); remaining > 0; {
+					n := min(remaining, len(padding))
+					if _, e := io.WriteString(w, padding[:n]); e != nil {
+						return
+					}
+					remaining -= n
+				}
+			}))
+			defer srv.Close()
+			if _, e := fetchDashboardUpdates(srv.Client(), srv.URL, "test/repo", tc.manager); e == nil || !strings.Contains(e.Error(), tc.want) {
+				t.Fatalf("oversized response was not rejected at the expected bound: %v", e)
+			}
+		})
+	}
+}
+
 func TestDashboardUpdateFailuresAndLimits(t *testing.T) {
-	for _, body := range []string{"[]", "null", "{}", "[]{}", strings.Repeat(" ", (2<<20)+1)} {
+	for _, body := range []string{"[]", "null", "{}", "[]{}"} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
 		_, e := fetchDashboardUpdates(srv.Client(), srv.URL, "test/repo", false)
 		srv.Close()
 		if e == nil {
-			t.Fatal("accepted empty, malformed or oversized response")
+			t.Fatal("accepted empty or malformed response")
 		}
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) }))

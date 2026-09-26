@@ -72,11 +72,11 @@ elif name=='systemctl':
 elif name=='apt-get': fail('apt')
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
- prefix='https://github.com/124aAA/openai/releases/download/v0.2.6/'
+ prefix='https://github.com/124aAA/openai/releases/download/v0.2.7/'
  if len(urls)!=1 or not urls[0].startswith(prefix) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset=urls[0][len(prefix):]
- if asset not in ('qingnode-0.2.6-linux-amd64.tar.gz','SHA256SUMS'):
+ if asset not in ('qingnode-0.2.7-linux-amd64.tar.gz','SHA256SUMS'):
   raise RuntimeError('unexpected remote asset '+asset)
  dest=pathlib.Path(a[a.index('-o')+1])
  if not str(dest).startswith(str(r)+'/'):
@@ -172,7 +172,7 @@ class Fixture:
         release.mkdir()
         if corrupt == 'inner':
             self.manager.write_text(MOCK+'\n# corrupted after inner checksum\n')
-        archive = release/'qingnode-0.2.6-linux-amd64.tar.gz'
+        archive = release/'qingnode-0.2.7-linux-amd64.tar.gz'
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
@@ -253,7 +253,7 @@ class InstallerTests(unittest.TestCase):
     def test_first_screen_cancel_and_eof_precede_every_host_operation(self):
         for answer, args in [('0\n', ()), ('\x04', ()),
                              ('\n9\n0\n', ('--reinstall', '--repo', '124aAA/openai',
-                                           '--version', 'v0.2.6', '--core-archive', '/unused.tar.gz'))]:
+                                           '--version', 'v0.2.7', '--core-archive', '/unused.tar.gz'))]:
             with self.subTest(answer=repr(answer), args=args):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, tty_input=answer)
@@ -263,7 +263,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_fresh_nonterminal_entry_needs_explicit_intent_before_mutation(self):
         for args in [(), ('--reinstall',), ('--repo', '124aAA/openai'),
-                     ('--version', 'v0.2.6'), ('--core-archive', '/unused.tar.gz')]:
+                     ('--version', 'v0.2.7'), ('--core-archive', '/unused.tar.gz')]:
             with self.subTest(args=args):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, ok=False)
@@ -275,7 +275,7 @@ class InstallerTests(unittest.TestCase):
         for answer, protocol, scheme, args in [
                 ('1\n', 'reality', 'vless://', ()),
                 ('\n9\n2\n', 'ss2022', 'ss://',
-                 ('--reinstall', '--repo', '124aAA/openai', '--version', 'v0.2.6'))]:
+                 ('--reinstall', '--repo', '124aAA/openai', '--version', 'v0.2.7'))]:
             with self.subTest(protocol=protocol):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, tty_input=answer)
@@ -316,7 +316,7 @@ class InstallerTests(unittest.TestCase):
         before = f.data()
         calls = (f.root/'commands.log').read_text()
         self.assertEqual(2, calls.count('\ncurl '))
-        self.assertIn('124aAA/openai/releases/download/v0.2.6/', calls)
+        self.assertIn('124aAA/openai/releases/download/v0.2.7/', calls)
         self.assertIn('菜单需要交互终端', f.run(online=True, ok=False))
         self.assertEqual(before, f.data())
         self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))

@@ -16,7 +16,7 @@ import (
 	"qingnode/internal/node"
 )
 
-var version = "0.2.6"
+var version = "0.2.7"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"

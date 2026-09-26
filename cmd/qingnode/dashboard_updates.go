@@ -43,9 +43,14 @@ func fetchDashboardUpdates(client *http.Client, base, repo string, manager bool)
 	if resp.StatusCode != http.StatusOK {
 		return record, fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
 	}
-	b, e := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
-	if e != nil || len(b) > 2<<20 {
-		return record, errors.New("Release 响应读取失败或超过 2 MiB")
+	limit := 2 << 20
+	if !manager {
+		// Core releases carry many platform assets; 100 releases exceed 2 MiB.
+		limit = 64 << 20
+	}
+	b, e := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if e != nil || len(b) > limit {
+		return record, fmt.Errorf("Release 响应读取失败或超过 %d MiB", limit>>20)
 	}
 	var releases []node.Release
 	if e = json.Unmarshal(b, &releases); e != nil {
