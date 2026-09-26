@@ -171,7 +171,9 @@ func (a *app) selfUpdate(args []string) error {
 func (a *app) coreVersions() error {
 	return a.store.Inspect(func() error {
 		s, e := a.store.Load()
-		if e != nil { return e }
+		if e != nil {
+			return e
+		}
 		fmt.Println("当前版本：" + s.CoreVersion)
 		r, e := node.LatestStable("SagerNet/sing-box")
 		if e != nil {

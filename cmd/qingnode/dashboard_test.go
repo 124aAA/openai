@@ -108,6 +108,18 @@ func TestDashboardHomepageReadOnlyWithPendingRecovery(t *testing.T) {
 	if e := a.overview(&out); e != nil {
 		t.Fatal(e)
 	}
+	bin := t.TempDir()
+	if e := os.WriteFile(filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\n[ \"$1\" = show ] || exit 1\nprintf 'ActiveState=active\\nSubState=running\\nUnitFileState=enabled\\nNRestarts=0\\n'\n"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	t.Setenv("PATH", bin)
+	a.offline = false
+	if e := a.overview(&out); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(out.String(), "服务：运行中") {
+		t.Fatal("installed homepage did not query local service")
+	}
 	for _, p := range paths {
 		b, e := os.ReadFile(p)
 		if e != nil || !bytes.Equal(b, before[p]) {

@@ -16,6 +16,8 @@
 <!-- V026_RESULTS -->
 2026-09-26：Go 1.27.1 的 Linux amd64/arm64 交叉构建、命令包测试编译、Bash 语法、Python 语法、差异检查和范围检查已通过。新增测试覆盖观测记录权限/格式、配置与时间失效、部分协议验证、无网络首页与中断事务保持、证书与服务状态。Linux 实际执行及发布门槛以本提交 Actions 结果为准。
 
+[v0.2.6 候选 CI](https://github.com/124aAA/openai/actions/runs/36205497827) 已通过 ShellCheck、Go vet/race、root 降权权限、26 组安装器测试、官方核心 REALITY/SS2022/Hysteria2 的 TCP/UDP、双架构构建，以及一次性 Ubuntu runner 上的真实 systemd 生命周期验收。发布流程仍会在最终提交重跑这些门槛。ARM64 目前为构建验证，不能视为 ARM 主机运行验收。
+
 本轮用户 VPS 部署及公网复验暂未执行：SSH 主机密钥与上次固定记录不一致，正在等待用户通过服务商控制台确认服务器身份。未绕过密钥检查，也未对该 VPS 写入或重启。历史版本验收不计为 v0.2.6 已通过。
 <!-- /V026_RESULTS -->
 

@@ -239,11 +239,17 @@ func (a *app) command(args []string) error {
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "overview" || cmd == "check-updates" {
-		if len(rest) != 0 { return errors.New("该命令不接受参数") }
-		if cmd == "overview" { return a.overview(os.Stdout) }
+		if len(rest) != 0 {
+			return errors.New("该命令不接受参数")
+		}
+		if cmd == "overview" {
+			return a.overview(os.Stdout)
+		}
 		return a.checkUpdates()
 	}
-	if cmd == "public-check" { return a.publicCheck(rest) }
+	if cmd == "public-check" {
+		return a.publicCheck(rest)
+	}
 	if cmd == "diagnose" {
 		cmd = "doctor"
 	}
