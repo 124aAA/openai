@@ -14,6 +14,7 @@ import (
 )
 
 const OwnerMarker = "QingNode managed directory v1\n"
+const maxStateBytes = 8 << 20
 
 type Backend interface {
 	Check(State, string) error
@@ -85,7 +86,14 @@ func ReadState(p string) (State, error) {
 		return s, e
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 8<<20))
+	b, e := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
+	if e != nil {
+		return s, e
+	}
+	if len(b) > maxStateBytes {
+		return s, errors.New("状态文件超过 8 MiB 上限")
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if e = d.Decode(&s); e != nil {
 		return s, e
@@ -297,6 +305,9 @@ func (s *Store) Apply(st State) error {
 		n.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	b, _ = json.Marshal(st)
+	if len(b) > maxStateBytes {
+		return errors.New("状态超过 8 MiB 上限，原配置保持有效")
+	}
 	g := "generations/g-" + Token(16)
 	dir := filepath.Join(s.Root, g)
 	if e = os.Mkdir(dir, 0750); e != nil {
