@@ -427,7 +427,7 @@ func (a *app) choosePort(s node.State, n node.Node) (int, error) {
 			return 0, e
 		}
 		if answer == "0" {
-			return 0, errors.New("已取消")
+			return 0, errMenuCanceled
 		}
 		if answer == "r" {
 			return node.RandomPort(s, n, node.SSHPorts())

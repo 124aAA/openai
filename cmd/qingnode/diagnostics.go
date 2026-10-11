@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -133,7 +134,7 @@ func (a *app) info(args []string) error {
 			nodes = []node.Node{*n}
 		}
 		for _, n := range nodes {
-			fmt.Printf("\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s:%d (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, n.Listen, n.Port, strings.Join(node.Networks(n), "+"), n.Enabled)
+			fmt.Printf("\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), strings.Join(node.Networks(n), "+"), n.Enabled)
 			fmt.Printf("客户端端口：%d\n传输协议：%s\n", n.Port, strings.Join(node.Networks(n), "+"))
 			if c := n.Certificate; c != nil {
 				fmt.Printf("TLS：启用，校验证书\nSNI：%s\n证书方式：%s\n", c.ServerName, c.Mode)

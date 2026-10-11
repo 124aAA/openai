@@ -13,6 +13,16 @@ import (
 	"qingnode/internal/ui"
 )
 
+var errMenuCanceled = errors.New("已取消")
+
+func (a *app) wizardPrompt(q, def string) (string, error) {
+	value, e := a.prompt(q, def)
+	if e == nil && value == ":cancel" {
+		return "", errMenuCanceled
+	}
+	return value, e
+}
+
 func (a *app) menuChoice(key string) (string, error) {
 	fmt.Fprintln(os.Stderr, "\n"+ui.Text(key))
 	return a.prompt(ui.Text("exit_choice"), "")
@@ -68,6 +78,9 @@ func (a *app) menu() error {
 		if errors.Is(e, io.EOF) {
 			return nil
 		}
+		if errors.Is(e, errMenuCanceled) {
+			continue
+		}
 		if e != nil {
 			a.message("ERROR", node.Redact(e.Error()))
 		}
@@ -75,27 +88,33 @@ func (a *app) menu() error {
 }
 func (a *app) selectNode() (node.Node, error) {
 	var nodes []node.Node
-	if e := a.store.Inspect(func() error { s, e := a.store.Load(); nodes = s.Nodes; return e }); e != nil {
+	if e := a.inspectState(func(s *node.State) error { nodes = s.Nodes; return s.Validate() }); e != nil {
 		return node.Node{}, e
 	}
 	if len(nodes) == 0 {
 		return node.Node{}, errors.New("尚无节点，请先添加")
 	}
 	for i, n := range nodes {
-		fmt.Fprintf(os.Stderr, "%d. %s  %s  %s  启用=%t\n", i+1, n.Name, n.Protocol, node.PortLabel(n), n.Enabled)
+		status := "停用"
+		if n.Enabled {
+			status = "启用"
+		}
+		fmt.Fprintf(os.Stderr, "%d. %s [%s / %s]\n   ID: %s  %s\n", i+1, n.Name, n.Protocol, status, n.ID, node.PortLabel(n))
 	}
-	answer, e := a.prompt("节点序号，0 返回", "")
-	if e != nil {
-		return node.Node{}, e
+	for {
+		answer, e := a.prompt("节点序号，0 返回", "")
+		if e != nil {
+			return node.Node{}, e
+		}
+		if answer == "0" {
+			return node.Node{}, errMenuCanceled
+		}
+		i, e := strconv.Atoi(answer)
+		if e == nil && i >= 1 && i <= len(nodes) {
+			return nodes[i-1], nil
+		}
+		a.message("WARN", "请输入列表中的节点序号，或输入 0 返回")
 	}
-	if answer == "0" {
-		return node.Node{}, errors.New("已取消")
-	}
-	i, e := strconv.Atoi(answer)
-	if e != nil || i < 1 || i > len(nodes) {
-		return node.Node{}, errors.New("节点序号无效")
-	}
-	return nodes[i-1], nil
 }
 func (a *app) selectUser(n node.Node) (string, error) {
 	if len(n.Users) == 1 {
@@ -104,15 +123,20 @@ func (a *app) selectUser(n node.Node) (string, error) {
 	for i, u := range n.Users {
 		fmt.Fprintf(os.Stderr, "%d. %s\n", i+1, u.Name)
 	}
-	value, e := a.prompt("凭据序号", "")
-	if e != nil {
-		return "", e
+	for {
+		value, e := a.prompt("凭据序号，0 返回", "")
+		if e != nil {
+			return "", e
+		}
+		if value == "0" {
+			return "", errMenuCanceled
+		}
+		i, e := strconv.Atoi(value)
+		if e == nil && i >= 1 && i <= len(n.Users) {
+			return n.Users[i-1].ID, nil
+		}
+		a.message("WARN", "请输入列表中的凭据序号，或输入 0 返回")
 	}
-	i, e := strconv.Atoi(value)
-	if e != nil || i < 1 || i > len(n.Users) {
-		return "", errors.New("凭据序号无效")
-	}
-	return n.Users[i-1].ID, nil
 }
 func (a *app) selectProtocol() (string, error) {
 	fmt.Fprintln(os.Stderr, "\n请选择要搭建的节点\n1. VLESS REALITY / Vision（无需自己的域名）\n2. Shadowsocks 2022（客户端需支持 SS2022）\n3. Hysteria2（UDP，需要域名及证书）\n0. 返回，不创建")
@@ -146,6 +170,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 	if _, ok := node.Protocol(protocol); !ok {
 		return errors.New("不支持该协议；可用 reality、ss2022 或 hysteria2")
 	}
+	fmt.Fprintln(os.Stderr, "安装输入中可随时输入 :cancel 返回；填写完这些参数后才创建节点。")
 	defaultName := "main"
 	if e := a.store.Inspect(func() error {
 		s, e := a.store.Load()
@@ -161,7 +186,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 	}); e != nil {
 		return e
 	}
-	name, e := a.prompt("节点名称", defaultName)
+	name, e := a.wizardPrompt("节点名称", defaultName)
 	if e != nil {
 		return e
 	}
@@ -173,7 +198,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 			detected, _ = node.PublicIP("6")
 		}
 	}
-	host, e := a.prompt("客户端连接的公网 IP 或域名", detected)
+	host, e := a.wizardPrompt("客户端连接的公网 IP 或域名", detected)
 	if e != nil {
 		return e
 	}
@@ -181,7 +206,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 	if !a.offline {
 		defaultPort = "auto"
 	}
-	port, e := a.prompt("端口（auto 优先443并避开冲突 / r 随机 / 指定数字）", defaultPort)
+	port, e := a.wizardPrompt("端口（auto 优先443并避开冲突 / r 随机 / 指定数字）", defaultPort)
 	if e != nil {
 		return e
 	}
@@ -209,7 +234,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 				label, def = label+"（auto 自动筛选并测速）", "auto"
 			}
 		}
-		sni, e := a.prompt(label, def)
+		sni, e := a.wizardPrompt(label, def)
 		if e != nil {
 			return e
 		}
@@ -218,22 +243,22 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 		}
 	}
 	if protocol == "hysteria2" {
-		mode, e := a.prompt("证书方式：acme 自动签发 / pem 导入", "acme")
+		mode, e := a.wizardPrompt("证书方式：acme 自动签发 / pem 导入", "acme")
 		if e != nil {
 			return e
 		}
 		if mode == "acme" {
-			email, e := a.prompt("ACME 邮箱（域名指向本机，TCP 80 可达）", "")
+			email, e := a.wizardPrompt("ACME 邮箱（域名指向本机，TCP 80 可达）", "")
 			if e != nil {
 				return e
 			}
 			args = append(args, "--acme-email", email)
 		} else if mode == "pem" {
-			cert, e := a.prompt("完整证书链 PEM 路径", "")
+			cert, e := a.wizardPrompt("完整证书链 PEM 路径", "")
 			if e != nil {
 				return e
 			}
-			key, e := a.prompt("私钥 PEM 路径", "")
+			key, e := a.wizardPrompt("私钥 PEM 路径", "")
 			if e != nil {
 				return e
 			}
@@ -264,18 +289,33 @@ func (a *app) nodeMenu() error {
 		}
 		if choice == "2" {
 			if e = a.installWizard(false, "", false); e != nil {
-				a.message("ERROR", e.Error())
+				if errors.Is(e, io.EOF) {
+					return e
+				}
+				if !errors.Is(e, errMenuCanceled) {
+					a.message("ERROR", e.Error())
+				}
 			}
+			continue
+		}
+		if choice < "3" || choice > "9" || len(choice) != 1 {
+			a.message("WARN", "请选择菜单中的数字")
 			continue
 		}
 		n, e := a.selectNode()
 		if e != nil {
-			a.message("WARN", e.Error())
+			if errors.Is(e, io.EOF) {
+				return e
+			}
+			if !errors.Is(e, errMenuCanceled) {
+				a.message("WARN", e.Error())
+			}
 			continue
 		}
 		args := []string{}
 		switch choice {
 		case "3":
+			a.message("INFO", "修改连接地址后需重新导出并导入客户端；仅改名称只影响标签。现有凭据会保留。")
 			name, e := a.prompt("新名称", n.Name)
 			if e != nil {
 				return e
@@ -286,6 +326,7 @@ func (a *app) nodeMenu() error {
 			}
 			args = []string{"edit", "--id", n.ID, "--name", name, "--server", host}
 		case "4":
+			a.message("INFO", "修改端口后所有设备需重新导入，并检查云安全组/NAT 映射；现有凭据会保留。")
 			p, e := a.prompt("新端口（r 随机）", strconv.Itoa(n.Port))
 			if e != nil {
 				return e
@@ -307,12 +348,22 @@ func (a *app) nodeMenu() error {
 			args = []string{"delete", "--id", n.ID, "--yes"}
 		case "8":
 			if e = a.userMenu(n); e != nil {
-				a.message("ERROR", e.Error())
+				if errors.Is(e, io.EOF) {
+					return e
+				}
+				if !errors.Is(e, errMenuCanceled) {
+					a.message("ERROR", e.Error())
+				}
 			}
 			continue
 		case "9":
 			if e = a.realityMenu(n); e != nil {
-				a.message("ERROR", e.Error())
+				if errors.Is(e, io.EOF) {
+					return e
+				}
+				if !errors.Is(e, errMenuCanceled) {
+					a.message("ERROR", e.Error())
+				}
 			}
 			continue
 		default:
@@ -396,6 +447,7 @@ func (a *app) realityMenu(n node.Node) error {
 	case "2":
 		return a.info([]string{"--id", n.ID, "--show-private"})
 	case "3":
+		a.message("INFO", "修改 SNI 后所有设备需重新导入；密钥、UUID 和 short ID 会保留。")
 		sni, e := a.prompt("SNI", n.Reality.ServerName)
 		if e != nil {
 			return e
@@ -406,6 +458,7 @@ func (a *app) realityMenu(n node.Node) error {
 		}
 		return a.command([]string{"edit", "--id", n.ID, "--sni", sni, "--target", target})
 	case "4":
+		a.message("INFO", "修改客户端指纹后请重新导入客户端配置；服务端凭据会保留。")
 		fp, e := a.prompt("chrome/firefox/safari/ios/edge", node.Fingerprint(n.Reality))
 		if e != nil {
 			return e
@@ -432,9 +485,29 @@ func (a *app) exportWizard() error {
 	if e != nil {
 		return e
 	}
-	f, e := a.prompt("uri 链接 / qr 二维码 / mihomo / provider / sing-box / base64", "uri")
-	if e != nil {
-		return e
+	fmt.Fprintln(os.Stderr, "1 分享链接（手机客户端优先）\n2 终端二维码（终端需支持方块字符）\n3 Mihomo 完整配置\n4 sing-box 完整配置\n5 Mihomo provider（供已有配置引用）\n6 Base64 链接文本（不是在线订阅）\n0 返回；也可输入原格式名称")
+	formats := map[string]string{"1": "uri", "2": "qr", "3": "mihomo", "4": "sing-box", "5": "provider", "6": "base64"}
+	var f string
+	for {
+		value, err := a.prompt("导出方式", "1")
+		if err != nil {
+			return err
+		}
+		if value == "0" {
+			return errMenuCanceled
+		}
+		f = formats[value]
+		if f == "" {
+			for _, format := range formats {
+				if value == format {
+					f = format
+				}
+			}
+		}
+		if f != "" {
+			break
+		}
+		a.message("WARN", "请选择 1–6、格式名称或 0 返回")
 	}
 	out, e := a.prompt("保存路径（留空显示终端；拒绝覆盖已有文件）", "")
 	if e != nil {

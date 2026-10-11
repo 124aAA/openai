@@ -173,7 +173,7 @@ func (a *app) prompt(q, def string) (string, error) {
 	}
 	fmt.Fprint(os.Stderr, ": ")
 	s, e := a.in.ReadString('\n')
-	if e != nil && len(s) == 0 {
+	if e != nil {
 		return "", e
 	}
 	s = strings.TrimSpace(s)
