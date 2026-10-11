@@ -97,7 +97,12 @@ func (s State) Clone() State {
 }
 func (s *State) Find(id string) (*Node, error) {
 	for i := range s.Nodes {
-		if s.Nodes[i].ID == id || s.Nodes[i].Name == id {
+		if s.Nodes[i].ID == id {
+			return &s.Nodes[i], nil
+		}
+	}
+	for i := range s.Nodes {
+		if s.Nodes[i].Name == id {
 			return &s.Nodes[i], nil
 		}
 	}

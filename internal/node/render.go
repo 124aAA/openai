@@ -39,7 +39,12 @@ func SelectUser(n Node, id string) (User, error) {
 		return n.Users[0], nil
 	}
 	for _, u := range n.Users {
-		if u.ID == id || u.Name == id {
+		if u.ID == id {
+			return u, nil
+		}
+	}
+	for _, u := range n.Users {
+		if u.Name == id {
 			return u, nil
 		}
 	}
