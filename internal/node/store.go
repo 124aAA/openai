@@ -160,15 +160,21 @@ func (s *Store) ensure() error {
 	return nil
 }
 func (s *Store) WithLock(fn func() error) error {
-	return s.withLock(true, fn)
+	return s.withLock(true, false, fn)
 }
 
 // Inspect holds the management lock without repairing or restarting a broken service.
-func (s *Store) Inspect(fn func() error) error { return s.withLock(false, fn) }
-func (s *Store) withLock(recover bool, fn func() error) error {
+func (s *Store) Inspect(fn func() error) error { return s.withLock(false, false, fn) }
+
+// InspectExisting requires a managed directory and never calls fn without its lock.
+func (s *Store) InspectExisting(fn func() error) error { return s.withLock(false, true, fn) }
+func (s *Store) withLock(recover, requireExisting bool, fn func() error) error {
 	if !recover {
 		i, e := os.Lstat(s.Root)
 		if errors.Is(e, os.ErrNotExist) {
+			if requireExisting {
+				return fmt.Errorf("状态目录不存在：%w", e)
+			}
 			return fn()
 		}
 		if e != nil || !i.IsDir() || i.Mode()&os.ModeSymlink != 0 {
