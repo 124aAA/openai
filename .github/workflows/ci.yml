@@ -7,32 +7,52 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.1'
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck
-      - run: shellcheck install.sh scripts/*.sh
-      - run: go vet ./...
-      - run: go test -race ./...
-      - name: Service-user permissions with restrictive umask
+      - name: Static analysis and Go tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends shellcheck
+          shellcheck install.sh scripts/*.sh
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+      - name: Service-user permissions
         run: sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStorePermissionsUnderRestrictiveUmask$" -v -count=1'
-      - run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
-      - run: python3 scripts/fetch-test-core.py
-      - name: Official core syntax and REALITY, SS2022, Hysteria2 TCP/UDP
-        run: go test ./internal/node -run 'OfficialCore|OfficialArchive' -v -count=1
-      - run: bash scripts/build.sh
+      - name: Installer transaction tests
+        run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
+      - name: Release guard offline tests
+        run: python3 scripts/test-release.py
+      - name: Fetch pinned official test tools
+        run: python3 scripts/fetch-test-core.py
+      - name: Official parser and transport tests
+        run: |
+          test -x "$SING_BOX_BIN"
+          test -x "$MIHOMO_BIN"
+          go test ./internal/node -run 'OfficialCore|OfficialArchive|Mihomo' -v -count=1
+      - name: Build two Linux architectures
+        run: |
+          version=$(python3 scripts/release.py version)
+          bash scripts/build.sh "${version#v}"
       - name: Real systemd lifecycle on disposable runner
         shell: bash
         timeout-minutes: 10
         run: |
+          set -euo pipefail
           bundle="$RUNNER_TEMP/qingnode-acceptance"
           mkdir "$bundle"
-          version=$(sed -nE 's/^REPO=.* VERSION=v([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' install.sh)
-          tar -xzf "dist/qingnode-$version-linux-amd64.tar.gz" -C "$bundle"
+          version=$(python3 scripts/release.py version)
+          tar -xzf "dist/qingnode-${version#v}-linux-amd64.tar.gz" -C "$bundle"
+          test "$("$bundle/qingnode" version)" = "QingNode ${version#v} (${GITHUB_SHA:0:12})"
           sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
       - uses: actions/upload-artifact@v4
         with:
           name: qingnode-preview
           path: dist/
+          if-no-files-found: error
