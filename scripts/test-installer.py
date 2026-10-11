@@ -28,6 +28,9 @@ def save():
  tmp=r/('host-'+str(os.getpid())+'.tmp')
  tmp.write_text(json.dumps(s)); tmp.replace(db)
 def fail(point):
+ if os.environ.get('QN_RECOVERY_FAULT')==point and (r/'fault-fired').exists():
+  print('injected persistent recovery '+point+' failure', file=sys.stderr)
+  sys.exit(1)
  if os.environ.get('QN_FAULT')==point and not (r/'fault-fired').exists():
   (r/'fault-fired').touch()
   print('injected '+point+' failure', file=sys.stderr)
@@ -50,6 +53,9 @@ elif name=='userdel':
  s.update(passwd=False, group=False); save()
 elif name=='install':
  if any('qingnode.service.new.' in x for x in a): fail('unit-write')
+ if str(r/'system/usr/local/bin/qingnode.recover') in a: fail('restore-bin')
+ if str(r/'system/etc/systemd/system/qingnode.service') in a: fail('restore-unit')
+ if str(r/'system/usr/local/lib/qingnode/install.sh') in a: fail('restore-installer')
  cleaned=[]; i=0
  while i<len(a):
   if a[i] in ('-o','-g'): i+=2; continue
@@ -183,8 +189,8 @@ class Fixture:
         if corrupt == 'outer':
             archive.write_bytes(b'corrupted after outer checksum')
 
-    def run(self, *args, fault='', dns=False, ok=True, online=False, curl_code=0, tty_input=None):
-        env = dict(self.env, QN_FAULT=fault)
+    def run(self, *args, fault='', recovery_fault='', dns=False, ok=True, online=False, curl_code=0, tty_input=None):
+        env = dict(self.env, QN_FAULT=fault, QN_RECOVERY_FAULT=recovery_fault)
         if dns:
             env['QN_DNS_FAIL'] = '1'
         if curl_code:
@@ -428,6 +434,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('\ncurl ', (f.root/'commands.log').read_text())
                 self.assertFalse(f.state.exists())
 
+
     def test_invalid_ports_fail_before_host_changes(self):
         for port in ('0', '65536', '-1', '443x', '000443', '443; exit 0'):
             with self.subTest(port=port):
@@ -492,6 +499,26 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(f.host().get('passwd', False))
                 self.assertFalse(f.host()['active'])
 
+    def test_fresh_failure_before_unit_creation_does_not_report_false_recovery_failure(self):
+        for fault in ('useradd', 'unit-write'):
+            with self.subTest(fault=fault):
+                f = self.fixture()
+                # A real systemctl rejects disable on a service that never existed.
+                # If rollback calls it, this persistent fault must make the test fail.
+                out = f.install(fault=fault, recovery_fault='disable', ok=False)
+                self.assertTrue((f.root/'fault-fired').exists(), 'forward fault was not reached')
+                self.assertIn('安装失败，日志', out)
+                self.assertNotIn('恢复未完成', out)
+                self.assertNotIn('保留恢复文件', out)
+                calls = (f.root/'commands.log').read_text()
+                self.assertNotIn('systemctl disable', calls)
+                self.assertEqual([], list((f.root/'tmp').iterdir()))
+                for path in (f.bin, f.unit, f.lib, f.state):
+                    self.assertFalse(path.exists(), str(path))
+                self.assertFalse(f.host().get('passwd', False))
+                self.assertFalse(f.host()['active'])
+                self.assertFalse(f.host()['enabled'])
+
     def test_upgrade_failures_restore_manager_unit_and_credentials(self):
         for fault in ('unit-write','daemon-reload','core','check','restart'):
             with self.subTest(fault=fault):
@@ -503,6 +530,33 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(before, (f.bin.read_bytes(), f.unit.read_bytes(), f.data()))
                 self.assertTrue(f.host()['active'])
                 self.assertTrue(f.host()['enabled'])
+                self.assertEqual([], list((f.root/'tmp').iterdir()))
+
+    def test_persistent_recovery_failure_keeps_private_original_files(self):
+        for point, message in [('restore-bin', '管理器二进制'),
+                               ('restore-unit', '服务文件'),
+                               ('restore-installer', '安装辅助脚本'),
+                               ('daemon-reload', '重新加载服务定义'),
+                               ('restart', '恢复原服务运行状态')]:
+            with self.subTest(point=point):
+                f = self.fixture(); f.install()
+                original = (f.bin.read_bytes(), f.unit.read_bytes(), f.data(),
+                            (f.lib/'install.sh').read_bytes())
+                f.manager.write_text(MOCK+'\n# candidate update\n'); f.sums()
+                out = f.run('--reinstall', fault='core', recovery_fault=point, ok=False)
+                self.assertIn('恢复未完成', out)
+                self.assertIn(message, out)
+                self.assertIn('保留恢复文件', out)
+                retained = list((f.root/'tmp').iterdir())
+                self.assertEqual(1, len(retained))
+                saved = retained[0]
+                self.assertEqual(0o700, saved.stat().st_mode & 0o777)
+                self.assertEqual(original[0], (saved/'old-bin').read_bytes())
+                self.assertEqual(original[1], (saved/'old-unit').read_bytes())
+                self.assertEqual(original[3], (saved/'old-installer').read_bytes())
+                self.assertEqual(original[2], f.data())
+                self.assertIn(str(saved), out)
+                self.assertIn('qingnode-install-', out)
 
     def test_dns_warning_local_install_and_download_failure(self):
         f = self.fixture()

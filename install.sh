@@ -103,19 +103,37 @@ old_active=0 old_bin=0 old_unit=0 changed=0 root_existed=0 created_user=0 lib_ex
 NEW_BIN='' NEW_UNIT='' REDACTOR=''
 finish() {
   rc=$?
+  recovery_failed=0
   trap - EXIT
   set +e
   exec 8>&-
+  recover_step() {
+    local label=$1
+    shift
+    if "$@" >>"$LOG" 2>&1; then return 0; fi
+    recovery_failed=1
+    printf '[ERROR] 恢复未完成：%s；详情见安装日志。\n' "$label" >&2
+    return 1
+  }
   if ((rc != 0 && changed)); then
-    echo '[ERROR] 安装未完成，恢复原管理器与服务。' >&2
-    if ((old_bin)); then install -m 755 "$TEMP_DIR/old-bin" "$BIN.recover" && mv -f "$BIN.recover" "$BIN"; else rm -f "$BIN"; fi
-    if ((old_unit)); then install -m 644 "$TEMP_DIR/old-unit" "$UNIT"; else systemctl disable --now qingnode.service >>"$LOG" 2>&1; rm -f "$UNIT"; fi
-    if [[ -f $TEMP_DIR/old-installer ]]; then install -m 755 "$TEMP_DIR/old-installer" "$LIB/install.sh"; elif ((!lib_existed)); then rm -rf -- "$LIB"; fi
-    systemctl daemon-reload >>"$LOG" 2>&1
-    if ((old_active)); then systemctl restart qingnode.service >>"$LOG" 2>&1; fi
+    echo '[ERROR] 安装未完成，正在恢复原管理器与服务。' >&2
+    if ((old_bin)); then
+      recover_step '管理器二进制' install -m 755 "$TEMP_DIR/old-bin" "$BIN.recover" &&
+        recover_step '替换原管理器' mv -f "$BIN.recover" "$BIN"
+    else recover_step '清理新增管理器' rm -f "$BIN"; fi
+    if ((old_unit)); then recover_step '服务文件' install -m 644 "$TEMP_DIR/old-unit" "$UNIT"
+    else
+      if [[ -f $UNIT ]]; then recover_step '停止并禁用新增服务' systemctl disable --now qingnode.service; fi
+      recover_step '清理新增服务文件' rm -f "$UNIT"
+    fi
+    if [[ -f $TEMP_DIR/old-installer ]]; then recover_step '安装辅助脚本' install -m 755 "$TEMP_DIR/old-installer" "$LIB/install.sh"
+    elif ((!lib_existed)); then recover_step '清理新增辅助目录' rm -rf -- "$LIB"; fi
+    recover_step '重新加载服务定义' systemctl daemon-reload
+    if ((old_active)); then recover_step '恢复原服务运行状态' systemctl restart qingnode.service; fi
     if ((!root_existed)); then
-      if ((created_user)); then userdel qingnode >>"$LOG" 2>&1; fi
-      if ((!created_user)) || ! getent passwd qingnode >/dev/null; then rm -rf -- "$ROOT"; else echo '[WARN] 专用账户未能清理，保留有标记的状态目录供重试。' >&2; fi
+      if ((created_user)); then recover_step '清理新增专用账户' userdel qingnode; fi
+      if ((!created_user)) || ! getent passwd qingnode >/dev/null; then recover_step '清理新增状态目录' rm -rf -- "$ROOT"
+      else echo '[WARN] 专用账户未能清理，保留有标记的状态目录供重试。' >&2; fi
     fi
   fi
   if ((rc != 0)); then
@@ -124,7 +142,16 @@ finish() {
   elif ((DEBUG)); then echo "[DEBUG] 安装日志：$LOG"; fi
   [[ -z $NEW_BIN ]] || rm -f -- "$NEW_BIN"
   [[ -z $NEW_UNIT ]] || rm -f -- "$NEW_UNIT"
-  rm -rf -- "$TEMP_DIR"
+  if ((recovery_failed)); then
+    printf '[ERROR] 保留恢复文件：%s（目录仅 root 可读）。先排除恢复错误，再恢复原文件；请保留此目录和安装日志。\n' "$TEMP_DIR" >&2
+    if [[ -f $TEMP_DIR/old-bin ]]; then printf '[INFO] 原管理器恢复命令：install -m 755 %q %q\n' "$TEMP_DIR/old-bin" "$BIN" >&2; fi
+    if [[ -f $TEMP_DIR/old-unit ]]; then printf '[INFO] 原服务文件恢复命令：install -m 644 %q %q\n' "$TEMP_DIR/old-unit" "$UNIT" >&2; fi
+    if [[ -f $TEMP_DIR/old-installer ]]; then printf '[INFO] 原辅助脚本恢复命令：install -m 755 %q %q\n' "$TEMP_DIR/old-installer" "$LIB/install.sh" >&2; fi
+    echo '[INFO] 原文件恢复后运行：systemctl daemon-reload' >&2
+    if ((old_active)); then echo '[INFO] 原服务此前运行，文件恢复后运行：systemctl restart qingnode.service' >&2; fi
+    echo '[INFO] 如需协助，请提供脱敏日志；不要删除状态目录或重新生成节点凭据。' >&2
+    ((rc != 0)) || rc=1
+  else rm -rf -- "$TEMP_DIR"; fi
   exit "$rc"
 }
 trap finish EXIT
