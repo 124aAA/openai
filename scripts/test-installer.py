@@ -170,8 +170,8 @@ class Fixture:
 
     def sums(self):
         (self.bundle/'SHA256SUMS').write_text(''.join(
-            f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
-            for p in (self.manager, self.installer)))
+            f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(self.bundle).as_posix()}\n'
+            for p in (self.manager, self.installer, *sorted((self.bundle/'docs').glob('*')))))
 
     def remote_release(self, corrupt=''):
         release = self.root/'release'
@@ -182,6 +182,8 @@ class Fixture:
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
+            if (self.bundle/'docs').exists():
+                out.add(self.bundle/'docs', arcname='docs')
             if corrupt == 'path':
                 out.add(self.manager, arcname='../escape')
         (release/'SHA256SUMS').write_text(
@@ -332,7 +334,7 @@ class InstallerTests(unittest.TestCase):
         out = f.run(online=True, tty_input='7\n0\n')
         self.assertIn('节点管理', out)
         self.assertGreaterEqual(out.count('管理与说明'), 2)
-        for label in ('配置核心', '待验证', '7 刷新总览', '8 检查更新', '9 运行自检'):
+        for label in ('配置核心', '待验证', '7 刷新总览', '8 检查更新', '9 快捷自检'):
             self.assertIn(label, out)
         self.assertEqual(before, f.data())
         self.assertEqual(host, f.host())
@@ -434,6 +436,32 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('\ncurl ', (f.root/'commands.log').read_text())
                 self.assertFalse(f.state.exists())
 
+    def test_release_accepts_named_new_docs_and_rejects_unknown_docs_or_links(self):
+        names = ('GETTING_STARTED.md', 'FAQ.md', 'DEVELOPMENT.md')
+        for online in (False, True):
+            for invalid in ('', 'unknown', 'near-name', 'symlink'):
+                with self.subTest(online=online, invalid=invalid):
+                    f = self.fixture()
+                    docs = f.bundle/'docs'; docs.mkdir()
+                    for name in names:
+                        (docs/name).write_text('# '+name+'\n')
+                    if invalid in ('unknown', 'near-name'):
+                        (docs/('OTHER.md' if invalid == 'unknown' else 'FAQXmd')).write_text('unexpected\n')
+                    elif invalid == 'symlink':
+                        original = f.root/'original-doc'; original.write_text('linked\n')
+                        (docs/'FAQ.md').unlink(); (docs/'FAQ.md').symlink_to(original)
+                    f.sums()
+                    if online:
+                        f.remote_release()
+                    out = f.install(online=online, ok=not invalid)
+                    if invalid:
+                        self.assertNotIn('[8/8]', out)
+                        self.assertFalse(f.state.exists())
+                        self.assertFalse(f.bin.exists())
+                        self.assertFalse(f.host().get('passwd', False))
+                    else:
+                        self.assertIn('[8/8]', out)
+                        self.assertTrue(f.host()['active'])
 
     def test_invalid_ports_fail_before_host_changes(self):
         for port in ('0', '65536', '-1', '443x', '000443', '443; exit 0'):

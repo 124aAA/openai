@@ -16,7 +16,7 @@ for ARCH in amd64 arm64; do
   cp install.sh README.md LICENSE THIRD_PARTY.md "$DEST/"
   sed -i -E "s/VERSION=v[0-9]+\.[0-9]+\.[0-9]+/VERSION=v$VERSION/" "$DEST/install.sh"
   mkdir -p "$DEST/docs"
-  cp docs/ARCHITECTURE.md docs/TEST_REPORT.md docs/RELEASE_NOTES.md docs/AUDIT_STAGE2.md "$DEST/docs/"
+  cp docs/ARCHITECTURE.md docs/TEST_REPORT.md docs/RELEASE_NOTES.md docs/AUDIT_STAGE2.md docs/GETTING_STARTED.md docs/FAQ.md docs/DEVELOPMENT.md "$DEST/docs/"
   python3 - "$DEST/THIRD_PARTY.md" "$(go env GOROOT)/LICENSE" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1])

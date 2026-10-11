@@ -217,7 +217,7 @@ if [[ -n $REPO ]]; then
   actual=$(sha256sum "$TEMP_DIR/$asset"); actual=${actual%% *}
   [[ $actual == "${expected,,}" ]] || { echo '发行包摘要不匹配。' >&2; exit 1; }
   tar -tzf "$TEMP_DIR/$asset" > "$TEMP_DIR/members"
-  if grep -Ev '^(qingnode|install.sh|SHA256SUMS|README.md|LICENSE|THIRD_PARTY.md|docs/?|docs/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2).md)$' "$TEMP_DIR/members" >/dev/null; then echo '发行包包含未知路径。' >&2; exit 1; fi
+  if grep -Ev '^(qingnode|install[.]sh|SHA256SUMS|README[.]md|LICENSE|THIRD_PARTY[.]md|docs/?|docs/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|FAQ|DEVELOPMENT)[.]md)$' "$TEMP_DIR/members" >/dev/null; then echo '发行包包含未知路径。' >&2; exit 1; fi
   tar -tvzf "$TEMP_DIR/$asset" | awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" {bad=1} END {exit bad}' || { echo '发行包包含不允许的链接或特殊文件。' >&2; exit 1; }
   mkdir "$TEMP_DIR/bundle"
   tar --no-same-owner --no-same-permissions -xzf "$TEMP_DIR/$asset" -C "$TEMP_DIR/bundle"
@@ -225,7 +225,7 @@ if [[ -n $REPO ]]; then
 fi
 [[ -f $BUNDLE/qingnode && ! -L $BUNDLE/qingnode && -f $BUNDLE/SHA256SUMS ]] || { echo '请在本架构发行包中运行安装器，或指定已发布的 --repo 与 --version。' >&2; exit 1; }
 awk 'NF!=2 || length($1)!=64 || $1 !~ /^[a-fA-F0-9]+$/ {bad=1}
-  $2 !~ /^(qingnode|install.sh|README.md|LICENSE|THIRD_PARTY.md|docs\/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2).md)$/ {bad=1}
+  $2 !~ /^(qingnode|install[.]sh|README[.]md|LICENSE|THIRD_PARTY[.]md|docs\/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|FAQ|DEVELOPMENT)[.]md)$/ {bad=1}
   {if (seen[$2]++) bad=1} END {exit bad || !seen["qingnode"] || !seen["install.sh"]}' "$BUNDLE/SHA256SUMS" || { echo '摘要清单无效或缺少必要文件。' >&2; exit 1; }
 while read -r _ member; do [[ -f $BUNDLE/$member && ! -L $BUNDLE/$member ]] || { echo '发行包成员必须是普通文件。' >&2; exit 1; }; done < "$BUNDLE/SHA256SUMS"
 [[ ! -L $BUNDLE/docs ]] || { echo '发行包文档目录不允许链接。' >&2; exit 1; }
