@@ -191,6 +191,23 @@ func (a *app) locked(fn func(*node.State) error) error {
 		return fn(&s)
 	})
 }
+
+// Queries share the management lock, but never recover transactions or services.
+func (a *app) inspectState(fn func(*node.State) error) error {
+	return a.store.Inspect(func() error {
+		for _, journal := range []string{"transaction.json", "uninstall.json"} {
+			if _, e := os.Lstat(filepath.Join(a.store.Root, journal)); e == nil {
+				a.message("WARN", "发现中断操作；当前配置尚未确认提交。查询不会恢复或重启服务，请先核查 qingnode doctor，再用 qingnode recover 恢复。")
+				break
+			}
+		}
+		s, e := a.store.Load()
+		if e != nil {
+			return e
+		}
+		return fn(&s)
+	})
+}
 func (a *app) mutate(fn func(*node.State) error) error {
 	return a.locked(func(s *node.State) error {
 		if e := s.Validate(); e != nil {
@@ -348,7 +365,7 @@ func (a *app) export(cmd string, args []string) error {
 	if e := parse(f, args); e != nil {
 		return e
 	}
-	return a.locked(func(s *node.State) error {
+	return a.inspectState(func(s *node.State) error {
 		if e := s.Validate(); e != nil {
 			return e
 		}
@@ -398,13 +415,13 @@ func (a *app) core(args []string) error {
 			explicitVersion = true
 		}
 	})
+	if cmd == "check" {
+		return a.inspectState(func(s *node.State) error { return node.VerifyCore(a.store.Root, s.CoreVersion) })
+	}
+	if cmd != "install" && cmd != "update" {
+		return errors.New("未知 core 子命令")
+	}
 	return a.locked(func(s *node.State) error {
-		if cmd == "check" {
-			return node.VerifyCore(a.store.Root, s.CoreVersion)
-		}
-		if cmd != "install" && cmd != "update" {
-			return errors.New("未知 core 子命令")
-		}
 		if cmd == "install" && !explicitVersion {
 			*v = s.CoreVersion
 		}

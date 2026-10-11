@@ -17,6 +17,16 @@ func (a *app) operation(cmd string, args []string) error {
 	if e := parse(f, args); e != nil {
 		return e
 	}
+	if cmd == "check" {
+		return a.inspectState(func(s *node.State) error {
+			b := node.SystemBackend{Root: a.store.Root}
+			if e := b.Check(*s, filepath.Join(a.store.Root, "current", "server.json")); e != nil {
+				return e
+			}
+			fmt.Println("官方核心配置检查通过；未测试公网连接。")
+			return nil
+		})
+	}
 	if cmd == "status" || cmd == "doctor" || cmd == "logs" {
 		return a.store.Inspect(func() error {
 			s, err := a.store.Load()
@@ -44,14 +54,6 @@ func (a *app) operation(cmd string, args []string) error {
 	return a.locked(func(s *node.State) error {
 		if cmd == "rollback" {
 			return a.store.Rollback()
-		}
-		if cmd == "check" {
-			b := node.SystemBackend{Root: a.store.Root}
-			if e := b.Check(*s, filepath.Join(a.store.Root, "current", "server.json")); e != nil {
-				return e
-			}
-			fmt.Println("官方核心配置检查通过；未测试公网连接。")
-			return nil
 		}
 		if a.offline {
 			return errors.New("离线模式不操作服务")

@@ -190,7 +190,7 @@ func (a *app) list(args []string) error {
 	if e := parse(f, args); e != nil {
 		return e
 	}
-	return a.locked(func(s *node.State) error {
+	return a.inspectState(func(s *node.State) error {
 		nodes := s.Nodes
 		if *id != "" {
 			n, e := s.Find(*id)

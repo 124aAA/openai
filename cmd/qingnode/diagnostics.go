@@ -120,7 +120,7 @@ func (a *app) info(args []string) error {
 	if e := parse(f, args); e != nil {
 		return e
 	}
-	return a.locked(func(s *node.State) error {
+	return a.inspectState(func(s *node.State) error {
 		if e := s.Validate(); e != nil {
 			return e
 		}

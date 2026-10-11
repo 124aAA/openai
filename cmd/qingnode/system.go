@@ -82,7 +82,7 @@ func (a *app) firewall(args []string) error {
 			}
 		}
 		fmt.Println("只对已启用 UFW 的本项目规则提供自动管理；firewalld/nftables/iptables 的复杂策略请手动处理。云安全组须另行检查。")
-		return a.locked(func(s *node.State) error {
+		return a.inspectState(func(s *node.State) error {
 			fmt.Printf("项目自动防火墙模式：%s（空为手动）\n", s.Firewall)
 			for _, n := range s.Nodes {
 				if n.Enabled {
