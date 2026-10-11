@@ -9,7 +9,7 @@ UNIT=/etc/systemd/system/qingnode.service
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.2.7 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.2.8 PORT=443 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 INIT_ARGS=()
 WIZARD_PROTOCOL=''
 LIB=/usr/local/lib/qingnode
@@ -35,7 +35,7 @@ while (($#)); do
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.7 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.2.8 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
@@ -159,12 +159,23 @@ logged() {
   if [[ -n $REDACTOR ]]; then "$@" 2>&1 | "$REDACTOR" redact-log >>"$LOG"; else "$@" >>"$LOG" 2>&1; fi
 }
 download_release() {
-  local rc hint
-  if logged curl -sS --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 15 --max-time "$3" "$1" -o "$2"; then
-    return 0
+  local rc=0 hint size limit=$4
+  # curl before 8.4 cannot enforce unknown response sizes. Limit file writes in
+  # its child only; the separate log writer keeps the parent's resource limits.
+  if (
+    set -o posix # ulimit -f uses 512-byte units in POSIX mode.
+    ulimit -S -c 0 && ulimit -S -f "$((limit / 512))" || exit 125
+    exec curl -sS --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 15 --max-time "$3" --max-filesize "$limit" "$1" -o "$2"
+  ) 2>&1 | logged cat; then
+    :
   else
-    rc=$?
+    rc=${PIPESTATUS[0]}
+    ((rc != 0)) || rc=23
   fi
+  size=$(stat -c '%s' -- "$2" 2>/dev/null) || size=0
+  if ((size > limit)); then rc=63; fi
+  if ((rc == 0)); then return 0; fi
+  rm -f -- "$2"
   case "$rc" in
     6) hint='DNS 解析失败：检查 github.com 的解析和服务器 DNS';;
     7) hint='无法连接下载服务器：检查出站 HTTPS 网络';;
@@ -173,6 +184,8 @@ download_release() {
     23) hint='无法写入下载文件：检查磁盘空间及临时目录权限';;
     28) hint='下载超时：检查网络后重试，或使用完整本地发行包';;
     35|51|60) hint='TLS 或证书验证失败：检查系统时间、CA 证书与网络';;
+    63|153) hint="$5超过下载上限（$limit 字节）：确认指定版本及官方发行资产，或上传已校验的完整本地发行包；不要关闭校验";;
+    125) hint='无法建立下载文件大小限制：检查当前 shell 的资源限制，未继续下载';;
     *) hint="下载失败（curl 退出码 $rc）：查看安装日志";;
   esac
   printf '[ERROR] %s。也可上传已校验的完整发行包运行 install.sh。\n' "$hint" >&2
@@ -210,8 +223,8 @@ if [[ -n $REPO ]]; then
   asset="qingnode-${VERSION#v}-linux-$ARCH.tar.gz"
   base="https://github.com/$REPO/releases/download/$VERSION"
   printf '[INFO] 下载 QingNode %s（%s，%s）\n' "$VERSION" "$ARCH" "$REPO"
-  download_release "$base/$asset" "$TEMP_DIR/$asset" 300
-  download_release "$base/SHA256SUMS" "$TEMP_DIR/release-sums" 60
+  download_release "$base/$asset" "$TEMP_DIR/$asset" 300 67108864 '管理器归档'
+  download_release "$base/SHA256SUMS" "$TEMP_DIR/release-sums" 60 1048576 '发行摘要清单'
   expected=$(awk -v f="$asset" '$2==f {print $1}' "$TEMP_DIR/release-sums")
   [[ $expected =~ ^[a-fA-F0-9]{64}$ ]] || { echo '缺少唯一的发行包摘要。' >&2; exit 1; }
   actual=$(sha256sum "$TEMP_DIR/$asset"); actual=${actual%% *}

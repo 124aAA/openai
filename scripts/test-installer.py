@@ -11,14 +11,17 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import subprocess
 import tarfile
 import tempfile
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
+RELEASE_TAG = re.search(r'\bVERSION=(v\d+\.\d+\.\d+)\b', (SOURCE/'install.sh').read_text()).group(1)
+RELEASE_ASSET = f'qingnode-{RELEASE_TAG[1:]}-linux-amd64.tar.gz'
 MOCK = r'''#!/usr/bin/env python3
-import json, os, pathlib, shutil, subprocess, sys
+import json, os, pathlib, shutil, signal, subprocess, sys
 r=pathlib.Path(os.environ['QN_FIXTURE'])
 name=pathlib.Path(sys.argv[0]).name
 a=sys.argv[1:]
@@ -78,11 +81,12 @@ elif name=='systemctl':
 elif name=='apt-get': fail('apt')
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
- prefix='https://github.com/124aAA/openai/releases/download/v0.2.7/'
+ tag=os.environ['QN_RELEASE_TAG']
+ prefix='https://github.com/124aAA/openai/releases/download/'+tag+'/'
  if len(urls)!=1 or not urls[0].startswith(prefix) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset=urls[0][len(prefix):]
- if asset not in ('qingnode-0.2.7-linux-amd64.tar.gz','SHA256SUMS'):
+ if asset not in ('qingnode-'+tag[1:]+'-linux-amd64.tar.gz','SHA256SUMS'):
   raise RuntimeError('unexpected remote asset '+asset)
  dest=pathlib.Path(a[a.index('-o')+1])
  if not str(dest).startswith(str(r)+'/'):
@@ -92,7 +96,18 @@ elif name=='curl':
   print('curl: (%d) simulated transport failure'%code,file=sys.stderr); sys.exit(code)
  if os.environ.get('QN_FAULT')=='download':
   dest.write_bytes(b'partial download'); fail('download')
- shutil.copyfile(r/'release'/asset,dest)
+ if os.environ.get('QN_STREAM_ASSET')==asset:
+  # Deliberately ignore curl's --max-filesize, as old curl does when no length
+  # is known. The actual child RLIMIT must stop this stream, not mock options.
+  signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+  total=int(os.environ['QN_STREAM_BYTES']); written=0
+  print('streaming response without Content-Length', file=sys.stderr)
+  with dest.open('wb', buffering=0) as out:
+   while written<total:
+    written+=out.write(b'x'*min(65536,total-written))
+    (r/'stream-progress').write_text(str(written))
+  (r/'stream-complete').touch()
+ else: shutil.copyfile(r/'release'/asset,dest)
 elif name=='ss': pass
 elif name=='qingnode':
  root=r/'system/var/lib/qingnode'
@@ -164,7 +179,7 @@ class Fixture:
             target = mockdir/name
             target.write_text(MOCK)
             target.chmod(0o755)
-        self.env = dict(os.environ, QN_FIXTURE=str(self.root), QN_REAL_BIN=str(REAL_BIN),
+        self.env = dict(os.environ, QN_FIXTURE=str(self.root), QN_REAL_BIN=str(REAL_BIN), QN_RELEASE_TAG=RELEASE_TAG,
                         TMPDIR=str(self.root/'tmp'), PATH=str(mockdir)+os.pathsep+os.environ['PATH'])
         self.sums()
 
@@ -178,7 +193,7 @@ class Fixture:
         release.mkdir()
         if corrupt == 'inner':
             self.manager.write_text(MOCK+'\n# corrupted after inner checksum\n')
-        archive = release/'qingnode-0.2.7-linux-amd64.tar.gz'
+        archive = release/RELEASE_ASSET
         with tarfile.open(archive, 'w:gz') as out:
             for p in (self.manager, self.installer, self.bundle/'SHA256SUMS'):
                 out.add(p, arcname=p.name)
@@ -231,6 +246,29 @@ class Fixture:
     def install(self, **kw):
         return self.run('--server', '203.0.113.7', '--sni', 'example.com', **kw)
 
+    def download(self, limit, size, lower_hard_limit=False):
+        # Exercise the production function without the installation entry point.
+        # Small limits keep the kernel boundary test fast; integrated tests below
+        # also exercise the two actual production limits.
+        self.remote_release()
+        log = self.root/'download.log'
+        log.write_bytes(b'previous log\n'*limit)
+        code = (SOURCE/'install.sh').read_text()
+        functions = code[code.index('logged() {'):code.index('step 2 "')]
+        script = 'set -Eeuo pipefail\nLOG=$1; REDACTOR=""\n'+functions
+        if lower_hard_limit:
+            script += 'ulimit -f 1\n'
+        script += ('printf "parent-before=%s\\n" "$(ulimit -f)"\n'
+                   'if download_release "$2" "$3" 5 "$4" fixture; then rc=0; else rc=$?; fi\n'
+                   'printf "parent-after=%s\\n" "$(ulimit -f)"\nexit "$rc"\n')
+        env = dict(self.env, QN_STREAM_ASSET=RELEASE_ASSET, QN_STREAM_BYTES=str(size))
+        dest = self.root/'downloaded'
+        result = subprocess.run(['bash', '-c', script, 'bounded-download-test', str(log),
+                                 f'https://github.com/124aAA/openai/releases/download/{RELEASE_TAG}/{RELEASE_ASSET}',
+                                 str(dest), str(limit)], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        return result, dest, log
+
     def data(self):
         return (self.state/'current/state.json').read_bytes()
 
@@ -261,7 +299,7 @@ class InstallerTests(unittest.TestCase):
     def test_first_screen_cancel_and_eof_precede_every_host_operation(self):
         for answer, args in [('0\n', ()), ('\x04', ()),
                              ('\n9\n0\n', ('--reinstall', '--repo', '124aAA/openai',
-                                           '--version', 'v0.2.7', '--core-archive', '/unused.tar.gz'))]:
+                                           '--version', RELEASE_TAG, '--core-archive', '/unused.tar.gz'))]:
             with self.subTest(answer=repr(answer), args=args):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, tty_input=answer)
@@ -271,7 +309,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_fresh_nonterminal_entry_needs_explicit_intent_before_mutation(self):
         for args in [(), ('--reinstall',), ('--repo', '124aAA/openai'),
-                     ('--version', 'v0.2.7'), ('--core-archive', '/unused.tar.gz')]:
+                     ('--version', RELEASE_TAG), ('--core-archive', '/unused.tar.gz')]:
             with self.subTest(args=args):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, ok=False)
@@ -283,7 +321,7 @@ class InstallerTests(unittest.TestCase):
         for answer, protocol, scheme, args in [
                 ('1\n', 'reality', 'vless://', ()),
                 ('\n9\n2\n', 'ss2022', 'ss://',
-                 ('--reinstall', '--repo', '124aAA/openai', '--version', 'v0.2.7'))]:
+                 ('--reinstall', '--repo', '124aAA/openai', '--version', RELEASE_TAG))]:
             with self.subTest(protocol=protocol):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, tty_input=answer)
@@ -324,7 +362,7 @@ class InstallerTests(unittest.TestCase):
         before = f.data()
         calls = (f.root/'commands.log').read_text()
         self.assertEqual(2, calls.count('\ncurl '))
-        self.assertIn('124aAA/openai/releases/download/v0.2.7/', calls)
+        self.assertIn(f'124aAA/openai/releases/download/{RELEASE_TAG}/', calls)
         self.assertIn('菜单需要交互终端', f.run(online=True, ok=False))
         self.assertEqual(before, f.data())
         self.assertEqual(calls.count('\ncurl '), (f.root/'commands.log').read_text().count('\ncurl '))
@@ -366,6 +404,59 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(f.bin.exists())
                 self.assertFalse(f.state.exists())
                 self.assertFalse(f.host()['active'])
+
+    def test_download_limit_streaming_boundaries_and_parent_limits(self):
+        limit = 4096
+        for size in (limit, limit+1, limit*32):
+            with self.subTest(size=size):
+                f = self.fixture()
+                result, dest, log = f.download(limit, size)
+                parent = [line.split('=', 1)[1] for line in result.stdout.splitlines()
+                          if line.startswith(('parent-before=', 'parent-after='))]
+                self.assertEqual(2, len(parent))
+                self.assertEqual(parent[0], parent[1], 'child limit changed the parent shell')
+                self.assertGreater(log.stat().st_size, limit)
+                self.assertIn('without Content-Length', log.read_text())
+                if size == limit:
+                    self.assertEqual(0, result.returncode, result.stdout)
+                    self.assertEqual(limit, dest.stat().st_size)
+                    self.assertTrue((f.root/'stream-complete').exists())
+                else:
+                    self.assertEqual(153, result.returncode, result.stdout)
+                    self.assertIn('超过下载上限', result.stdout)
+                    self.assertFalse(dest.exists(), 'partial response was retained')
+                    self.assertFalse((f.root/'stream-complete').exists())
+                self.assertEqual(limit, int((f.root/'stream-progress').read_text()))
+
+    def test_download_limit_setup_failure_refuses_transfer(self):
+        f = self.fixture()
+        result, dest, _ = f.download(4096, 1, lower_hard_limit=True)
+        self.assertEqual(125, result.returncode, result.stdout)
+        self.assertIn('无法建立下载文件大小限制', result.stdout)
+        self.assertFalse(dest.exists())
+        self.assertFalse((f.root/'stream-progress').exists())
+        self.assertFalse((f.root/'commands.log').exists(), 'curl ran without its limit')
+
+    def test_oversized_release_downloads_stop_before_host_changes(self):
+        for asset, limit, label in [(RELEASE_ASSET, 64*1024*1024, '管理器归档'),
+                                     ('SHA256SUMS', 1024*1024, '发行摘要清单')]:
+            with self.subTest(asset=asset):
+                f = self.fixture(); f.remote_release()
+                f.env.update(QN_STREAM_ASSET=asset, QN_STREAM_BYTES=str(limit+1))
+                out = f.install(online=True, ok=False)
+                self.assertIn(label+'超过下载上限', out)
+                self.assertIn(str(limit)+' 字节', out)
+                self.assertIn('已校验的完整本地发行包', out)
+                self.assertNotIn('[4/8]', out)
+                self.assertFalse(f.state.exists())
+                self.assertFalse(f.bin.exists())
+                self.assertFalse(f.unit.exists())
+                self.assertFalse(f.lib.exists())
+                self.assertFalse(f.host().get('passwd', False))
+                self.assertFalse(f.host()['active'])
+                self.assertEqual([], list((f.root/'tmp').iterdir()))
+                self.assertEqual(limit, int((f.root/'stream-progress').read_text()))
+                self.assertFalse((f.root/'stream-complete').exists())
 
     def test_explicit_port_with_leading_zero_remains_decimal(self):
         for raw, expected in [('0443', 443), ('08443', 8443)]:
