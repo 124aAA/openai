@@ -59,7 +59,7 @@ func (a *app) backup(cmd string, args []string) error {
 	if e != nil {
 		return e
 	}
-	return a.locked(func(s *node.State) error {
+	operation := func(s *node.State) error {
 		snap, e := a.snapshot(*s)
 		if e != nil {
 			return e
@@ -117,5 +117,28 @@ func (a *app) backup(cmd string, args []string) error {
 		}
 		a.message("SUCCESS", "配置恢复完成；服务文件使用当前管理器的受控定义")
 		return nil
+	}
+	if cmd != "backup" {
+		return a.locked(operation)
+	}
+	return a.store.Inspect(func() error {
+		if _, e := os.Lstat(a.store.Root); e != nil {
+			if os.IsNotExist(e) {
+				return errors.New("状态目录不存在，未创建备份")
+			}
+			return fmt.Errorf("无法检查状态目录，未创建备份：%w", e)
+		}
+		for _, journal := range []string{"transaction.json", "uninstall.json"} {
+			if _, e := os.Lstat(filepath.Join(a.store.Root, journal)); e == nil {
+				return errors.New("存在未完成事务，当前配置尚未确认提交，未创建备份；请先用 qingnode doctor 检查，再决定用 qingnode recover 恢复")
+			} else if !os.IsNotExist(e) {
+				return fmt.Errorf("无法核查未完成事务，未创建备份：%w", e)
+			}
+		}
+		s, e := a.store.Load()
+		if e != nil {
+			return e
+		}
+		return operation(&s)
 	})
 }
