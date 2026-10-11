@@ -1,6 +1,6 @@
 # QingNode 开发与验证
 
-QingNode 保留 Bash 安装入口、Go 管理器、JSON State、官方 sing-box 和 systemd。改动以小范围、可回退为优先；本轮架构与执行证据分别见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [TEST_REPORT.md](TEST_REPORT.md)，当前未发布改动见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+QingNode 保留 Bash 安装入口、Go 管理器、JSON State、官方 sing-box 和 systemd。改动以小范围、可回退为优先；本轮架构与执行证据分别见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [TEST_REPORT.md](TEST_REPORT.md)，版本改动见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ## 按现有边界放代码
 
@@ -37,7 +37,7 @@ sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStor
 
 安装器测试需要 root，必须在隔离测试环境中运行。权限测试验证专用账户的真实降权读取；普通非 root 单元测试不能替代它。项目使用 Linux 系统接口，Windows 下交叉编译成功只证明能生成目标文件，不证明 Linux 执行成功。`go test -race` 还依赖相应架构的 C 工具链。
 
-官方核心测试需要经过摘要校验的文件。CI 用 `python3 scripts/fetch-test-core.py` 获取固定版本，并通过 `SING_BOX_BIN`、`SING_BOX_ARCHIVE` 传给测试；本地运行须显式设置这些环境变量。`MIHOMO_BIN` 用于可选的客户端配置解析。没有这些文件时的 `SKIP` 必须单独记录，不能写成官方核心或客户端验证通过。
+官方核心测试需要经过摘要校验的文件。CI 用 `python3 scripts/fetch-test-core.py` 默认获取固定版本的 sing-box 和 Mihomo，并通过 `SING_BOX_BIN`、`SING_BOX_ARCHIVE`、`MIHOMO_BIN` 传给测试；本地运行须显式设置这些环境变量。ARM64 本地只取 sing-box 时使用 `--core-only`，并如实记录 Mihomo 未执行；CI与发布必须执行三协议YAML解析。没有这些文件时的 `SKIP` 必须单独记录，不能写成官方核心或客户端验证通过。
 
 ```bash
 go test ./internal/node -run 'OfficialCore|OfficialArchive' -v -count=1
@@ -50,6 +50,6 @@ bash scripts/build.sh
 
 `scripts/acceptance-vps.sh --disposable` 仅用于明确授权、可重建、没有现有 QingNode 的 root + systemd 主机。它会安装、修改和卸载节点；失败保留现场。这个本机生命周期验收不包含公网、ACME、BBR、防火墙、ARM64 或全部跨版本升级验证。生产主机、SSH 登录、现有节点、公网测试和证书签发必须按已授权范围另行执行。
 
-CI 保留静态检查、race 单元测试、root 权限测试、安装器隔离测试、官方核心三协议 TCP/UDP、双架构构建以及真实 systemd 生命周期门槛。发布工作流在这些步骤完成后才上传发行包；推送 main 或版本 tag 可能触发发布工作流，因此 Git 提交、推送、打 tag、部署和发布需要分别确认授权范围。通过自动检查不等于管理员已经验收，也不能据此修改旧版历史结论。
+CI 保留静态检查、race、root权限、安装器、官方三协议TCP/UDP、Mihomo解析、双架构包和真实systemd门槛。release/v*分支先验证候选；main/tag才在完整验收后发布。版本、准确提交、双架构摘要与RELEASE.json严格绑定；同名资产不符拒绝覆盖，草稿只有全部验证后才建立并上传，确认完整才转正式版。Git推送/发布与生产部署按用户授权范围分别处理，自动检查不代替人类或公网验收。
 
 准备发布时核对版本、安装器版本、发行说明、包内文档和摘要；保留旧数据兼容与恢复路径。涉及凭据、schema、协议默认值或核心适配范围的变更，应先补迁移/回滚设计和专项证据，再决定是否发布。
