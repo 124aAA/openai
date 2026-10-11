@@ -4,6 +4,8 @@
 [![Version](https://img.shields.io/badge/version-0.2.7--preview-blue)](https://github.com/124aAA/openai/releases/tag/v0.2.7)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+[新手指南：从安装到导入客户端](docs/GETTING_STARTED.md) · [故障 FAQ：按现象排查](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [开发与验证](#开发和验收)
+
 **一条命令进入，先选节点协议，搭建后集中查看链接与连接信息。**
 
 QingNode 是基于官方 sing-box 的轻量 VPS 代理节点管理器，支持 VLESS REALITY / XTLS Vision、Shadowsocks 2022 和 Hysteria2。安装、节点维护、客户端导出、备份与故障诊断都可以通过 SSH 完成，适合管理自己的个人 VPS。

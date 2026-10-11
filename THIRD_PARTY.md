@@ -38,3 +38,5 @@ Mihomo 1.19.30 只在测试环境用于验证 YAML，本项目不分发其二进
 交互地址探测和诊断使用 ipify 的公开 IPv4/IPv6 HTTPS 接口；仅查询公网地址，不发送节点密钥或配置：https://www.ipify.org/ 。
 
 架构调研参考：233boy/sing-box、mack-a/v2ray-agent、yonggekkk/sing-box-yg、XTLS/Xray-install、HyNetworks/hysteria、MHSanaei/3x-ui。参考不表示这些项目为本项目背书。
+
+2026-10-11 本轮系统调研覆盖上述列表中的 233boy、mack-a、Xray-install、Hysteria、3x-ui，以及 [fscarmen/sing-box](https://github.com/fscarmen/sing-box)、[alireza0/s-ui](https://github.com/alireza0/s-ui)、[SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[charmbracelet/bubbletea](https://github.com/charmbracelet/bubbletea)、[charmbracelet/huh](https://github.com/charmbracelet/huh)，共十个项目。固定提交源码、Issue/Release、许可证及采用/延后原因见本轮独立交付的《开源借鉴报告》。本轮学习交互、恢复材料与副作用边界的设计并独立实现，没有复制外部GPL/AGPL业务源码，也未引入这些项目的框架、面板或数据库依赖。
