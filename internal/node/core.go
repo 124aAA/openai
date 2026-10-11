@@ -272,7 +272,7 @@ func (b SystemBackend) Check(s State, path string) error {
 	owned := map[string]bool{}
 	for _, socket := range b.Sockets() {
 		if socket.Owned {
-			owned[fmt.Sprintf("%s/%d/%s", socket.Network, socket.Port, socket.Address)] = true
+			owned[fmt.Sprintf("%s/%d/%s", socket.Network, socket.Port, net.ParseIP(socket.Address).String())] = true
 		}
 	}
 	for _, n := range s.Nodes {
@@ -281,7 +281,7 @@ func (b SystemBackend) Check(s State, path string) error {
 		}
 		address := net.JoinHostPort(n.Listen, fmt.Sprint(n.Port))
 		for _, network := range Networks(n) {
-			if !owned[fmt.Sprintf("%s/%d/%s", network, n.Port, n.Listen)] {
+			if !owned[fmt.Sprintf("%s/%d/%s", network, n.Port, net.ParseIP(n.Listen).String())] {
 				if e := available(network, address); e != nil {
 					return fmt.Errorf("端口 %s/%s 无法绑定；请用 qingnode ports 查看占用并选择新端口：%w", address, network, e)
 				}

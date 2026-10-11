@@ -74,10 +74,11 @@ func SocketsReady(s State, sockets []Socket) bool {
 		if !n.Enabled {
 			continue
 		}
+		listen := net.ParseIP(n.Listen)
 		for _, network := range Networks(n) {
 			found := false
 			for _, socket := range sockets {
-				if socket.Owned && socket.Network == network && socket.Port == n.Port && socket.Address == n.Listen {
+				if socket.Owned && socket.Network == network && socket.Port == n.Port && listen != nil && listen.Equal(net.ParseIP(socket.Address)) {
 					found = true
 					break
 				}
