@@ -128,7 +128,7 @@ sudo qingnode edit --id NODE_ID --name renamed-main
 
 ## 7. 保存、迁移和恢复
 
-普通配置备份不暂停服务；完整迁移要先盘点资产和短停范围。口令至少12字节，用权限0600的口令文件或交互隐藏输入，不放进命令行。
+以下命令使用 v0.3.0。若尚在 v0.2.8，应先按[旧版升级步骤](MIGRATION.md#从-v028-升级到-v030)使用原程序配置备份及新包程序只读预览，不向旧程序传 `--full`。普通配置备份不暂停服务；完整迁移要先盘点资产和短停范围。口令至少12字节，用权限0600的口令文件或交互隐藏输入，不放进命令行。
 
 ```bash
 sudo qingnode backup --file /root/config.qnbak --password-file /root/backup-pass.txt

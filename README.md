@@ -107,12 +107,12 @@ qingnode reality-targets --top 6
 
 ### 添加节点与 Hysteria2 向导怎么填
 
-本地候选在主菜单选择 `1 快速建节点`，即可选择协议，或输入 `h` 按已知条件查看建议，再填写参数。公开 v0.2.8 的入口仍为 `6 搭建新节点`。REALITY 的 SNI 默认 `auto`，可直接回车自动筛选，或手动填写目标域名；端口默认 `auto`，可回车自动选端口，也可填写固定端口。
+v0.3.0 在主菜单选择 `1 快速建节点`，即可选择协议，或输入 `h` 按已知条件查看建议，再填写参数。尚未升级的 v0.2.8 入口为 `6 搭建新节点`。REALITY 的 SNI 默认 `auto`，可直接回车自动筛选，或手动填写目标域名；端口默认 `auto`，可回车自动选端口，也可填写固定端口。
 
 | 参数 | 填写说明 |
 | --- | --- |
 | 节点名称 | 自己容易辨认的名称，例如 `JP-Reality-01` |
-| 协议 | 原有 `1` REALITY、`2` SS2022、`3` Hysteria2；候选还提供 AnyTLS、Trojan、传统 SS AEAD、TUIC，条件见协议指南 |
+| 协议 | `1` REALITY、`2` SS2022、`3` Hysteria2，以及 AnyTLS、Trojan、传统 SS AEAD、TUIC，条件见协议指南 |
 | 服务器地址 | 客户端实际连接的 VPS 公网 IP 或指向 VPS 的域名 |
 | 端口 | `auto` 自动选择可用端口，或填写未占用的固定端口 |
 | REALITY SNI | `auto` 自动筛选测速，或填写满足握手与目标排除要求的域名 |
@@ -377,13 +377,13 @@ sudo qingnode restore --file /root/backup.qnbak --yes
 
 恢复前再次加密备份当前配置，口令与此次恢复所用口令相同。恢复仅从类型校验后的State生成配置，按目标systemd/OpenRC重新渲染服务，不执行快照中的任意服务脚本；验证或启动失败回滚。跨机器需先安装匹配版本的核心，并调整地址和防火墙，可用 `--manual-firewall` 恢复为手动模式。
 
-**默认配置备份不包含ACME账户/证书缓存、核心二进制、全机防火墙和BBR系统设置。** ACME恢复可能重新签发并受CA限制。当前源码另有 `backup --full` 加密迁移与显式备份保留策略，范围、缺项、短停和目标环境预检见[迁移与恢复](docs/MIGRATION.md)；它也不是整机备份。历史配置代和旧核心仍保留。
+**默认配置备份不包含ACME账户/证书缓存、核心二进制、全机防火墙和BBR系统设置。** ACME恢复可能重新签发并受CA限制。v0.3.0 另有 `backup --full` 加密迁移与显式备份保留策略，范围、缺项、短停和目标环境预检见[迁移与恢复](docs/MIGRATION.md)；它也不是整机备份。历史配置代和旧核心仍保留。
 
 上面的 `/root/backup.qnbak` 是示例路径，恢复时应换成实际备份文件。建议设置至少 12 位的强口令，将重要加密备份复制到 VPS 之外；忘记口令无法通过管理器找回。
 
 ## 卸载
 
-候选菜单入口：**7 系统维护 → 2 备份、更新、回退与卸载 → 7 卸载**。CLI 的 `--yes` 表示已确认操作，请按需要选择一种方式：
+v0.3.0 菜单入口：**7 系统维护 → 2 备份、更新、回退与卸载 → 7 卸载**。CLI 的 `--yes` 表示已确认操作，请按需要选择一种方式：
 
 | 方式 | 命令 |
 | --- | --- |
@@ -400,11 +400,11 @@ sudo qingnode restore --snapshot --file /var/backups/qingnode/before-uninstall-�
 
 此时输入的口令用于恢复前的加密备份。请将重要加密备份复制到 VPS 之外，并妥善保管口令。
 
-## 更新与 0.1.0 迁移
+## 更新与旧版迁移
 
 `core versions` 显示当前及官方最新稳定版；`update` 获取官方 Release，校验归档并保留旧核心，通过配置检查和服务就绪后提交。只接受已适配的 1.14.x 正式版，不会自动跨版本。也可显式指定 `core update --version ... --sha256 ... --archive ...`；降级需 `--allow-downgrade`。
 
-管理器使用 `self-update --bundle /绝对路径/新版解压包`，或 `self-update --version v0.3.0` 从 `124aAA/openai` 下载指定版本，不覆盖节点、凭据和备份。可加 `--repo owner/repo` 显式指定其他发行仓库。建议 0.1.0 用户先备份，再运行新包 `install.sh --reinstall`；旧的 State 字段和 v1 备份兼容，新字段按需补充，历史未知创建时间保持为空。使用 0.2.0 新字段后，0.1.0 会拒绝读取未知字段，不能直接降级管理器。
+管理器使用 `self-update --bundle /绝对路径/新版解压包`，或 `self-update --version v0.3.0` 从 `124aAA/openai` 下载指定版本，不覆盖节点、凭据和备份。可加 `--repo owner/repo` 显式指定其他发行仓库。旧版用户先用原管理器做配置备份，再按[旧正式版升级步骤](docs/MIGRATION.md#从-v028-升级到-v030)运行已核验新包的 `install.sh --reinstall`；旧版没有 `backup --full`，完整迁移预览应使用新包中的程序。旧 State 只读在内存兼容，写入会保留原件并使用 State9；v1/v2 备份仍可读。旧管理器不能直接读取 State9，降级须同时恢复匹配的旧程序、旧 State、核心及受管资源。
 
 核心与管理器是两个独立更新：
 
@@ -429,14 +429,14 @@ sudo qingnode diagnose
 
 | 现象 | 处理方法 |
 | --- | --- |
-| 第 3 步提示仓库名或正式版本号无效 | v0.2.1 安装器存在系统字段冲突；按“下载和重复安装”中的命令使用 v0.2.8 修复入口 |
+| 第 3 步提示仓库名或正式版本号无效 | v0.2.1 安装器存在系统字段冲突；按“下载和重复安装”中的命令使用本版修复入口 |
 | wget 或 curl 找不到 | 改用另一条入口命令；两者都没有时，先通过 apt 安装其中一种 |
 | 下载报 HTTP 404 | 检查指定版本与发行资产是否存在，确认使用本仓库的安装地址 |
 | 下载超时 / DNS 错误 | 核对 VPS DNS、GitHub 连通性和软件源；也可使用完整本地包与官方核心归档 |
 | 端口被占用 | 运行 `sudo qingnode ports` 查看进程，选择新端口或随机端口 |
 | 找不到 main 节点 | 运行 `sudo qingnode list`，把示例名称换成实际节点 ID 或名称 |
 | 服务运行但客户端连不上 | 核对服务器地址、端口、协议、链接是否更新，以及主机防火墙和云安全组 |
-| 第 7 步 core-version 权限被拒绝 | v0.2.2 的目录 umask 问题；使用 v0.2.8 新入口加 --reinstall --auto，保留原数据 |
+| 第 7 步 core-version 权限被拒绝 | v0.2.2 的目录 umask 问题；使用本版新入口加 --reinstall --auto，保留原数据 |
 | REALITY 目标连接失败 | 核对 SNI 和握手目标，确认 VPS 能访问目标，检查时间同步 |
 | HY2 无法连接 | 检查 UDP 放行、证书域名和有效期；ACME 签发还需检查 TCP 80 |
 | 提示 IPv6 不可用 | 仅 IPv4 VPS 可继续使用 IPv4；不要填写不可达的 IPv6 地址 |
@@ -510,17 +510,17 @@ python3 scripts/test-maintenance-harness.py -v
 sudo env GO="$(command -v go)" python3 scripts/test-installer.py
 python3 scripts/fetch-test-core.py
 SING_BOX_BIN="$PWD/artifacts/test-core/sing-box" go test ./internal/node -run OfficialCore -v -count=1
-bash scripts/build.sh 0.2.8
-bash scripts/build-probe.sh 0.2.8
+bash scripts/build.sh 0.3.0
+bash scripts/build-probe.sh 0.3.0
 ```
 
 构建需要 Go 1.25+、Python3、GNU tar；现有 CI 固定 Go 1.27.1，本批实际工具/环境见 BATCH_02。vendor 随源码提供。安装器隔离测试使用临时路径、真实 Bash/CLI 与模拟系统命令。`scripts/acceptance-vps.sh` 另在一次性 Ubuntu runner 上验证真实 systemd 安装、重装、启停、备份恢复及卸载，v0.2.3 已完整通过；每次发布仍须重跑。该脚本仅供可清理的空白机器，公网连接和各平台需单独验收。
 
-`build-probe.sh` 独立生成 `artifacts/probe/` 下 Linux amd64/arm64 和 Windows amd64 测试助手包、内外摘要与许可声明；独立 CI artifact 不进入原四项正式发行资产集合，也不把桌面助手装进 systemd。构建成功只证明生成目标文件，各平台执行与官方核心流量另验。
+`build-probe.sh` 独立生成 `artifacts/probe/` 下 Linux amd64/arm64 和 Windows amd64 测试助手包、内外摘要与许可声明。v0.3.0 发布流程将三份探针包与两份管理器包纳入同一 schema2 发行清单；加上 SHA256SUMS 和 RELEASE.json 共七项公开资产。探针不会作为桌面常驻服务安装。构建成功只证明生成目标文件，各平台执行与官方核心流量另验。
 
 CI 与发布流程保留真实核心 TCP/UDP 测试门槛，成功后才上传发行包。普通 Go 测试未设置外部核心环境变量时会跳过集成项，不能把跳过当作通过。上面的 `OfficialCore` 命令验证官方核心；归档完整性测试另需设置 `SING_BOX_ARCHIVE` 并匹配 `OfficialArchive`，Mihomo 解析测试需要 `MIHOMO_BIN`。
 
-协议适配集中在 `internal/node/protocol_*.go` 和注册表；UI 文本集中到 `internal/ui/catalog.go`。服务器拓扑另用独立的类型对象和校验，不把客户端导出列表当作服务器路由。后续增加协议仍需注册、参数创建/菜单入口和测试，并核对事务与版本边界。完整英文翻译仍未完成；在线订阅、ACME资产迁移和七协议属于未发行源码，各自的支持范围与未验证项按对应批次记录，不表示公开v0.2.8已更新。
+协议适配集中在 `internal/node/protocol_*.go` 和注册表；UI 文本集中到 `internal/ui/catalog.go`。服务器拓扑另用独立的类型对象和校验，不把客户端导出列表当作服务器路由。后续增加协议仍需注册、参数创建/菜单入口和测试，并核对事务与版本边界。完整英文翻译仍未完成；在线订阅、ACME资产迁移和七协议已纳入 v0.3.0 源码，实际公开状态以对应 Release 为准，支持范围和未验证项见[能力矩阵](docs/CAPABILITIES.md)。下方历史报告中的“未发行”保留当时含义。
 
 开发文档：[架构说明](docs/ARCHITECTURE.md) · [能力矩阵](docs/CAPABILITIES.md) · [网络测试](docs/NETWORK_TESTS.md) · [拓扑与落地](docs/TOPOLOGY.md) · [第 05 批持续实施记录](docs/BATCH05.md) · [审计与改造计划](docs/AUDIT_STAGE2.md) · [测试报告](docs/TEST_REPORT.md) · [版本说明](docs/RELEASE_NOTES.md)。
 

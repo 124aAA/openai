@@ -16,7 +16,7 @@
 
 ## 使用与恢复
 
-新装先取正式Release的SHA256SUMS/RELEASE.json与匹配架构完整包，核验后运行包内install.sh；需要可重现版本时显式--version v0.3.0。升级前先做配置备份与`backup --full --preview`，按清单决定完整包是否需要显式`--quiesce`；然后用已核验完整包`install.sh --reinstall`。不要在命令行传备份口令或订阅/DNS秘密。
+新装先取正式Release的SHA256SUMS/RELEASE.json与匹配架构完整包，核验后运行包内install.sh；需要可重现版本时显式--version v0.3.0。旧版升级先用原管理器做配置备份，再用**已校验新包的程序**执行`backup --full --preview`，旧v0.2.8没有此参数；按清单决定完整包是否需要显式`--quiesce`，然后用同包`install.sh --reinstall`。准确示例见[MIGRATION.md](MIGRATION.md#从-v028-升级到-v030)。不要在命令行传备份口令或订阅/DNS秘密。
 
 升级后分别核对`version --json`、`status --json`、`check`、监听、目标TCP/UDP、证书/订阅及原运行/自启状态。配置/卸载中断使用`recover`；完整迁移中断使用`restore --recover-migration --yes`；附属部署用`service recover --name … --preview`。上一代配置`rollback`直接应用且没有preview。退回不懂State9的旧管理器必须保留匹配的旧格式/旧程序恢复点，不能让旧程序强读新State。详见MIGRATION。
 
