@@ -15,6 +15,10 @@ type Adapter struct {
 }
 
 var adapters = map[string]Adapter{
+	"anytls":    {[]string{"tcp"}, anytlsCredential, validateAnyTLS, anytlsInbound, anytlsURI, anytlsOutbound, anytlsMihomo},
+	"trojan":    {[]string{"tcp"}, trojanCredential, validateTrojan, trojanInbound, trojanURI, trojanOutbound, trojanMihomo},
+	"ss-aead":   {[]string{"tcp", "udp"}, ssAEADCredential, validateSSAEAD, ssAEADInbound, ssAEADURI, ssAEADOutbound, ssAEADMihomo},
+	"tuic":      {[]string{"udp"}, tuicCredential, validateTUIC, tuicInbound, tuicURI, tuicOutbound, tuicMihomo},
 	"reality":   {[]string{"tcp"}, realityCredential, validateReality, realityInbound, realityURI, realityOutbound, realityMihomo},
 	"hysteria2": {[]string{"udp"}, hysteriaCredential, validateHysteria, hysteriaInbound, hysteriaURI, hysteriaOutbound, hysteriaMihomo},
 	"ss2022":    {[]string{"tcp", "udp"}, ssCredential, validateSS2022, ssInbound, ssURI, ssOutbound, ssMihomo},

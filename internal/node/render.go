@@ -14,22 +14,61 @@ import (
 type M = map[string]any
 
 func Server(s State, root string) ([]byte, error) {
+	var resolveErr error
+	s, resolveErr = CanonicalCertificates(s)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
 	in := []any{}
+	providers := []any{}
+	providerSeen := map[string]bool{}
 	for _, n := range s.Nodes {
 		if !n.Enabled {
 			continue
 		}
 		adapter, _ := Protocol(n.Protocol)
 		config := adapter.Inbound(n, root)
+		if n.Certificate != nil && n.Certificate.Mode == "acme" && n.Certificate.ACME != nil {
+			tag := "certificate-" + n.CertificateID
+			if !providerSeen[tag] {
+				provider := certificateACMEProvider(n, root)
+				resource, _ := s.FindCertificate(n.CertificateID)
+				provider["data_directory"] = CertificateACMEDirectory(root, *resource)
+				provider["tag"] = tag
+				providers = append(providers, provider)
+				providerSeen[tag] = true
+			}
+			config["tls"].(M)["certificate_provider"] = tag
+		}
 		config["tag"] = n.ID
 		config["listen"] = n.Listen
 		config["listen_port"] = n.Port
 		in = append(in, config)
 	}
-	return json.MarshalIndent(M{"log": M{"level": "warn", "timestamp": true}, "dns": M{"servers": []any{M{"type": "local", "tag": "system"}}}, "inbounds": in, "outbounds": []any{M{"type": "direct", "tag": "direct"}}, "route": M{"final": "direct", "default_domain_resolver": "system"}}, "", "  ")
+	for _, f := range s.Forwards {
+		if f.Enabled {
+			in = append(in, forwardInbound(f))
+		}
+	}
+	route := M{"final": "direct", "default_domain_resolver": "system"}
+	out, endpoints, err := topologyServerConfig(s, in, route)
+	if err != nil {
+		return nil, err
+	}
+	config := M{"log": M{"level": "warn", "timestamp": true}, "dns": ProjectDNS(s.DNS), "inbounds": in, "outbounds": out, "route": route}
+	if api := s.Observability; api != nil && api.Enabled {
+		config["services"] = []any{M{"type": "api", "tag": "qingnode-api", "listen": api.Listen, "listen_port": api.Port, "secret": api.Secret}}
+	}
+	if len(providers) > 0 {
+		config["certificate_providers"] = providers
+	}
+	if len(endpoints) != 0 {
+		config["endpoints"] = endpoints
+	}
+	return json.MarshalIndent(config, "", "  ")
 }
 func SelectUser(n Node, id string) (User, error) {
 	if id == "" {
@@ -65,7 +104,7 @@ func Outbound(n Node, u User) M {
 	out := p.Outbound(n, u)
 	out["tag"] = "proxy"
 	out["server"] = n.Host
-	out["server_port"] = n.Port
+	out["server_port"] = EffectiveConnectPort(n)
 	return out
 }
 func Client(n Node, u User, port int) M {
@@ -79,15 +118,43 @@ func MihomoProxy(n Node, u User) M {
 	out := p.Mihomo(n, u)
 	out["name"] = n.Name + " / " + u.Name
 	out["server"] = n.Host
-	out["port"] = n.Port
+	out["port"] = EffectiveConnectPort(n)
 	return out
 }
 func Export(n Node, u User, format string) ([]byte, error) {
-	if _, ok := Protocol(n.Protocol); !ok {
+	if warnings := ProtocolExportWarnings(n, format); len(warnings) > 0 {
+		return nil, errors.New(strings.Join(warnings, "；"))
+	}
+	if n.HY2 != nil && n.Protocol != "hysteria2" {
+		return nil, errors.New("Hysteria2性能设置不能用于其他协议")
+	}
+	if err := validateHY2Performance(n.HY2); err != nil {
+		return nil, err
+	}
+	if format != "sing-box" {
+		if warnings := HY2ExportWarnings(n, format); len(warnings) > 0 {
+			return nil, fmt.Errorf("导出将丢失性能选择：%s", strings.Join(warnings, "；"))
+		}
+	}
+	return exportUnchecked(n, u, format)
+}
+
+func exportUnchecked(n Node, u User, format string) ([]byte, error) {
+	if err := ValidateHY2ClientCertificate(n, format); err != nil {
+		return nil, err
+	}
+	if p, ok := Protocol(n.Protocol); !ok {
 		return nil, errors.New("不支持该协议")
+	} else if n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" {
+		if err := p.Validate(n); err != nil {
+			return nil, err
+		}
 	}
 	if !n.Enabled {
 		return nil, errors.New("节点已停用，启用后才能导出")
+	}
+	if (format == "uri" || format == "base64" || format == "qr") && URI(n, u) == "" {
+		return nil, errors.New("该协议或高级设置不支持分享URI，请导出完整配置")
 	}
 	switch format {
 	case "uri":

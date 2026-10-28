@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"qingnode/internal/platform"
 )
 
 // ResourceOverview reports local readings only; nil means unavailable, not zero.
@@ -60,6 +61,23 @@ func OverviewResources(root string) ResourceOverview {
 // the node or establish that clients can connect through it.
 func OverviewService(runner Runner) ServiceOverview {
 	if runner == nil {
+		switch platform.DetectServiceManager() {
+		case platform.InitOpenRC:
+			state, e := platform.NewManager(platform.InitOpenRC, nil).State("qingnode")
+			if e != nil {
+				return ServiceOverview{}
+			}
+			enabled := "unknown"
+			if state.Enabled != nil {
+				enabled = "disabled"
+				if *state.Enabled {
+					enabled = "enabled"
+				}
+			}
+			return ServiceOverview{ActiveState: state.State, SubState: state.SubState, UnitFileState: enabled}
+		case platform.InitUnavailable:
+			return ServiceOverview{}
+		}
 		runner = Run
 	}
 	b, err := runner(650*time.Millisecond, "systemctl", "show", "qingnode.service", "--no-pager", "--property=ActiveState,SubState,UnitFileState,ActiveEnterTimestampMonotonic,NRestarts")

@@ -8,6 +8,7 @@ if [[ ${1:-} != --disposable || $# -lt 2 ]]; then
   exit 2
 fi
 [[ $EUID == 0 && $(ps -p 1 -o comm=) == systemd ]] || { echo '未验证：需要 root 与真实 systemd VPS。' >&2; exit 1; }
+command -v python3 >/dev/null || { echo '未验证：验收脚本需要 Python3；它是测试工具，不是 QingNode 运行依赖。' >&2; exit 1; }
 BUNDLE=$2
 shift 2
 INSTALL_EXTRA=() CORE_EXTRA=()
@@ -22,11 +23,13 @@ TEMP_DIR=$(mktemp -d)
 cleanup() {
   rc=$?
   trap - EXIT
-  rm -rf -- "$TEMP_DIR"
   if ((rc)); then
     echo '验收失败：保留项目安装现场，请检查 qingnode diagnose；未自动删除节点。' >&2
+    echo "私有验收材料保留在：$TEMP_DIR（含测试客户端凭据，请勿公开）。" >&2
     systemctl status qingnode.service --no-pager --full || true
     journalctl -u qingnode.service -n 80 --no-pager || true
+  else
+    rm -rf -- "$TEMP_DIR"
   fi
   exit "$rc"
 }
@@ -46,6 +49,7 @@ if systemctl is-active --quiet qingnode.service; then echo '重复安装改变�
 qingnode start
 qingnode service enable
 qingnode add --auto --protocol reality --name acceptance-reality --server 127.0.0.1 --listen 127.0.0.1 --random-port --quiet
+python3 "$(dirname -- "${BASH_SOURCE[0]}")/test-maintenance-flow.py" --disposable --work-dir "$TEMP_DIR"
 qingnode export --id acceptance-ss --format sing-box --out "$TEMP_DIR/client.json"
 qingnode export --id acceptance-reality --format uri --out "$TEMP_DIR/client.uri"
 openssl rand -base64 32 > "$TEMP_DIR/pass"
@@ -70,4 +74,4 @@ bash "$BUNDLE/install.sh" --auto --server 127.0.0.1 --listen 127.0.0.1 "${INSTAL
 qingnode check
 qingnode uninstall --purge --yes
 [[ ! -e /var/lib/qingnode && ! -e /usr/local/bin/qingnode && ! -e /etc/systemd/system/qingnode.service ]]
-echo '本机安装/重复执行/服务/节点/备份恢复/卸载验收通过。公网传输、ACME、BBR、防火墙、ARM64 与跨版本升级仍须单独验收。'
+echo '本机安装/重复执行/服务/节点/备份恢复/卸载与真实 MainPID + 持续 TCP 维护验收通过。公网传输、ACME、BBR、防火墙、ARM64 与跨版本升级仍须单独验收。'

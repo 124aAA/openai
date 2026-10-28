@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"qingnode/internal/node"
+	"qingnode/internal/ui"
 )
 
 func displayTime(at time.Time) string { return at.Local().Format("2006-01-02 15:04 MST") }
@@ -54,6 +55,9 @@ func certificateLabel(n node.Node, now time.Time) string {
 	if c.Mode == "acme" {
 		return "ACME 管理，期限未知（需检查实际签发证书）"
 	}
+	if c.Mode == "file" {
+		return "外部文件引用（使用certificate status查看实际证书）"
+	}
 	rest := []byte(c.CertPEM)
 	var b *pem.Block
 	for len(rest) > 0 {
@@ -86,7 +90,7 @@ func certificateLabel(n node.Node, now time.Time) string {
 }
 func updateLabel(r updateRecord, installed string, core bool, now time.Time) string {
 	if r.CheckedAt.IsZero() {
-		return "尚未检查（选择8联网查询）"
+		return "尚未检查（主菜单9联网查询）"
 	}
 	failure := ""
 	if r.Failed {
@@ -131,12 +135,19 @@ func (a *app) overview(w io.Writer) error {
 	})
 	service := node.ServiceOverview{}
 	if !a.offline {
-		service = node.OverviewService(nil)
+		service = node.OverviewService(a.serviceRunner)
 	}
 	resources := node.OverviewResources(a.store.Root)
 	return renderOverview(w, s, h, err, historyErr, service, resources, a.offline, time.Now())
 }
-func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, historyErr error, service node.ServiceOverview, r node.ResourceOverview, offline bool, now time.Time) error {
+func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, historyErr error, service node.ServiceOverview, r node.ResourceOverview, offline bool, now time.Time) (err error) {
+	human := ui.HumanWriter(w)
+	defer func() {
+		if flush := human.Flush(); err == nil {
+			err = flush
+		}
+	}()
+	w = human
 	fmt.Fprintln(w, "\n━━━━━━━━ QingNode 青节点 · 管理与说明 ━━━━━━━━")
 	core := s.CoreVersion
 	if stateErr != nil {
@@ -184,6 +195,9 @@ func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, his
 		}
 	}
 	fmt.Fprintf(w, "节点：共%d个，启用%d个\n", len(s.Nodes), enabled)
+	if len(s.Egresses) > 0 || len(s.EgressPolicies) > 0 || len(s.Forwards) > 0 {
+		fmt.Fprintf(w, "拓扑声明：远程出口%d个，出口策略%d个，端口中转%d个（实际链路需单独测试）\n", len(s.Egresses), len(s.EgressPolicies), len(s.Forwards))
+	}
 	if historyErr != nil {
 		fmt.Fprintln(w, "观测记录不可用："+node.Redact(historyErr.Error()))
 		h = dashboardHistory{}
@@ -198,7 +212,7 @@ func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, his
 		fmt.Fprintf(w, "最近成功备份：%s；%s\n", displayTime(h.Backup.At), label)
 	}
 	if h.Diagnostic == nil {
-		fmt.Fprintln(w, "最近服务器侧自检：待检查（选择9，会联网）")
+		fmt.Fprintln(w, "最近服务器侧自检：待检查（主菜单4，再选1；会联网）")
 	} else {
 		r := h.Diagnostic
 		label := recordAge(r.At, now)

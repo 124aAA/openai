@@ -12,27 +12,40 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
 import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 MAX_ASSET = 128 * 1024 * 1024
 MAX_JSON = 4 * 1024 * 1024
 GO_VERSION = "go1.27.1"
 DOCS = {"ARCHITECTURE.md", "TEST_REPORT.md", "RELEASE_NOTES.md", "AUDIT_STAGE2.md",
-        "GETTING_STARTED.md", "FAQ.md", "DEVELOPMENT.md"}
+        "GETTING_STARTED.md", "FAQ.md", "DEVELOPMENT.md", "CAPABILITIES.md",
+        "BATCH_01.md", "NETWORK_TESTS.md", "BATCH_02.md", "NETWORK_PERFORMANCE.md", "BATCH_03.md",
+        "ENDPOINTS.md", "BATCH04.md", "TOPOLOGY.md", "BATCH05.md", "SUBSCRIPTIONS.md", "BATCH06.md", "CERTIFICATES.md", "MIGRATION.md", "BATCH07.md", "MONITORING.md", "BATCH08.md", "PROTOCOLS.md", "BATCH09.md", "PLATFORMS.md", "BATCH10.md", "WORKFLOWS.md", "BATCH11.md"}
 PACKAGE_FILES = {"qingnode", "install.sh", "README.md", "LICENSE", "THIRD_PARTY.md",
                  "SHA256SUMS"} | {"docs/" + name for name in DOCS}
+PROBE_TARGETS = ("linux-amd64", "linux-arm64", "windows-amd64")
+PROBE_DOCS = {"NETWORK_TESTS.md", "BATCH_02.md", "NETWORK_PERFORMANCE.md", "BATCH_03.md",
+              "ENDPOINTS.md", "BATCH04.md", "TOPOLOGY.md", "BATCH05.md", "SUBSCRIPTIONS.md",
+              "BATCH06.md", "CERTIFICATES.md", "MIGRATION.md", "BATCH07.md", "MONITORING.md",
+              "BATCH08.md", "PROTOCOLS.md", "BATCH09.md", "PLATFORMS.md", "BATCH10.md",
+              "WORKFLOWS.md", "BATCH11.md"}
 GATE_STEPS = {
     "Validate release target", "Static analysis and Go tests",
     "Service-user permissions", "Installer transaction tests",
-    "Release guard offline tests", "Fetch pinned official test tools",
-    "Official parser and transport tests", "Build two Linux architectures",
+    "Release guard offline tests", "Maintenance stream observer regression", "Fetch pinned official test tools",
+    "Official parser and transport tests", "Controlled topology and WireGuard namespace transport", "Build two Linux architectures",
+    "Cross-batch migration and subscription acceptance",
+    "Build portable network test tool", "Terminal and machine interface acceptance",
     "Real systemd lifecycle on disposable runner", "Bind release assets",
     "Upload verified candidate assets",
+    "Upload portable network test artifacts",
 }
 spec = importlib.util.spec_from_file_location("test_tools", pathlib.Path(__file__).with_name("fetch-test-core.py"))
 test_tools = importlib.util.module_from_spec(spec)
@@ -72,6 +85,9 @@ def version_from_source(root):
     cli = (root / "cmd/qingnode/main.go").read_text(encoding="utf-8")
     require(re.findall(r'^var version = "([^"]+)"$', cli, re.M) == [version[1:]],
             "installer and CLI versions disagree")
+    probe = (root / "cmd/qingprobe/main.go").read_text(encoding="utf-8")
+    require(re.findall(r'^var version = "([^"]+)"$', probe, re.M) == [version[1:]],
+            "installer and portable probe versions disagree")
     return version
 
 
@@ -79,7 +95,7 @@ def identity(version, sha, repo):
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version), "invalid release version")
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "release requires a full Git commit SHA")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "invalid GitHub repository")
-    return {"schema": 1, "repository": repo, "version": version, "tag": version,
+    return {"schema": 2, "repository": repo, "version": version, "tag": version,
             "commit": sha, "revision": sha[:12]}
 
 
@@ -131,12 +147,83 @@ def archive_info(path, arch, version):
     return {"architecture": arch, "sha256": digest(data), "size": len(data)}
 
 
+def probe_name(version, target):
+    require(target in PROBE_TARGETS, "unsupported probe target")
+    return f"qingprobe-{version.removeprefix('v')}-{target}" + (".zip" if target.startswith("windows-") else ".tar.gz")
+
+
+def probe_archive_info(path, target):
+    require(target in PROBE_TARGETS, "unsupported probe target")
+    windows = target.startswith("windows-")
+    binary_name = "qingprobe.exe" if windows else "qingprobe"
+    allowed = {binary_name, "LICENSE", "THIRD_PARTY.md", "SHA256SUMS"} | {"docs/" + name for name in PROBE_DOCS}
+    raw = read_file(path)
+    contents = {}
+    total = 0
+
+    def add(name, size, source):
+        nonlocal total
+        require(name in allowed and name not in contents, "unknown or duplicate probe member")
+        total += size
+        require(0 <= size <= MAX_ASSET and total <= 256 * 1024 * 1024, "probe archive expansion exceeds limit")
+        contents[name] = bounded(source)
+        require(len(contents[name]) == size, "probe member size mismatch")
+
+    if windows:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            require(len(archive.infolist()) <= len(allowed) + 1, "probe archive member count exceeded")
+            for member in archive.infolist():
+                require(not member.flag_bits & 1, "encrypted probe member refused")
+                mode = member.external_attr >> 16
+                require(stat.S_IFMT(mode) in (0, stat.S_IFREG, stat.S_IFDIR), "linked or special probe member refused")
+                if member.is_dir():
+                    require(member.filename == "docs/", "unknown probe directory")
+                    continue
+                require(stat.S_IFMT(mode) in (0, stat.S_IFREG), "probe file has directory permissions")
+                with archive.open(member) as stream:
+                    add(member.filename, member.file_size, stream)
+    else:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            count = 0
+            for member in archive:
+                count += 1
+                require(count <= len(allowed) + 1, "probe archive member count exceeded")
+                require(member.uid == member.gid == 0, "probe archive owner must be root")
+                if member.isdir():
+                    require(member.name == "docs", "unknown probe directory")
+                    continue
+                require(member.isfile(), "linked or special probe member refused")
+                require(member.mode == (0o755 if member.name == binary_name else 0o644), "probe member permission mismatch")
+                with archive.extractfile(member) as stream:
+                    add(member.name, member.size, stream)
+    require(set(contents) == allowed, "probe archive is incomplete")
+    require(b"\r" not in contents["SHA256SUMS"], "probe checksum manifest must use LF")
+    sums = parse_sums(contents["SHA256SUMS"])
+    require(set(sums) == allowed - {"SHA256SUMS"}, "probe inner checksum set mismatch")
+    require(all(digest(contents[name]) == value for name, value in sums.items()), "probe inner checksum mismatch")
+    binary = contents[binary_name]
+    if windows:
+        require(len(binary) >= 64 and binary.startswith(b"MZ"), "probe must be Windows PE64")
+        offset = int.from_bytes(binary[60:64], "little")
+        require(offset <= len(binary) - 26 and binary[offset:offset+4] == b"PE\0\0" and
+                int.from_bytes(binary[offset+4:offset+6], "little") == 0x8664 and
+                int.from_bytes(binary[offset+24:offset+26], "little") == 0x20b, "probe Windows architecture mismatch")
+    else:
+        require(len(binary) >= 20 and binary.startswith(b"\x7fELF\x02\x01") and
+                int.from_bytes(binary[18:20], "little") == {"linux-amd64": 62, "linux-arm64": 183}[target],
+                "probe Linux architecture mismatch")
+    return {"component": "qingprobe", "target": target, "sha256": digest(raw), "size": len(raw)}
+
+
 def expected_manifest(dist, version, sha, repo):
     manifest = identity(version, sha, repo)
     archives = {}
     for arch in ("amd64", "arm64"):
         name = f"qingnode-{version[1:]}-linux-{arch}.tar.gz"
         archives[name] = archive_info(dist / name, arch, version)
+    for target in PROBE_TARGETS:
+        name = probe_name(version, target)
+        archives[name] = probe_archive_info(dist / name, target)
     manifest["archives"] = archives
     manifest["build"] = {"go_version": GO_VERSION, "goos": "linux", "cgo_enabled": False,
                          "trimpath": True, "buildvcs": False}
@@ -145,6 +232,9 @@ def expected_manifest(dist, version, sha, repo):
                      "architecture": "amd64"},
         "mihomo": {"version": test_tools.MIHOMO_VERSION, "archive_sha256": test_tools.MIHOMO_SHA256,
                    "architecture": "amd64"},
+        "pebble": {"version": test_tools.PEBBLE_VERSION, "archive_sha256": test_tools.PEBBLE_SHA256, "architecture": "amd64"},
+        "qingnode_legacy": {"version": "0.2.8", "commit": test_tools.LEGACY_SOURCE,
+                            "archive_sha256": test_tools.LEGACY_ARCHIVE_SHA256, "binary_sha256": test_tools.LEGACY_BINARY_SHA256},
     }
     return manifest
 
@@ -163,7 +253,7 @@ def prepare(dist, version, sha, repo):
 def validate_local(dist, version, sha, repo):
     manifest = expected_manifest(dist, version, sha, repo)
     names = set(manifest["archives"]) | {"SHA256SUMS", "RELEASE.json"}
-    require({p.name for p in dist.iterdir()} == names, "release must contain exactly four assets")
+    require({p.name for p in dist.iterdir()} == names, "release must contain exactly seven verified assets")
     require(read_file(dist / "RELEASE.json", MAX_JSON) == canonical(manifest), "release manifest identity or digest mismatch")
     sums = parse_sums(read_file(dist / "SHA256SUMS", MAX_JSON))
     require(set(sums) == names - {"SHA256SUMS"}, "outer checksum contract mismatch")
@@ -336,7 +426,7 @@ def publish(api, dist, version, sha, repo, ref, run_id, attempt, notes):
         existing = verify_remote_assets(api, release, assets, allow_missing=release["draft"])
         if not release["draft"]:
             validate_target(api, version, sha, ref)
-            print("Existing formal Release has the exact commit and all four verified assets; no changes made.")
+            print("Existing formal Release has the exact commit and all seven verified assets; no changes made.")
             return release
     else:
         if api.tag_commit(version) is None:
@@ -361,7 +451,7 @@ def publish(api, dist, version, sha, repo, ref, run_id, attempt, notes):
     validate_release_identity(release, version, sha, manifest)
     verify_remote_assets(api, release, assets)
     validate_target(api, version, sha, ref)
-    print("Formal release published with the exact commit and all four verified assets.")
+    print("Formal release published with the exact commit and all seven verified assets.")
     return release
 
 

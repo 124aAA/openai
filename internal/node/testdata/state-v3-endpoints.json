@@ -1,0 +1,20 @@
+{
+  "schema": 3,
+  "core_version": "1.14.0",
+  "nodes": [{
+    "id": "1111111111111111",
+    "name": "nat-ss",
+    "protocol": "ss2022",
+    "host": "nat.example.test",
+    "listen": "0.0.0.0",
+    "port": 443,
+    "connect_port": 30000,
+    "additional_endpoints": [
+      {"id": "ipv6", "host": "2001:db8::8", "port": 31000},
+      {"id": "relay", "host": "relay.example.test", "port": 32000}
+    ],
+    "enabled": true,
+    "users": [{"id": "2222222222222222", "name": "device", "password": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}],
+    "shadowsocks": {"method": "2022-blake3-aes-256-gcm", "server_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+  }]
+}

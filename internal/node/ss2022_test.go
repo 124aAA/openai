@@ -63,7 +63,10 @@ func TestSS2022ReservesBothTCPAndUDP(t *testing.T) {
 	}
 	cert, key := makeCert(t)
 	s = NewState()
-	s.Nodes = []Node{ss, {ID: Token(8), Name: "HY2", Protocol: "hysteria2", Host: "127.0.0.1", Listen: "0.0.0.0", Port: ss.Port, Enabled: true, Users: []User{NewUser("test", "hysteria2")}, Certificate: &Certificate{Mode: "pem", ServerName: "localhost", CertPEM: cert, KeyPEM: key}}}
+	// A definite same-address UDP collision is rejected without host access.
+	// :: versus IPv4 is host-dependent and is separately rejected by the real
+	// simultaneous-bind preflight, rather than by assuming every :: is dual.
+	s.Nodes = []Node{ss, {ID: Token(8), Name: "HY2", Protocol: "hysteria2", Host: "127.0.0.1", Listen: ss.Listen, Port: ss.Port, Enabled: true, Users: []User{NewUser("test", "hysteria2")}, Certificate: &Certificate{Mode: "pem", ServerName: "localhost", CertPEM: cert, KeyPEM: key}}}
 	if s.Validate() == nil {
 		t.Fatal("SS/HY2 UDP conflict ignored")
 	}

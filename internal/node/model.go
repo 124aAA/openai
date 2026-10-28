@@ -3,8 +3,6 @@ package node
 import (
 	"crypto/ecdh"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,15 +15,23 @@ import (
 	"unicode/utf8"
 )
 
-const Schema = 1
+const Schema = 9
 const DefaultCore = "1.14.0"
 
 type State struct {
-	Schema            int    `json:"schema"`
-	CoreVersion       string `json:"core_version"`
-	Nodes             []Node `json:"nodes"`
-	Firewall          string `json:"firewall,omitempty"`
-	CoreArchiveSHA256 string `json:"core_archive_sha256,omitempty"`
+	Schema                int                    `json:"schema"`
+	CoreVersion           string                 `json:"core_version"`
+	Nodes                 []Node                 `json:"nodes"`
+	Firewall              string                 `json:"firewall,omitempty"`
+	CoreArchiveSHA256     string                 `json:"core_archive_sha256,omitempty"`
+	DNS                   *DNSSettings           `json:"dns,omitempty"`
+	Egresses              []Egress               `json:"egresses,omitempty"`
+	EgressPolicies        []EgressPolicy         `json:"egress_policies,omitempty"`
+	Forwards              []PortForward          `json:"forwards,omitempty"`
+	Devices               []DeviceProfile        `json:"devices,omitempty"`
+	Certificates          []CertificateResource  `json:"certificates,omitempty"`
+	Observability         *CoreObservation       `json:"observability,omitempty"`
+	CredentialExpirations []CredentialExpiration `json:"credential_expirations,omitempty"`
 }
 type User struct {
 	ID       string `json:"id"`
@@ -42,26 +48,37 @@ type Reality struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
 type Certificate struct {
-	Mode       string `json:"mode"`
-	ServerName string `json:"server_name"`
-	CertPEM    string `json:"certificate_pem,omitempty"`
-	KeyPEM     string `json:"key_pem,omitempty"`
-	Email      string `json:"email,omitempty"`
+	Mode            string        `json:"mode"`
+	ServerName      string        `json:"server_name"`
+	CertPEM         string        `json:"certificate_pem,omitempty"`
+	KeyPEM          string        `json:"key_pem,omitempty"`
+	Email           string        `json:"email,omitempty"`
+	CertificatePath string        `json:"certificate_path,omitempty"`
+	KeyPath         string        `json:"key_path,omitempty"`
+	ACME            *ACMESettings `json:"acme,omitempty"`
 }
 type Node struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Protocol    string       `json:"protocol"`
-	Host        string       `json:"host"`
-	Listen      string       `json:"listen"`
-	Port        int          `json:"port"`
-	Enabled     bool         `json:"enabled"`
-	Users       []User       `json:"users"`
-	Reality     *Reality     `json:"reality,omitempty"`
-	Certificate *Certificate `json:"certificate,omitempty"`
-	Shadowsocks *Shadowsocks `json:"shadowsocks,omitempty"`
-	CreatedAt   string       `json:"created_at,omitempty"`
-	UpdatedAt   string       `json:"updated_at,omitempty"`
+	ID                  string               `json:"id"`
+	Name                string               `json:"name"`
+	Tags                []string             `json:"tags,omitempty"`
+	Protocol            string               `json:"protocol"`
+	Host                string               `json:"host"`
+	Listen              string               `json:"listen"`
+	Port                int                  `json:"port"`
+	ConnectPort         *int                 `json:"connect_port,omitempty"`
+	AdditionalEndpoints []ConnectionEndpoint `json:"additional_endpoints,omitempty"`
+	Enabled             bool                 `json:"enabled"`
+	EgressID            string               `json:"egress_id,omitempty"`
+	Users               []User               `json:"users"`
+	Reality             *Reality             `json:"reality,omitempty"`
+	Certificate         *Certificate         `json:"certificate,omitempty"`
+	CertificateID       string               `json:"certificate_id,omitempty"`
+	Shadowsocks         *Shadowsocks         `json:"shadowsocks,omitempty"`
+	HY2                 *HY2Performance      `json:"hysteria2,omitempty"`
+	AnyTLS              *AnyTLSOptions       `json:"anytls,omitempty"`
+	TUIC                *TUICOptions         `json:"tuic,omitempty"`
+	CreatedAt           string               `json:"created_at,omitempty"`
+	UpdatedAt           string               `json:"updated_at,omitempty"`
 }
 
 func Token(bytes int) string {
@@ -90,10 +107,14 @@ func NewReality(sni, target string) (*Reality, error) {
 }
 func NewState() State { return State{Schema: Schema, CoreVersion: DefaultCore, Nodes: []Node{}} }
 func (s State) Clone() State {
-	b, _ := json.Marshal(s)
-	var c State
+	// Clone must also preserve invalid candidates for validation. The persisted
+	// State codec canonicalizes resources and can reject dangling references;
+	// using it here would silently turn such a candidate into an empty State.
+	type cloneState State
+	b, _ := json.Marshal(cloneState(s))
+	var c cloneState
 	_ = json.Unmarshal(b, &c)
-	return c
+	return State(c)
 }
 func (s *State) Find(id string) (*Node, error) {
 	for i := range s.Nodes {
@@ -142,15 +163,35 @@ func cleanName(s string) bool {
 	}
 	return true
 }
+
+// ValidName applies the same name rules to CLI preflight and persisted State.
+func ValidName(s string) bool { return cleanName(s) }
+
 func (s State) Validate() error {
+	return s.validate(false)
+}
+
+// ValidateForRestore validates the complete data model while deferring only
+// access to externally owned certificate files on the destination machine.
+// It does not make a State runnable; Apply and backend Check use Validate.
+func (s State) ValidateForRestore() error { return s.validate(true) }
+func (s State) validate(deferExternalFiles bool) error {
+	var certificateErr error
+	s, certificateErr = CanonicalCertificates(s)
+	if certificateErr != nil {
+		return certificateErr
+	}
+	if err := validateCertificateResources(s, deferExternalFiles); err != nil {
+		return err
+	}
 	if s.CoreArchiveSHA256 != "" {
 		b, e := hex.DecodeString(s.CoreArchiveSHA256)
 		if e != nil || len(b) != 32 {
 			return errors.New("保存的核心归档摘要无效")
 		}
 	}
-	if s.Firewall != "" && s.Firewall != "ufw" {
-		return errors.New("自动防火墙仅支持已启用的 UFW；其他后端使用手动模式")
+	if s.Firewall != "" && s.Firewall != "ufw" && s.Firewall != "firewalld" {
+		return errors.New("自动防火墙仅支持已启用的 UFW/firewalld；其他后端使用手动模式")
 	}
 	if s.Schema != Schema {
 		return fmt.Errorf("不支持状态格式 %d（当前 %d），请使用匹配的管理器迁移", s.Schema, Schema)
@@ -158,10 +199,29 @@ func (s State) Validate() error {
 	if !SupportedVersion(s.CoreVersion) {
 		return fmt.Errorf("未适配核心版本 %q，仅接受 1.14.x 正式版本", s.CoreVersion)
 	}
+	if err := ValidateDNS(s.DNS); err != nil {
+		return err
+	}
+	if err := ValidateCoreObservation(s.Observability); err != nil {
+		return err
+	}
 	ids := map[string]bool{}
 	names := map[string]bool{}
-	ports := map[string]bool{}
 	for _, n := range s.Nodes {
+		if n.AnyTLS != nil && n.Protocol != "anytls" || n.TUIC != nil && n.Protocol != "tuic" {
+			return errors.New("协议专用设置不能用于其他协议")
+		}
+		if err := ValidateNodeTags(n.Tags); err != nil {
+			return err
+		}
+		if n.HY2 != nil && n.Protocol != "hysteria2" {
+			return errors.New("Hysteria2 性能设置不能用于其他协议")
+		}
+		if n.HY2 != nil {
+			if err := ValidateHY2Capabilities(n, s.CoreVersion, nil); err != nil {
+				return err
+			}
+		}
 		for _, stamp := range []string{n.CreatedAt, n.UpdatedAt} {
 			if stamp != "" {
 				if _, e := time.Parse(time.RFC3339Nano, stamp); e != nil {
@@ -184,14 +244,8 @@ func (s State) Validate() error {
 		if !ValidHost(n.Host) || net.ParseIP(n.Listen) == nil || n.Port < 1 || n.Port > 65535 {
 			return fmt.Errorf("节点 %s 的地址/监听 IP/端口无效", n.Name)
 		}
-		for _, network := range adapter.Networks {
-			p := fmt.Sprintf("%s/%d", network, n.Port)
-			if n.Enabled && ports[p] {
-				return fmt.Errorf("端口冲突：%s", p)
-			}
-			if n.Enabled {
-				ports[p] = true
-			}
+		if err := ValidateEndpoints(n); err != nil {
+			return fmt.Errorf("节点 %s：%w", n.Name, err)
 		}
 		if len(n.Users) == 0 {
 			return fmt.Errorf("节点 %s 至少需要一个凭据", n.Name)
@@ -211,29 +265,45 @@ func (s State) Validate() error {
 			}
 			credentials[c] = true
 		}
-		if e := adapter.Validate(n); e != nil {
+		var protocolErr error
+		if deferExternalFiles && (n.Protocol == "anytls" || n.Protocol == "trojan") {
+			protocolErr = validateTLSNode(n, false)
+		} else if deferExternalFiles && n.Protocol == "hysteria2" {
+			protocolErr = validateHysteriaCertificate(n, false)
+		} else if deferExternalFiles && n.Protocol == "tuic" {
+			protocolErr = validateTUICCertificate(n, false)
+		} else {
+			protocolErr = adapter.Validate(n)
+		}
+		if e := protocolErr; e != nil {
 			return fmt.Errorf("节点 %s：%w", n.Name, e)
 		}
 	}
-	return nil
+	if err := ValidateTopology(s); err != nil {
+		return err
+	}
+	if err := ValidateDeviceProfiles(s); err != nil {
+		return err
+	}
+	if err := ValidateCredentialExpirations(s); err != nil {
+		return err
+	}
+	return validateBindingSet(StateBindings(s))
 }
 
 // Keep expired but structurally valid certificates readable for backup/disable/repair.
 func ValidateCertificateDates(s State) error {
+	var err error
+	s, err = CanonicalCertificates(s)
+	if err != nil {
+		return err
+	}
 	for _, n := range s.Nodes {
-		if !n.Enabled || n.Certificate == nil || n.Certificate.Mode != "pem" {
+		if !n.Enabled || n.Certificate == nil || n.Certificate.Mode == "acme" {
 			continue
 		}
-		pair, e := tls.X509KeyPair([]byte(n.Certificate.CertPEM), []byte(n.Certificate.KeyPEM))
-		if e != nil {
-			return errors.New("PEM 证书或私钥无效")
-		}
-		leaf, e := x509.ParseCertificate(pair.Certificate[0])
-		if e != nil {
-			return e
-		}
-		if time.Now().Before(leaf.NotBefore) || time.Now().After(leaf.NotAfter) {
-			return fmt.Errorf("节点 %s 证书未生效或已过期；请导入新证书，或先停用此节点", n.Name)
+		if err := ValidateCertificateResource(CertificateResource{Certificate: *n.Certificate}, time.Now(), true); err != nil {
+			return fmt.Errorf("节点 %s：%w", n.Name, err)
 		}
 	}
 	return nil

@@ -67,7 +67,7 @@ func realityInbound(n Node, _ string) M {
 func realityURI(n Node, u User) string {
 	r := n.Reality
 	q := url.Values{"encryption": {"none"}, "security": {"reality"}, "type": {"tcp"}, "flow": {"xtls-rprx-vision"}, "sni": {r.ServerName}, "fp": {Fingerprint(r)}, "pbk": {r.PublicKey}, "sid": {r.ShortID}}
-	x := url.URL{Scheme: "vless", User: url.User(u.UUID), Host: net.JoinHostPort(n.Host, strconv.Itoa(n.Port)), RawQuery: q.Encode(), Fragment: n.Name + " / " + u.Name}
+	x := url.URL{Scheme: "vless", User: url.User(u.UUID), Host: net.JoinHostPort(n.Host, strconv.Itoa(EffectiveConnectPort(n))), RawQuery: q.Encode(), Fragment: n.Name + " / " + u.Name}
 	return x.String()
 }
 func realityOutbound(n Node, u User) M {

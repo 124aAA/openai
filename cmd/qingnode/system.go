@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,43 +30,118 @@ func bootstrap(args []string) error {
 }
 
 func (a *app) network(args []string) error {
+	return a.networkWithHost(args, node.NetworkHost{})
+}
+
+func (a *app) networkWithHost(args []string, h node.NetworkHost) error {
 	if a.offline {
 		return errors.New("离线模式不修改或查询宿主网络参数")
 	}
 	if len(args) == 0 {
 		args = []string{"status"}
 	}
-	if len(args) != 1 {
-		return errors.New("用法：network status|bbr")
-	}
-	h := node.Host{}
 	if args[0] == "status" {
-		out, e := h.BBRStatus()
-		fmt.Println(out)
-		return e
+		f := fs("network status")
+		asJSON := f.Bool("json", false, "输出版本化 JSON 状态")
+		if e := parse(f, args[1:]); e != nil {
+			return e
+		}
+		if h.ProcessPID == 0 {
+			if backend, ok := a.store.Backend.(interface{ PID() int }); ok {
+				h.ProcessPID = backend.PID()
+			}
+		}
+		s := h.Status()
+		if *asJSON {
+			b, e := json.MarshalIndent(s, "", "  ")
+			if e != nil {
+				return e
+			}
+			fmt.Println(string(b))
+		} else {
+			fmt.Print(node.FormatNetworkStatus(s))
+		}
+		return nil
 	}
-	if args[0] != "bbr" {
-		return errors.New("只支持查看状态或启用系统内核 BBR")
-	}
-	return a.store.WithLock(func() error {
-		changed, e := h.EnableBBR()
+	if args[0] == "restore" {
+		f := fs("network restore")
+		id := f.String("snapshot", "", "原始恢复快照 ID")
+		preview := f.Bool("preview", false, "只读预览恢复，不写文件或运行参数")
+		if e := parse(f, args[1:]); e != nil {
+			return e
+		}
+		if *id == "" {
+			return errors.New("恢复需要 --snapshot 完整快照ID；先用 network status 查看")
+		}
+		p, e := h.RestorePlan(*id)
 		if e != nil {
 			return e
 		}
-		if changed {
-			a.message("SUCCESS", "已启用 BBR + fq；既有连接和网卡队列是否变化由内核决定")
-		} else {
-			a.message("SUCCESS", "已经是 BBR + fq，没有重复修改")
+		fmt.Print(node.FormatNetworkPlan(p))
+		if *preview {
+			return nil
+		}
+		r, e := h.Restore(*id)
+		if e != nil {
+			return e
+		}
+		fmt.Printf("宿主网络恢复完成；已恢复 %d 项，保留外部手动修改 %d 项。原始材料：%s\n", len(r.Restored), len(r.Preserved), r.RecoveryFile)
+		for _, key := range r.Preserved {
+			fmt.Println("保持外部值：" + key)
 		}
 		return nil
-	})
+	}
+	if args[0] != "plan" && args[0] != "apply" && args[0] != "bbr" {
+		return errors.New("用法：network status [--json] | plan|apply [--tcp 名称] [--qdisc fq|fq_codel] [--rmem-max 字节] [--wmem-max 字节] [--preview] | restore --snapshot ID [--preview]；bbr 为显式 BBR+fq 应用别名")
+	}
+	f := fs("network " + args[0])
+	tcp := f.String("tcp", "", "明确选择内核已列出的 TCP 算法")
+	qdisc := f.String("qdisc", "", "新建队列默认值 fq 或 fq_codel，不改当前接口队列")
+	rmem := f.Uint64("rmem-max", 0, "明确设置 socket 接收缓冲上限字节，0 保持原值，最大 16 MiB")
+	wmem := f.Uint64("wmem-max", 0, "明确设置 socket 发送缓冲上限字节，0 保持原值，最大 16 MiB")
+	preview := f.Bool("preview", false, "只读预览，不写入宿主参数或恢复记录")
+	if e := parse(f, args[1:]); e != nil {
+		return e
+	}
+	if args[0] == "bbr" {
+		if *tcp != "" || *qdisc != "" || *rmem != 0 || *wmem != 0 {
+			return errors.New("network bbr 固定选择 bbr+fq；其他参数请使用 network plan/apply")
+		}
+		*tcp, *qdisc = "bbr", "fq"
+	}
+	p, e := h.Plan(node.NetworkRequest{TCP: *tcp, Qdisc: *qdisc, RmemMax: *rmem, WmemMax: *wmem})
+	if e != nil {
+		return e
+	}
+	fmt.Print(node.FormatNetworkPlan(p))
+	if args[0] == "plan" || *preview {
+		return nil
+	}
+	r, e := h.Apply(p)
+	if e != nil {
+		return e
+	}
+	if !r.Changed {
+		a.message("SUCCESS", "没有参数或受管持久文件需要改变")
+	} else {
+		fmt.Printf("宿主网络应用完成，字段已逐项读回。快照：%s\n恢复材料：%s\n恢复命令：qingnode network restore --snapshot %s\n", r.SnapshotID, r.RecoveryFile, r.SnapshotID)
+	}
+	return nil
 }
 func (a *app) firewall(args []string) error {
 	if len(args) == 0 {
 		args = []string{"status"}
 	}
-	if len(args) != 1 {
-		return errors.New("用法：firewall status|enable|disable|sync")
+	f := fs("firewall " + args[0])
+	backend := f.String("backend", "ufw", "enable时显式选择ufw或firewalld；不启动全局防火墙")
+	if e := parse(f, args[1:]); e != nil {
+		return e
+	}
+	if args[0] != "enable" && flagSet(f, "backend") {
+		return errors.New("--backend仅用于firewall enable")
+	}
+	if *backend != "ufw" && *backend != "firewalld" {
+		return errors.New("防火墙后端仅支持ufw或firewalld")
 	}
 	if a.offline {
 		return errors.New("离线模式不操作本机防火墙")
@@ -81,7 +157,7 @@ func (a *app) firewall(args []string) error {
 				a.message("WARN", c[0]+" 查询未成功")
 			}
 		}
-		fmt.Println("只对已启用 UFW 的本项目规则提供自动管理；firewalld/nftables/iptables 的复杂策略请手动处理。云安全组须另行检查。")
+		fmt.Println("只对显式选择且已运行的UFW/firewalld增加本项目规则；不启用、清空或重载全局防火墙。云安全组须另行检查。")
 		return a.inspectState(func(s *node.State) error {
 			fmt.Printf("项目自动防火墙模式：%s（空为手动）\n", s.Firewall)
 			for _, n := range s.Nodes {
@@ -92,13 +168,23 @@ func (a *app) firewall(args []string) error {
 					}
 				}
 			}
+			for _, v := range s.Forwards {
+				if v.Enabled {
+					fmt.Print(node.Redact(fmt.Sprintf("中转%s 需要本地%d/%s；目标端口不作为本机入站开放\n", v.Name, v.Port, v.Network), *s))
+				}
+			}
+			for _, e := range s.Egresses {
+				if e.WireGuard != nil && e.WireGuard.ListenPort > 0 {
+					fmt.Printf("用户态WireGuard %s 需要本地%d/udp；只管理自身UFW规则\n", e.ID, e.WireGuard.ListenPort)
+				}
+			}
 			return nil
 		})
 	}
 	if args[0] == "sync" {
 		return a.locked(func(s *node.State) error {
-			if s.Firewall != "ufw" {
-				return errors.New("尚未启用项目 UFW 管理")
+			if s.Firewall != "ufw" && s.Firewall != "firewalld" {
+				return errors.New("尚未启用项目自动防火墙管理")
 			}
 			return (node.Firewall{}).Sync(*s, true)
 		})
@@ -108,7 +194,7 @@ func (a *app) firewall(args []string) error {
 	}
 	return a.mutate(func(s *node.State) error {
 		if args[0] == "enable" {
-			s.Firewall = "ufw"
+			s.Firewall = *backend
 		} else {
 			s.Firewall = ""
 		}

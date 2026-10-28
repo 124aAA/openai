@@ -113,6 +113,7 @@ func TestDashboardHomepageReadOnlyWithPendingRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Setenv("PATH", bin)
+	a.serviceRunner = node.Run
 	a.offline = false
 	if e := a.overview(&out); e != nil {
 		t.Fatal(e)
@@ -252,6 +253,9 @@ func TestDashboardCertificateValidity(t *testing.T) {
 	}
 	if label := certificateLabel(node.Node{Certificate: &node.Certificate{Mode: "acme"}}, now); !strings.Contains(label, "期限未知") {
 		t.Fatal(label)
+	}
+	if label := certificateLabel(node.Node{Certificate: &node.Certificate{Mode: "file", CertificatePath: "/private/example.crt", KeyPath: "/private/example.key"}}, now); !strings.Contains(label, "外部文件引用") || strings.Contains(label, "/private/") {
+		t.Fatal("external certificate incorrectly displayed as broken or exposed private paths:", label)
 	}
 	if label := certificateLabel(node.Node{}, now); !strings.Contains(label, "不适用") {
 		t.Fatal(label)
