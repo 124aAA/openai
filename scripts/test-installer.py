@@ -74,6 +74,11 @@ with (r/'commands.log').open('a') as f: f.write(name+' '+' '.join(a)+'\n')
 if name=='qingnode' and os.environ.get('QN_LEGACY_FIXTURE')=='1' and 'validate-install' in a:
  print('[ERROR] 未知命令 "validate-install"，运行 qingnode help 查看帮助', file=sys.stderr)
  sys.exit(1)
+if name=='qingnode' and os.environ.get('QN_LEGACY_FIXTURE')=='1' and a==['version']:
+ # This adapter models the fixed historical interface, independently of the
+ # current source version. The actual official binary has its own Linux gate.
+ print('QingNode 0.2.8 (legacy-interface-fixture)')
+ sys.exit(0)
 if name=='qingnode' and a and a[0] in ('init','wizard') and os.environ.get('QN_RECORD_INIT_FDS')=='1':
  # Observe the real Bash -> command descriptor boundary before delegating to
  # the real CLI. Never record argv or config/credential bytes in this fixture.
@@ -801,12 +806,18 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('[8/8]', f.install(online=True))
 
     def test_explicit_release_tag_survives_os_detection(self):
-        f = self.fixture(); f.remote_release()
-        # The mock intentionally has no old release; reaching this exact URL
-        # proves --version was preserved, before any installation could happen.
+        f = self.fixture(); f.env['QN_RELEASE_TAG'] = 'v0.1.0'
+        f.remote_release(tag='v0.1.0')
+        # Serve the pinned old manifest but omit its archive. The checksum-first
+        # path must still request exactly that archive and must never fall back.
+        (f.root/'release/qingnode-0.1.0-linux-amd64.tar.gz').unlink()
         f.run('--auto', '--repo', '124aAA/openai', '--version', 'v0.1.0', online=True, ok=False)
         calls = (f.root/'commands.log').read_text()
+        self.assertIn('/releases/download/v0.1.0/SHA256SUMS', calls)
         self.assertIn('/releases/download/v0.1.0/qingnode-0.1.0-linux-amd64.tar.gz', calls)
+        self.assertNotIn('/releases/latest/', calls)
+        self.assertFalse(f.state.exists())
+        self.assertFalse(f.bin.exists())
         self.assertFalse(f.state.exists())
 
     def test_invalid_repository_and_tag_are_still_rejected(self):
