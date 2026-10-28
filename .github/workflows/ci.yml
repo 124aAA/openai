@@ -5,9 +5,42 @@ on:
 permissions:
   contents: read
 jobs:
+  platform-containers:
+    name: Read-only platform facts (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Rocky publishes maintained minor images in its own namespace.
+        # Pin the verified amd64 manifest; a missing library/rockylinux tag is not platform evidence.
+        image: ['alpine:3.24.2', 'rockylinux/rockylinux:9.8@sha256:ed654c694190a670bb5c33f68995b862214fc96ffbdca95e07a8935ba0a3717d']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+      - name: Build static manager and check package/service contracts
+        run: |
+          go test -count=1 ./internal/platform
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/qingnode-platform" ./cmd/qingnode
+      - name: Container is not a real init acceptance host
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network none -v "$RUNNER_TEMP/qingnode-platform:/qingnode:ro" "$IMAGE" /bin/sh -ec '
+            /qingnode capabilities --skip-loopback --json >/tmp/capabilities.json
+            cat /tmp/capabilities.json
+            grep -q "\"controller_available\": false" /tmp/capabilities.json
+            test ! -e /var/lib/qingnode
+            /qingnode service unit --manager openrc >/tmp/qingnode.openrc
+            grep -q "command_user=\"qingnode:qingnode\"" /tmp/qingnode.openrc
+          '
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,29 +51,55 @@ jobs:
       - name: Static analysis and Go tests
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends shellcheck
+          sudo apt-get install -y -qq --no-install-recommends shellcheck iproute2
           shellcheck install.sh scripts/*.sh
           go vet ./...
-          go test -count=1 ./...
-          go test -race -count=1 ./...
+          go test -count=1 -timeout=15m ./...
+          go test -race -count=1 -timeout=30m ./...
       - name: Service-user permissions
         run: sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStorePermissionsUnderRestrictiveUmask$" -v -count=1'
       - name: Installer transaction tests
         run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
       - name: Release guard offline tests
         run: python3 scripts/test-release.py
+      - name: Maintenance stream observer regression
+        run: python3 scripts/test-maintenance-harness.py
+      - name: Disposable platform acceptance fixture contracts
+        run: |
+          python3 scripts/test-platform-aux_test.py
+          python3 scripts/test-platform-firewall_test.py
+          python3 scripts/test-platform-flow_test.py
+          python3 scripts/test-platform-tls_test.py
       - name: Fetch pinned official test tools
-        run: python3 scripts/fetch-test-core.py
+        run: python3 scripts/fetch-test-core.py --integration
       - name: Official parser and transport tests
         run: |
           test -x "$SING_BOX_BIN"
           test -x "$MIHOMO_BIN"
-          go test ./internal/node -run 'OfficialCore|OfficialArchive|Mihomo' -v -count=1
+          go test ./internal/node ./internal/probe ./internal/coreapi -run 'OfficialCore|OfficialArchive|Mihomo' -v -count=1
+      - name: Cross-batch migration and subscription acceptance
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          sudo env "GO=$(command -v go)" QINGNODE_VM_DISPOSABLE=1 python3 scripts/acceptance-final-regression.py \
+            --disposable --go "$(command -v go)" \
+            --core "$SING_BOX_BIN" --core-sha256 "$(sha256sum "$SING_BOX_BIN" | cut -d ' ' -f 1)" \
+            --mihomo "$MIHOMO_BIN" --mihomo-sha256 "$(sha256sum "$MIHOMO_BIN" | cut -d ' ' -f 1)" \
+            --legacy-bin "$QINGNODE_LEGACY_V028_BIN" --legacy-sha256 "$QINGNODE_LEGACY_V028_SHA256" \
+            --out "$RUNNER_TEMP/qingnode-cross-batch"
+          sudo env "GO=$(command -v go)" "QINGNODE_LEGACY_BIN=$QINGNODE_LEGACY_BIN" sh -c '"$GO" test ./cmd/qingnode -run "^TestLegacyInstallPreflightActualBinary$" -count=1 -v -timeout=3m'
+      - name: Controlled TCP and UDP NAT endpoint transport
+        run: sudo env "GO=$(command -v go)" "SING_BOX_BIN=$SING_BOX_BIN" QINGNODE_NAT_DISPOSABLE=1 sh -c '"$GO" test ./internal/node -run "^TestOfficialCoreControlledNATEndpoints$" -v -count=1 -timeout=2m'
+      - name: Controlled topology and WireGuard namespace transport
+        # Only this explicit disposable runner step may create owned netns/veth.
+        run: sudo env "GO=$(command -v go)" "SING_BOX_BIN=$SING_BOX_BIN" QINGNODE_TOPOLOGY_DISPOSABLE=1 sh -c '"$GO" test ./internal/node -run "^TestOfficialCoreTopologyWireGuardNamespaceExit$" -v -count=1 -timeout=3m'
       - name: Build two Linux architectures
         run: |
           version=$(python3 scripts/release.py version)
           bash scripts/build.sh "${version#v}"
       - name: Real systemd lifecycle on disposable runner
+        # The helper build has no root installation or production side effects.
         shell: bash
         timeout-minutes: 10
         run: |
@@ -51,8 +110,53 @@ jobs:
           tar -xzf "dist/qingnode-${version#v}-linux-amd64.tar.gz" -C "$bundle"
           test "$("$bundle/qingnode" version)" = "QingNode ${version#v} (${GITHUB_SHA:0:12})"
           sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
+      - name: Extended platform lifecycle on real systemd
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/qingnode-acceptance"
+          sudo env QINGNODE_PLATFORM_EVIDENCE_DIR="$RUNNER_TEMP/qingnode-platform-evidence" bash scripts/acceptance-platform.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
+      - name: Collect bounded platform evidence
+        if: always()
+        shell: bash
+        run: |
+          if sudo test -d "$RUNNER_TEMP/qingnode-platform-evidence"; then
+            sudo tar -czf - -C "$RUNNER_TEMP/qingnode-platform-evidence" . > "$RUNNER_TEMP/qingnode-platform-evidence.tar.gz"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: systemd-platform-evidence
+          path: ${{ runner.temp }}/qingnode-platform-evidence.tar.gz
+          if-no-files-found: ignore
+      - name: Build portable network test tool
+        run: |
+          version=$(python3 scripts/release.py version)
+          bash scripts/build-probe.sh "${version#v}"
+          python3 scripts/check-build.py
+      - name: Terminal and machine interface acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test-terminal-workflow_test.py
+          python3 scripts/test-machine-interface_test.py
+          python3 scripts/test-final-performance.py
+          python3 scripts/test-final-regression.py
+          version=$(python3 scripts/release.py version)
+          terminal_bundle=$(mktemp -d "$RUNNER_TEMP/qingnode-terminal-XXXXXXXX")
+          tar -xzf "dist/qingnode-${version#v}-linux-amd64.tar.gz" -C "$terminal_bundle" qingnode
+          terminal_sha=$(sha256sum "$terminal_bundle/qingnode" | cut -d ' ' -f 1)
+          python3 scripts/test-terminal-workflow.py --disposable --bin "$terminal_bundle/qingnode" --sha256 "$terminal_sha" --out "$RUNNER_TEMP/qingnode-terminal-evidence.json"
+          python3 scripts/test-machine-interface.py --disposable --bin "$terminal_bundle/qingnode" --sha256 "$terminal_sha" --out "$RUNNER_TEMP/qingnode-machine-evidence.json"
       - uses: actions/upload-artifact@v4
         with:
           name: qingnode-preview
           path: dist/
+          if-no-files-found: error
+      - name: Upload portable network test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qingprobe-preview
+          path: artifacts/probe/
           if-no-files-found: error

@@ -13,6 +13,8 @@ import (
 type Firewall struct {
 	Execute Runner
 	SSH     []int
+	// FirewalldDir is a test seam for the fixed project-only ownership files.
+	FirewalldDir string
 }
 type FirewallRule struct {
 	Port         int
@@ -61,20 +63,29 @@ func (f Firewall) rules() ([]ufwRule, error) {
 }
 func RequiredRules(s State) []FirewallRule {
 	var rules []FirewallRule
-	if s.Firewall != "ufw" {
+	if s.Firewall != "ufw" && s.Firewall != "firewalld" {
 		return rules
 	}
-	for _, n := range s.Nodes {
-		if n.Enabled {
-			for _, network := range Networks(n) {
-				rules = append(rules, FirewallRule{Port: n.Port, Network: network, Tag: "qingnode:" + n.ID + ":" + network})
-			}
+	seen := map[string]bool{}
+	for _, b := range StateBindings(s) {
+		if b.NodeID == "qingnode-api" {
+			continue
+		} // Local observation is never a public ingress rule.
+		id := strings.TrimPrefix(b.NodeID, "egress-")
+		network := bindingTransport(b.Network)
+		tag := "qingnode:" + id + ":" + network
+		if !seen[tag] {
+			rules = append(rules, FirewallRule{Port: b.Port, Network: network, Tag: tag})
+			seen[tag] = true
 		}
 	}
 	// ACME TCP 80 is reported separately; never take ownership of a web server's port.
 	return rules
 }
 func (f Firewall) Check(s State) error {
+	if s.Firewall == "firewalld" {
+		return f.firewalldCheck(s)
+	}
 	if s.Firewall != "ufw" {
 		return nil
 	}
@@ -98,6 +109,9 @@ func (f Firewall) Check(s State) error {
 
 // Add before activation, prune only after the replacement listener has started.
 func (f Firewall) Sync(s State, prune bool) error {
+	if s.Firewall == "firewalld" {
+		return f.firewalldSync(s, prune)
+	}
 	rules, e := f.rules()
 	if e != nil {
 		return e
@@ -171,12 +185,21 @@ func (f Firewall) Sync(s State, prune bool) error {
 	return nil
 }
 func (b SystemBackend) PrepareEffects(old, next State) error {
+	if old.Firewall != next.Firewall && old.Firewall != "" && next.Firewall != "" {
+		return errors.New("切换自动防火墙后端前须先停用旧受管模式")
+	}
+	if next.Firewall == "firewalld" {
+		return (Firewall{Execute: b.Execute}).firewalldSync(next, false)
+	}
 	if old.Firewall != "ufw" && next.Firewall != "ufw" {
 		return nil
 	}
 	return (Firewall{Execute: b.Execute}).Sync(next, false)
 }
 func (b SystemBackend) FinishEffects(old, next State) error {
+	if old.Firewall == "firewalld" || next.Firewall == "firewalld" {
+		return (Firewall{Execute: b.Execute}).firewalldSync(next, true)
+	}
 	if old.Firewall != "ufw" && next.Firewall != "ufw" {
 		return nil
 	}

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "core_version": "1.14.0",
+  "nodes": [{
+    "id": "1111111111111111",
+    "name": "legacy-ss",
+    "protocol": "ss2022",
+    "host": "127.0.0.1",
+    "listen": "127.0.0.1",
+    "port": 23456,
+    "enabled": true,
+    "users": [{"id": "2222222222222222", "name": "device", "password": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}],
+    "shadowsocks": {"method": "2022-blake3-aes-256-gcm", "server_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+  }]
+}

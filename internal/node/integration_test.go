@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -54,6 +55,13 @@ func makeCert(t *testing.T) (string, string) {
 }
 func startCore(t *testing.T, bin string, config []byte) {
 	t.Helper()
+	// The mixed listener opens before the official core finishes its start
+	// stages. Keep the transport configuration intact, but make the owned
+	// fixture's final startup message observable before testing any payload.
+	config, e := testCoreStartupLogConfig(config)
+	if e != nil {
+		t.Fatal(e)
+	}
 	p := filepath.Join(t.TempDir(), "config.json")
 	if e := os.WriteFile(p, config, 0600); e != nil {
 		t.Fatal(e)
@@ -68,11 +76,17 @@ func startCore(t *testing.T, bin string, config []byte) {
 	}
 	cmd.Stdout = logfile
 	cmd.Stderr = logfile
+	startup, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStartup()
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	done := make(chan struct{})
+	var exitErr error
+	go func() {
+		exitErr = cmd.Wait()
+		close(done)
+	}()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		select {
@@ -86,7 +100,14 @@ func startCore(t *testing.T, bin string, config []byte) {
 			t.Logf("core log: %s", b)
 		}
 	})
-	time.Sleep(250 * time.Millisecond)
+	if e = waitCoreStartup(startup, cmd.Process.Pid, config, done, logfile.Name()); e != nil {
+		select {
+		case <-done:
+			t.Fatalf("core exited before its own listeners and complete startup became ready: %v (%v)", e, exitErr)
+		default:
+			t.Fatalf("core listener/startup readiness: %v", e)
+		}
+	}
 }
 func socksUDP(t *testing.T, port int) {
 	t.Helper()

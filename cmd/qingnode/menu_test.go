@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,13 +74,32 @@ func TestWizardSelectedProtocolAndResultMatchState(t *testing.T) {
 			if n.Protocol != tc.protocol || n.Host != "203.0.113.9" || n.Port != 9443 {
 				t.Fatal("wizard created different parameters")
 			}
-			for _, want := range []string{"客户端端口：9443", "--id " + n.ID, node.URI(n, n.Users[0])} {
+			for _, want := range []string{"客户端端口：9443", "--id " + n.ID} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("result missing %q", want)
 				}
 			}
-			if strings.Count(out, "分享链接：") != 1 {
-				t.Fatal("result should appear once")
+			if strings.Contains(out, "分享链接：") || strings.Contains(out, node.URI(n, n.Users[0])) {
+				t.Fatal("ordinary creation result exposed a sharing link")
+			}
+			for _, secret := range []string{n.Users[0].UUID, n.Users[0].Password} {
+				if secret != "" && strings.Contains(out, secret) {
+					t.Fatal("ordinary creation result exposed credentials")
+				}
+			}
+			exported, e := wizardOutput(t, func() error {
+				return a.command([]string{"export", "--id", n.ID, "--user", n.Users[0].ID, "--format", "uri"})
+			})
+			if e != nil || strings.TrimSpace(exported) != node.URI(n, n.Users[0]) {
+				t.Fatal("explicit export URI differs from the one saved identity", e)
+			}
+			explicit, e := wizardOutput(t, func() error { return a.info([]string{"--id", n.ID, "--show-secrets"}) })
+			if e != nil || strings.Count(explicit, "分享链接：") != 1 || !strings.Contains(explicit, strings.TrimSpace(exported)) {
+				t.Fatal("explicit requested result should appear once and match State", e)
+			}
+			after, e := a.store.Load()
+			if e != nil || !reflect.DeepEqual(s, after) {
+				t.Fatal("explicit export regenerated an identity or changed State", e)
 			}
 			if tc.protocol == "hysteria2" && !strings.Contains(out, "SNI：node.example.com\n证书方式：acme") {
 				t.Fatal("missing Hysteria2 TLS details")

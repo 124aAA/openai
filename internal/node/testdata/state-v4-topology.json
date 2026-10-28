@@ -1,0 +1,38 @@
+{
+  "schema": 4,
+  "core_version": "1.14.0",
+  "nodes": [{
+    "id": "1111111111111111",
+    "name": "nat-chain-ss",
+    "protocol": "ss2022",
+    "host": "entry.example.test",
+    "listen": "127.0.0.1",
+    "port": 24443,
+    "connect_port": 30000,
+    "additional_endpoints": [{"id": "ipv6", "host": "2001:db8::8", "port": 31000}],
+    "egress_id": "3333333333333333",
+    "enabled": true,
+    "users": [{"id": "2222222222222222", "name": "device", "password": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}],
+    "shadowsocks": {"method": "2022-blake3-aes-256-gcm", "server_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+  }],
+  "egresses": [{
+    "id": "3333333333333333",
+    "name": "independent-remote-auth",
+    "protocol": "socks5",
+    "server": "192.0.2.10",
+    "port": 1080,
+    "udp": true,
+    "socks": {"username": "remote-fixture-account", "password": "remote-fixture-secret"}
+  }],
+  "forwards": [{
+    "id": "4444444444444444",
+    "name": "saved-forward",
+    "listen": "127.0.0.1",
+    "port": 24444,
+    "network": "udp",
+    "target_host": "192.0.2.20",
+    "target_port": 443,
+    "egress_id": "3333333333333333",
+    "enabled": false
+  }]
+}

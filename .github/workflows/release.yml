@@ -13,7 +13,7 @@ jobs:
   verify:
     name: Verify release gates
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.target.outputs.version }}
     steps:
@@ -32,24 +32,41 @@ jobs:
       - name: Static analysis and Go tests
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends shellcheck
+          sudo apt-get install -y -qq --no-install-recommends shellcheck iproute2
           shellcheck install.sh scripts/*.sh
           go vet ./...
-          go test -count=1 ./...
-          go test -race -count=1 ./...
+          go test -count=1 -timeout=15m ./...
+          go test -race -count=1 -timeout=30m ./...
       - name: Service-user permissions
         run: sudo env "GO=$(command -v go)" sh -c '"$GO" test ./internal/node -run "^TestStorePermissionsUnderRestrictiveUmask$" -v -count=1'
       - name: Installer transaction tests
         run: sudo env "GO=$(command -v go)" python3 scripts/test-installer.py
       - name: Release guard offline tests
         run: python3 scripts/test-release.py
+      - name: Maintenance stream observer regression
+        run: python3 scripts/test-maintenance-harness.py
       - name: Fetch pinned official test tools
-        run: python3 scripts/fetch-test-core.py
+        run: python3 scripts/fetch-test-core.py --integration
       - name: Official parser and transport tests
         run: |
           test -x "$SING_BOX_BIN"
           test -x "$MIHOMO_BIN"
-          go test ./internal/node -run 'OfficialCore|OfficialArchive|Mihomo' -v -count=1
+          go test ./internal/node ./internal/probe ./internal/coreapi -run 'OfficialCore|OfficialArchive|Mihomo' -v -count=1
+      - name: Cross-batch migration and subscription acceptance
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          sudo env "GO=$(command -v go)" QINGNODE_VM_DISPOSABLE=1 python3 scripts/acceptance-final-regression.py \
+            --disposable --go "$(command -v go)" \
+            --core "$SING_BOX_BIN" --core-sha256 "$(sha256sum "$SING_BOX_BIN" | cut -d ' ' -f 1)" \
+            --mihomo "$MIHOMO_BIN" --mihomo-sha256 "$(sha256sum "$MIHOMO_BIN" | cut -d ' ' -f 1)" \
+            --legacy-bin "$QINGNODE_LEGACY_V028_BIN" --legacy-sha256 "$QINGNODE_LEGACY_V028_SHA256" \
+            --out "$RUNNER_TEMP/qingnode-cross-batch"
+          sudo env "GO=$(command -v go)" "QINGNODE_LEGACY_BIN=$QINGNODE_LEGACY_BIN" sh -c '"$GO" test ./cmd/qingnode -run "^TestLegacyInstallPreflightActualBinary$" -count=1 -v -timeout=3m'
+      - name: Controlled topology and WireGuard namespace transport
+        # Explicit disposable opt-in; no production route or system WG interface.
+        run: sudo env "GO=$(command -v go)" "SING_BOX_BIN=$SING_BOX_BIN" QINGNODE_TOPOLOGY_DISPOSABLE=1 sh -c '"$GO" test ./internal/node -run "^TestOfficialCoreTopologyWireGuardNamespaceExit$" -v -count=1 -timeout=3m'
       - name: Build two Linux architectures
         env:
           RELEASE_VERSION: ${{ steps.target.outputs.version }}
@@ -66,8 +83,32 @@ jobs:
           tar -xzf "dist/qingnode-${RELEASE_VERSION#v}-linux-amd64.tar.gz" -C "$bundle"
           test "$("$bundle/qingnode" version)" = "QingNode ${RELEASE_VERSION#v} (${GITHUB_SHA:0:12})"
           sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
+      - name: Build portable network test tool
+        env:
+          RELEASE_VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          bash scripts/build-probe.sh "${RELEASE_VERSION#v}"
+          python3 scripts/check-build.py
+      - name: Terminal and machine interface acceptance
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/test-terminal-workflow_test.py
+          python3 scripts/test-machine-interface_test.py
+          python3 scripts/test-final-performance.py
+          python3 scripts/test-final-regression.py
+          terminal_bundle=$(mktemp -d "$RUNNER_TEMP/qingnode-terminal-XXXXXXXX")
+          tar -xzf "dist/qingnode-${RELEASE_VERSION#v}-linux-amd64.tar.gz" -C "$terminal_bundle" qingnode
+          terminal_sha=$(sha256sum "$terminal_bundle/qingnode" | cut -d ' ' -f 1)
+          python3 scripts/test-terminal-workflow.py --disposable --bin "$terminal_bundle/qingnode" --sha256 "$terminal_sha" --out "$RUNNER_TEMP/qingnode-terminal-evidence.json"
+          python3 scripts/test-machine-interface.py --disposable --bin "$terminal_bundle/qingnode" --sha256 "$terminal_sha" --out "$RUNNER_TEMP/qingnode-machine-evidence.json"
       - name: Bind release assets
-        run: python3 scripts/release.py prepare
+        run: |
+          test "$(go env GOVERSION)" = go1.27.1
+          cp artifacts/probe/qingprobe-*.tar.gz artifacts/probe/qingprobe-*.zip dist/
+          python3 scripts/release.py prepare
       - name: Upload verified candidate assets
         uses: actions/upload-artifact@v4
         with:
@@ -75,8 +116,17 @@ jobs:
           path: |
             dist/qingnode-*-linux-amd64.tar.gz
             dist/qingnode-*-linux-arm64.tar.gz
+            dist/qingprobe-*.tar.gz
+            dist/qingprobe-*.zip
             dist/SHA256SUMS
             dist/RELEASE.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload portable network test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qingprobe-verified-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/probe/
           if-no-files-found: error
           retention-days: 14
   publish:

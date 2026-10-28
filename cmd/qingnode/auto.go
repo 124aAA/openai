@@ -28,7 +28,7 @@ func defaultAutoProbes() autoProbes {
 func autoEndpoint(protocol, host, sni, target string, probes autoProbes) (string, string, string, error) {
 	fail := func(e error) (string, string, string, error) { return "", "", "", e }
 	if _, ok := node.Protocol(protocol); !ok {
-		return fail(errors.New("不支持该协议；可用 reality、ss2022 或 hysteria2"))
+		return fail(errors.New("不支持该协议；可用 reality、ss2022、hysteria2、anytls、trojan、ss-aead、tuic"))
 	}
 	if protocol == "reality" && target != "" && sni == "" {
 		return fail(errors.New("显式 --target 必须搭配 --sni，不能推测目标证书名称"))
@@ -83,19 +83,15 @@ func autoPort(s node.State, n node.Node, explicit, random bool, probes autoProbe
 	var conflict error
 	for _, p := range ssh {
 		if p == n.Port {
-			conflict = errors.New("与 SSH 配置端口相同")
-		}
-	}
-	for _, old := range s.Nodes {
-		if old.Enabled && old.Port == n.Port {
 			for _, network := range node.Networks(n) {
-				for _, oldNetwork := range node.Networks(old) {
-					if network == oldNetwork {
-						conflict = errors.New("已被现有节点使用")
-					}
+				if network == "tcp" {
+					conflict = errors.New("与 SSH 配置TCP端口相同")
 				}
 			}
 		}
+	}
+	if e := node.ValidateNodeListeners(append(append([]node.Node{}, s.Nodes...), n)); e != nil {
+		conflict = e
 	}
 	if conflict == nil {
 		conflict = probes.availablePort(n)

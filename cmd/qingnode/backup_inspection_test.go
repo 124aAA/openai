@@ -13,13 +13,32 @@ import (
 	"qingnode/internal/node"
 )
 
-type backupInspectionBackend struct{ recoveries, activations, stops int }
+type backupInspectionBackend struct {
+	recoveries, activations, stops, checks int
+	lastChecked, lastActivated             node.State
+	lastCheckPath                          string
+	order                                  []string
+}
 
-func (b *backupInspectionBackend) Check(node.State, string) error { return nil }
-func (b *backupInspectionBackend) Active() bool                   { return true }
-func (b *backupInspectionBackend) Activate(node.State) error      { b.activations++; return nil }
-func (b *backupInspectionBackend) Stop() error                    { b.stops++; return nil }
-func (b *backupInspectionBackend) RecoverRemoval() error          { b.recoveries++; return nil }
+func (b *backupInspectionBackend) Check(st node.State, path string) error {
+	b.checks++
+	b.lastChecked, b.lastCheckPath = st.Clone(), path
+	b.order = append(b.order, "check")
+	return nil
+}
+func (b *backupInspectionBackend) Active() bool { return true }
+func (b *backupInspectionBackend) Activate(st node.State) error {
+	b.activations++
+	b.lastActivated = st.Clone()
+	b.order = append(b.order, "activate")
+	return nil
+}
+func (b *backupInspectionBackend) Stop() error { b.stops++; return nil }
+func (b *backupInspectionBackend) RecoverRemoval() error {
+	b.recoveries++
+	b.order = append(b.order, "recover-removal")
+	return nil
+}
 
 const backupTestPassword = "backup-test-password"
 
@@ -189,7 +208,7 @@ func TestBackupPreservesV2AndRestoreStillRecoversV1V2(t *testing.T) {
 			if e != nil || !reflect.DeepEqual(unchanged, original) {
 				t.Fatal("ordinary backup changed its source state", e)
 			}
-			if backend.recoveries != 0 || backend.activations != 0 || backend.stops != 0 {
+			if backend.recoveries != 0 || backend.activations != 0 || backend.stops != 0 || backend.checks != 0 {
 				t.Error("ordinary backup invoked recovery/service")
 			}
 			if _, e := os.Stat(filepath.Join(a.store.Root, "observations.json")); e != nil {
@@ -223,8 +242,25 @@ func TestBackupPreservesV2AndRestoreStillRecoversV1V2(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			restoredGeneration, e := os.Readlink(filepath.Join(a.store.Root, "current"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			parent := backupReadFile(t, filepath.Join(a.store.Root, restoredGeneration, "parent"))
+			if restoredGeneration == current || string(parent) != current || backend.checks != 1 ||
+				!reflect.DeepEqual(backend.lastChecked, restored) ||
+				backend.lastCheckPath != filepath.Join(a.store.Root, restoredGeneration, "server.json") {
+				t.Fatal("metadata restore did not validate and save exactly one complete candidate with the replaced generation as parent")
+			}
+			if backend.recoveries != 1 || backend.activations != 1 || backend.stops != 0 ||
+				backend.lastActivated.Nodes[0].Name != "changed" ||
+				backend.lastActivated.Nodes[0].ID != n.ID ||
+				!reflect.DeepEqual(backend.lastActivated.Nodes[0].Users, original.Nodes[0].Users) ||
+				!reflect.DeepEqual(backend.order, []string{"recover-removal", "activate", "check"}) {
+				t.Fatal("legacy pending transaction must recover once before candidate validation; metadata restore must not activate again")
+			}
 			restored.Nodes[0].UpdatedAt, original.Nodes[0].UpdatedAt = "", ""
-			if !reflect.DeepEqual(restored, original) || backend.recoveries == 0 || backend.activations < 2 || backend.stops != 0 {
+			if !reflect.DeepEqual(restored, original) {
 				t.Fatal("restore did not retain write-path recovery or original identities")
 			}
 			if _, e = os.Lstat(filepath.Join(a.store.Root, "transaction.json")); !os.IsNotExist(e) {

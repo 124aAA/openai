@@ -33,7 +33,9 @@ func TestCLICompleteOfflineLifecycle(t *testing.T) {
 	if first.Nodes[0].Reality.PrivateKey != second.Nodes[0].Reality.PrivateKey || first.Nodes[0].Users[0].UUID != second.Nodes[0].Users[0].UUID {
 		t.Fatal("repeated install changed keys")
 	}
-	call("edit", "--id", "main", "--port", "8443", "--name", "香港 # 测试")
+	// Both sides are explicit after the endpoint split. A local-only port edit
+	// must preserve the client port (covered separately by endpoint CLI tests).
+	call("edit", "--id", "main", "--port", "8443", "--connect-port", "8443", "--name", "香港 # 测试")
 	call("user-add", "--id", first.Nodes[0].ID, "--name", "laptop")
 	s := load()
 	if len(s.Nodes[0].Users) != 2 || s.Nodes[0].Users[0].UUID != first.Nodes[0].Users[0].UUID {

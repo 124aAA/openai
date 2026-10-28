@@ -138,6 +138,28 @@ func TestAutoPortRespectsExplicitChoiceAndSSH(t *testing.T) {
 	}
 }
 
+func TestAutoPortReusesTheLocalAddressAndTransportConflictRules(t *testing.T) {
+	probes := autoProbes{sshPorts: func() []int { return []int{22} }, availablePort: func(node.Node) error { return nil }, randomPort: func(node.State, node.Node, []int) (int, error) {
+		t.Fatal("explicit free listener was replaced with a random port")
+		return 0, nil
+	}}
+	for _, tc := range []struct {
+		protocol, address string
+		port              int
+	}{
+		{"reality", "127.0.0.2", 443},
+		{"hysteria2", "127.0.0.1", 443},
+		{"hysteria2", "127.0.0.1", 22},
+	} {
+		s := node.NewState()
+		s.Nodes = []node.Node{{Protocol: "reality", Enabled: true, Listen: "127.0.0.1", Port: 443}}
+		n := node.Node{Protocol: tc.protocol, Enabled: true, Listen: tc.address, Port: tc.port}
+		if p, e := autoPort(s, n, true, false, probes); e != nil || p != tc.port {
+			t.Fatalf("distinct listener %s/%s:%d rejected: %v", tc.protocol, tc.address, tc.port, e)
+		}
+	}
+}
+
 type autoBackend struct{ activations int }
 
 func (*autoBackend) Check(node.State, string) error { return nil }

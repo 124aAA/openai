@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"qingnode/internal/platform"
 )
 
 func TestSocketOwnershipRejectsUnrelatedListener(t *testing.T) {
@@ -100,6 +102,12 @@ func TestRemovalFailureRestoresOnlyOwnedFiles(t *testing.T) {
 	os.WriteFile(other, []byte("keep"), 0600)
 	failed := false
 	r := Removal{Root: root, Unit: unit, Binary: bin, Library: lib, Execute: func(_ time.Duration, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" && strings.Contains(strings.Join(args, " "), "FragmentPath,DropInPaths") {
+			return []byte("FragmentPath=" + unit + "\nDropInPaths=\n"), nil
+		}
+		if args[0] == "show" && strings.Contains(strings.Join(args, " "), "LoadState,ActiveState,UnitFileState,FragmentPath") {
+			return []byte("LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nFragmentPath=" + unit + "\n"), nil
+		}
 		if args[0] == "daemon-reload" && !failed {
 			failed = true
 			return nil, errors.New("injected reload failure")
@@ -135,6 +143,13 @@ func TestRedactionCoversURIJSONPEMAndOldSecrets(t *testing.T) {
 	}
 }
 
+type removalRecoveryFixtureBackend struct {
+	OfflineBackend
+	removal Removal
+}
+
+func (b removalRecoveryFixtureBackend) RecoverRemoval() error { return b.removal.Recover() }
+
 func TestStoreRecoversInterruptedCoreRemovalBeforeCreatingDirectories(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, ".qingnode-owner"), []byte(OwnerMarker), 0600)
@@ -144,12 +159,20 @@ func TestStoreRecoversInterruptedCoreRemovalBeforeCreatingDirectories(t *testing
 		t.Fatal(e)
 	}
 	os.WriteFile(filepath.Join(root, "uninstall.json"), []byte(`{"full":false,"active":false,"enabled":false}`), 0600)
-	b := SystemBackend{Root: root, Execute: func(_ time.Duration, name string, args ...string) ([]byte, error) {
+	units := t.TempDir()
+	unit := filepath.Join(units, "qingnode.service")
+	if e := os.WriteFile(unit, []byte(ServiceUnit), 0600); e != nil {
+		t.Fatal(e)
+	}
+	b := removalRecoveryFixtureBackend{removal: Removal{Root: root, Unit: unit, DefinitionRoot: units, ManagerKind: platform.InitSystemd, Execute: func(_ time.Duration, name string, args ...string) ([]byte, error) {
 		if name != "systemctl" {
 			t.Fatalf("unexpected command %s", name)
 		}
+		if args[0] == "show" {
+			return []byte("FragmentPath=" + unit + "\nDropInPaths=\n"), nil
+		}
 		return nil, nil
-	}}
+	}}}
 	s := &Store{Root: root, Backend: b, GID: -1}
 	if e := s.WithLock(func() error { return nil }); e != nil {
 		t.Fatal(e)

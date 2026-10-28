@@ -51,7 +51,46 @@ func stateFingerprint(s node.State) string {
 	return hex.EncodeToString(h[:])
 }
 func publicFingerprint(s node.State, n node.Node) string {
+	original := s
 	s.Nodes = []node.Node{n}
+	// A manual check of this entry does not validate unrelated listeners or
+	// dormant exits. Retain the historical byte representation when topology is
+	// absent, and bind configured paths to their selected dependency closure.
+	s.Egresses, s.EgressPolicies, s.Forwards = nil, nil, nil
+	if n.EgressID == "" || n.EgressID == "direct" {
+		return stateFingerprint(s)
+	}
+	id, err := node.ResolveEgressID(original, n.EgressID)
+	if err != nil {
+		original.Nodes = []node.Node{n}
+		return stateFingerprint(original) // Invalid declarations fail conservatively.
+	}
+	for _, p := range original.EgressPolicies {
+		if p.ID == n.EgressID {
+			s.EgressPolicies = []node.EgressPolicy{p}
+			break
+		}
+	}
+	selected := map[string]bool{}
+	for id != "" && id != "direct" && !selected[id] {
+		selected[id] = true
+		found := false
+		for _, e := range original.Egresses {
+			if e.ID == id {
+				id, found = e.Detour, true
+				break
+			}
+		}
+		if !found {
+			original.Nodes = []node.Node{n}
+			return stateFingerprint(original)
+		}
+	}
+	for _, e := range original.Egresses {
+		if selected[e.ID] {
+			s.Egresses = append(s.Egresses, e)
+		}
+	}
 	return stateFingerprint(s)
 }
 

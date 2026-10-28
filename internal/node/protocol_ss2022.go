@@ -38,7 +38,12 @@ func validateSS2022(n Node) error {
 	}
 	return nil
 }
-func SSPassword(n Node, u User) string { return n.Shadowsocks.ServerKey + ":" + u.Password }
+func SSPassword(n Node, u User) string {
+	if n.Protocol == "ss-aead" {
+		return u.Password
+	}
+	return n.Shadowsocks.ServerKey + ":" + u.Password
+}
 func ssInbound(n Node, _ string) M {
 	users := []any{}
 	for _, u := range n.Users {
@@ -49,7 +54,7 @@ func ssInbound(n Node, _ string) M {
 
 // SIP002 requires percent-encoded userinfo (not Base64URL userinfo) for AEAD-2022.
 func ssURI(n Node, u User) string {
-	x := url.URL{Scheme: "ss", User: url.UserPassword(n.Shadowsocks.Method, SSPassword(n, u)), Host: net.JoinHostPort(n.Host, strconv.Itoa(n.Port)), Fragment: n.Name + " / " + u.Name}
+	x := url.URL{Scheme: "ss", User: url.UserPassword(n.Shadowsocks.Method, SSPassword(n, u)), Host: net.JoinHostPort(n.Host, strconv.Itoa(EffectiveConnectPort(n))), Fragment: n.Name + " / " + u.Name}
 	return x.String()
 }
 func ssOutbound(n Node, u User) M {

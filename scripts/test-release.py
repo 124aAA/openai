@@ -7,9 +7,14 @@ import importlib.util
 import io
 import json
 import pathlib
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
+import stat
+import warnings
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location("release_guard", pathlib.Path(__file__).with_name("release.py"))
@@ -18,6 +23,17 @@ spec.loader.exec_module(guard)
 SHA = "a" * 40
 VERSION = "v9.8.7"
 REPO = "owner/repo"
+
+
+class PackageChecksumTests(unittest.TestCase):
+    def test_raw_bytes_and_lf_on_the_actual_build_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data = b"\x00\xff\r\nfixture\n"
+            (root / "fixture.bin").write_bytes(data)
+            result = subprocess.check_output([sys.executable, str(pathlib.Path(__file__).with_name("package-sums.py").resolve()), "fixture.bin"], cwd=root)
+            self.assertEqual((hashlib.sha256(data).hexdigest() + "  fixture.bin\n").encode(), result)
+            self.assertNotIn(b"\r", result)
 
 
 def fixture_archive(path, arch, version=VERSION, modes=None, owner=(0, 0)):
@@ -35,6 +51,36 @@ def fixture_archive(path, arch, version=VERSION, modes=None, owner=(0, 0)):
             member.uid, member.gid = owner
             member.mode = (modes or {}).get(name, 0o755 if name in ("qingnode", "install.sh") else 0o644)
             archive.addfile(member, io.BytesIO(data))
+
+
+def fixture_probe_archive(path, target, wrong_arch=False, corrupt=False):
+    windows = target.startswith('windows-')
+    binary_name = 'qingprobe.exe' if windows else 'qingprobe'
+    binary = bytearray(256)
+    if windows:
+        binary[:2] = b'MZ'; binary[60:64] = (64).to_bytes(4, 'little')
+        binary[64:68] = b'PE\0\0'; binary[68:70] = (0xaa64 if wrong_arch else 0x8664).to_bytes(2, 'little')
+        binary[88:90] = (0x20b).to_bytes(2, 'little')
+    else:
+        binary[:6] = b'\x7fELF\x02\x01'
+        binary[18:20] = (183 if (target == 'linux-arm64') != wrong_arch else 62).to_bytes(2, 'little')
+    files = {name: ('fixture '+name+'\n').encode() for name in
+             {'LICENSE', 'THIRD_PARTY.md'} | {'docs/'+name for name in guard.PROBE_DOCS}}
+    files[binary_name] = bytes(binary)
+    files['SHA256SUMS'] = ''.join(guard.digest(data)+'  '+name+'\n' for name, data in sorted(files.items())).encode()
+    if corrupt: files[binary_name] += b'tampered after checksums'
+    if windows:
+        with zipfile.ZipFile(path, 'w') as archive:
+            for name, data in sorted(files.items()):
+                member = zipfile.ZipInfo(name); member.create_system = 3
+                member.external_attr = (stat.S_IFREG | (0o755 if name == binary_name else 0o644)) << 16
+                archive.writestr(member, data)
+    else:
+        with tarfile.open(path, 'w:gz') as archive:
+            for name, data in sorted(files.items()):
+                member = tarfile.TarInfo(name); member.size = len(data)
+                member.mode = 0o755 if name == binary_name else 0o644
+                archive.addfile(member, io.BytesIO(data))
 
 
 class FakeGitHub:
@@ -104,7 +150,7 @@ class FakeGitHub:
             return copy.deepcopy(self.current_release)
         if method == "PATCH" and path == "/releases/1":
             if set(self.files) != self.expected_names:
-                raise AssertionError("published before all four assets existed")
+                raise AssertionError("published before all seven assets existed")
             self.current_release.update(value)
             return copy.deepcopy(self.current_release)
         raise AssertionError("unexpected offline mutation")
@@ -118,10 +164,23 @@ class ReleaseTests(unittest.TestCase):
         self.dist.mkdir()
         for arch in ("amd64", "arm64"):
             fixture_archive(self.dist / f"qingnode-{VERSION[1:]}-linux-{arch}.tar.gz", arch)
+        for target in guard.PROBE_TARGETS:
+            fixture_probe_archive(self.dist / guard.probe_name(VERSION, target), target)
         self.manifest = guard.prepare(self.dist, VERSION, SHA, REPO)
         _, self.assets = guard.validate_local(self.dist, VERSION, SHA, REPO)
         self.api = FakeGitHub()
         self.api.expected_names = set(self.assets)
+
+    def test_batch08_named_documents_are_required_and_preserved(self):
+        required = {"docs/MONITORING.md", "docs/BATCH08.md", "docs/PROTOCOLS.md", "docs/BATCH09.md", "docs/PLATFORMS.md", "docs/BATCH10.md", "docs/WORKFLOWS.md", "docs/BATCH11.md"}
+        self.assertTrue(required <= guard.PACKAGE_FILES)
+        for arch in ("amd64", "arm64"):
+            path = self.dist / f"qingnode-{VERSION[1:]}-linux-{arch}.tar.gz"
+            with tarfile.open(path) as archive:
+                names = {member.name for member in archive if member.isfile()}
+                self.assertTrue(required <= names)
+                for name in required:
+                    self.assertEqual(("fixture " + name + "\n").encode(), archive.extractfile(name).read())
 
     def publish(self, ref="refs/heads/main", sha=SHA):
         return guard.publish(self.api, self.dist, VERSION, sha, REPO, ref, "123", "1", "Release notes")
@@ -350,8 +409,46 @@ class ReleaseTests(unittest.TestCase):
 
     def test_extra_local_artifact_is_refused(self):
         (self.dist / "extra.txt").write_text("extra")
-        with self.assertRaisesRegex(ValueError, "exactly four"):
+        with self.assertRaisesRegex(ValueError, "exactly seven"):
             guard.validate_local(self.dist, VERSION, SHA, REPO)
+
+    def test_all_five_binaries_are_required_and_manifest_schema_is_explicit(self):
+        self.assertEqual(2, self.manifest['schema'])
+        self.assertEqual(5, len(self.manifest['archives']))
+        self.assertEqual(7, len(self.assets))
+        for target in guard.PROBE_TARGETS:
+            with self.subTest(target=target):
+                name = guard.probe_name(VERSION, target)
+                saved = (self.dist/name).read_bytes()
+                (self.dist/name).unlink()
+                with self.assertRaises(ValueError): guard.validate_local(self.dist, VERSION, SHA, REPO)
+                (self.dist/name).write_bytes(saved)
+
+    def test_probe_wrong_architecture_and_tampering_block_publication(self):
+        for target in guard.PROBE_TARGETS:
+            path = self.dist/guard.probe_name(VERSION, target)
+            saved = path.read_bytes()
+            for wrong, corrupt in ((True, False), (False, True)):
+                with self.subTest(target=target, wrong=wrong, corrupt=corrupt):
+                    fixture_probe_archive(path, target, wrong_arch=wrong, corrupt=corrupt)
+                    with self.assertRaises(ValueError): self.publish()
+                    self.assertEqual([], self.api.mutations)
+                    path.write_bytes(saved)
+
+    def test_probe_zip_paths_links_duplicates_and_directory_modes_are_refused(self):
+        path = self.dist/guard.probe_name(VERSION, 'windows-amd64')
+        saved = path.read_bytes()
+        for name, mode in (('../outside', stat.S_IFREG | 0o644), ('LICENSE', stat.S_IFREG | 0o644),
+                           ('qingprobe.exe', stat.S_IFLNK | 0o777), ('qingprobe.exe', stat.S_IFDIR | 0o755)):
+            with self.subTest(name=name, mode=mode):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', UserWarning)
+                    with zipfile.ZipFile(path, 'a') as archive:
+                        entry = zipfile.ZipInfo(name); entry.create_system = 3; entry.external_attr = mode << 16
+                        archive.writestr(entry, b'bad member')
+                with self.assertRaises(ValueError): self.publish()
+                self.assertEqual([], self.api.mutations)
+                path.write_bytes(saved)
 
     def test_reproducible_manifest_is_bound_to_source(self):
         before = (self.dist / "RELEASE.json").read_bytes()
@@ -363,11 +460,17 @@ class ReleaseTests(unittest.TestCase):
     def test_installer_and_cli_version_must_agree(self):
         root = pathlib.Path(self.temp.name)
         (root / "cmd/qingnode").mkdir(parents=True)
+        (root / "cmd/qingprobe").mkdir(parents=True)
         (root / "install.sh").write_text("REPO='' VERSION=v1.2.3 PORT=443\n")
         (root / "cmd/qingnode/main.go").write_text('var version = "1.2.3"\n')
+        (root / "cmd/qingprobe/main.go").write_text('var version = "1.2.3"\n')
         self.assertEqual(guard.version_from_source(root), "v1.2.3")
         (root / "cmd/qingnode/main.go").write_text('var version = "1.2.4"\n')
         with self.assertRaisesRegex(ValueError, "versions disagree"):
+            guard.version_from_source(root)
+        (root / "cmd/qingnode/main.go").write_text('var version = "1.2.3"\n')
+        (root / "cmd/qingprobe/main.go").write_text('var version = "1.2.4"\n')
+        with self.assertRaisesRegex(ValueError, "probe versions disagree"):
             guard.version_from_source(root)
 
     def test_annotated_tag_resolves_exact_commit(self):

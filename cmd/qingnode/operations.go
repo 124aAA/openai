@@ -7,15 +7,31 @@ import (
 	"os"
 	"path/filepath"
 	"qingnode/internal/node"
+	"qingnode/internal/platform"
 	"strings"
 	"syscall"
 	"time"
 )
 
 func (a *app) operation(cmd string, args []string) error {
+	// Preserve the historical no-argument core logs path. Explicit selection
+	// shares the bounded, read-only service logs entry point.
+	if cmd == "logs" && len(args) > 0 {
+		return a.service(append([]string{"logs"}, args...))
+	}
 	f := fs(cmd)
+	machine := f.Bool("json", false, "status/doctor：版本1脱敏报告，未测项保持unknown")
 	if e := parse(f, args); e != nil {
 		return e
+	}
+	if *machine {
+		if cmd == "doctor" {
+			return a.doctorJSON(os.Stdout)
+		}
+		if cmd != "status" {
+			return errors.New("此命令没有该JSON入口；请使用help --json列出的结构化入口")
+		}
+		return a.statusJSON(os.Stdout)
 	}
 	if cmd == "check" {
 		return a.inspectState(func(s *node.State) error {
@@ -44,7 +60,7 @@ func (a *app) operation(cmd string, args []string) error {
 				return a.doctor(s, err)
 			default:
 				if a.offline {
-					return errors.New("离线模式没有 systemd 日志")
+					return errors.New("离线模式没有宿主服务日志")
 				}
 				a.recentLogs(s)
 				return err
@@ -55,6 +71,9 @@ func (a *app) operation(cmd string, args []string) error {
 		if cmd == "rollback" {
 			return a.store.Rollback()
 		}
+		if cmd == "apply" {
+			return a.store.Apply(*s)
+		}
 		if a.offline {
 			return errors.New("离线模式不操作服务")
 		}
@@ -64,12 +83,8 @@ func (a *app) operation(cmd string, args []string) error {
 		if e := a.store.Backend.Check(*s, filepath.Join(a.store.Root, "current", "server.json")); e != nil {
 			return e
 		}
-		enabled := false
-		for _, n := range s.Nodes {
-			enabled = enabled || n.Enabled
-		}
-		if !enabled {
-			return errors.New("没有启用的节点")
+		if !node.HasEnabled(*s) {
+			return errors.New("没有启用的节点、中转或WireGuard监听")
 		}
 		if fx, ok := a.store.Backend.(node.Effects); ok {
 			if e := fx.PrepareEffects(node.NewState(), *s); e != nil {
@@ -143,7 +158,12 @@ func (a *app) uninstall(args []string) error {
 		}
 		a.message("INFO", "已保存卸载前快照："+path+"（权限 600，含凭据，请妥善保管）")
 		a.message("INFO", "重装后可用 qingnode restore --snapshot --file "+path+" --yes 恢复")
-		r := node.Removal{Root: a.store.Root, Unit: "/etc/systemd/system/qingnode.service", Binary: "/usr/local/bin/qingnode", Library: "/usr/local/lib/qingnode"}
+		manager := platform.NewManager("", nil)
+		unitPath, e := manager.DefinitionPath("qingnode")
+		if e != nil {
+			return e
+		}
+		r := node.Removal{Root: a.store.Root, Unit: unitPath, Binary: "/usr/local/bin/qingnode", Library: "/usr/local/lib/qingnode", ManagerKind: manager.ResolvedKind(), Logrotate: "/etc/logrotate.d/qingnode"}
 		if *purge {
 			if e = r.RecordAccount(filepath.Join(backupDir, ".qingnode-account")); e != nil {
 				return e

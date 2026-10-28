@@ -16,9 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
+
+	"qingnode/internal/platform"
 )
 
 var pinned = map[string]string{
@@ -68,6 +69,25 @@ func VerifyCore(root, v string) error {
 	if e != nil || !strings.Contains(string(b), "sing-box version "+v+"\n") {
 		return errors.New("核心版本与锁定版本不一致")
 	}
+	return verifyCoreTags(string(b))
+}
+
+// A compatible version alone does not guarantee that the upstream binary was
+// built with the TLS, QUIC and certificate features used by our adapters.
+func verifyCoreTags(output string) error {
+	tags := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "Tags:") {
+			for _, tag := range strings.FieldsFunc(strings.TrimPrefix(line, "Tags:"), func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
+				tags[tag] = true
+			}
+		}
+	}
+	for _, tag := range []string{"with_quic", "with_utls", "with_acme"} {
+		if !tags[tag] {
+			return fmt.Errorf("核心构建缺少 %s 能力", tag)
+		}
+	}
 	return nil
 }
 func InstallCore(root, v, sum, archive string) error {
@@ -84,7 +104,20 @@ func InstallCore(root, v, sum, archive string) error {
 	if e != nil || len(d) != 32 {
 		return errors.New("此版本需要显式提供官方归档的 SHA-256")
 	}
-	if archive == "" && VerifyCore(root, v) == nil {
+	openrc := platform.DetectServiceManager() == platform.InitOpenRC
+	if openrc {
+		if info, statErr := os.Lstat(CorePath(root, v)); statErr == nil {
+			if !info.Mode().IsRegular() {
+				return errors.New("现有OpenRC核心必须是普通文件；拒绝接管")
+			}
+			if _, e = openRCCoreFileCapabilityWithRunner(CorePath(root, v), Run); e != nil {
+				return e
+			}
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	}
+	if archive == "" && installedCoreReady(root, v) {
 		return nil
 	}
 	var src io.ReadCloser
@@ -177,18 +210,30 @@ func InstallCore(root, v, sum, archive string) error {
 	if e = AtomicWrite(staged, binary, 0755); e != nil {
 		return e
 	}
+	if _, e = CheckCoreABI(staged, runtime.GOARCH); e != nil {
+		return e
+	}
 	b, e := Run(10*time.Second, staged, "version")
 	if e != nil || !strings.Contains(string(b), "sing-box version "+v+"\n") {
 		return errors.New("下载核心的架构或版本不匹配")
 	}
-	if !strings.Contains(string(b), "with_quic") || !strings.Contains(string(b), "with_utls") || !strings.Contains(string(b), "with_acme") {
-		return errors.New("核心构建缺少 QUIC/uTLS/ACME 能力")
+	if e = verifyCoreTags(string(b)); e != nil {
+		return e
+	}
+	// Both managers supply a narrow ambient bind capability. A fresh staged
+	// executable has no file capability: such an xattr clears ambient at exec,
+	// which breaks low-port binding through a second compatibility-loader exec.
+	// Legacy exact bind xattrs remain on the old inode in recovery materials.
+	if openrc {
+		if e = verifyOpenRCCoreFileCapability(staged); e != nil {
+			return e
+		}
 	}
 	bh := sha256.Sum256(binary)
 	if e = AtomicWrite(staged+".sha256", []byte(hex.EncodeToString(bh[:])+"\n"), 0644); e != nil {
 		return e
 	}
-	if VerifyCore(root, v) == nil {
+	if installedCoreReady(root, v) {
 		return nil
 	}
 	broken := dir + ".previous-" + Token(8)
@@ -215,9 +260,12 @@ func InstallCore(root, v, sum, archive string) error {
 type Runner func(time.Duration, string, ...string) ([]byte, error)
 
 type SystemBackend struct {
-	Root     string
-	Execute  Runner
-	ProcRoot string
+	Root          string
+	Execute       Runner
+	ProcRoot      string
+	CgroupRoot    string
+	ManagerKind   platform.InitKind
+	OpenRCPIDFile string // optional isolated stop-proof fixture; real default is fixed
 }
 
 func (b SystemBackend) run(t time.Duration, name string, args ...string) ([]byte, error) {
@@ -227,11 +275,7 @@ func (b SystemBackend) run(t time.Duration, name string, args ...string) ([]byte
 	return Run(t, name, args...)
 }
 func (b SystemBackend) PID() int {
-	out, e := b.run(8*time.Second, "systemctl", "show", "qingnode.service", "--property=MainPID", "--value")
-	if e != nil {
-		return 0
-	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	pid, _ := b.ServiceManager().PID("qingnode")
 	return pid
 }
 func (b SystemBackend) Sockets() []Socket {
@@ -243,6 +287,14 @@ func (b SystemBackend) Sockets() []Socket {
 }
 
 func (b SystemBackend) Check(s State, path string) error {
+	var certificateErr error
+	s, certificateErr = CanonicalCertificates(s)
+	if certificateErr != nil {
+		return certificateErr
+	}
+	if e := CheckCertificateFilePermissions(s); e != nil {
+		return e
+	}
 	if e := (Firewall{Execute: b.Execute}).Check(s); e != nil {
 		return e
 	}
@@ -251,6 +303,18 @@ func (b SystemBackend) Check(s State, path string) error {
 	}
 	if e := VerifyCore(b.Root, s.CoreVersion); e != nil {
 		return e
+	}
+	if len(s.Egresses) > 0 || len(s.Nodes) > 0 {
+		version, err := Run(10*time.Second, CorePath(b.Root, s.CoreVersion), "version")
+		if err != nil {
+			return errors.New("无法读取节点与拓扑所需的核心构建能力")
+		}
+		if err = ValidateProtocolCapabilities(s, CoreBuildTags(string(version))); err != nil {
+			return err
+		}
+		if err = ValidateEgressCapabilities(s, CoreBuildTags(string(version))); err != nil {
+			return err
+		}
 	}
 	expected, e := Server(s, b.Root)
 	if e != nil {
@@ -268,60 +332,118 @@ func (b SystemBackend) Check(s State, path string) error {
 		return fmt.Errorf("sing-box check 未通过（%s）；请运行 doctor 查看非敏感诊断", e)
 	}
 	_ = out
-	old, _ := ReadState(filepath.Join(b.Root, "current", "state.json"))
-	owned := map[string]bool{}
-	for _, socket := range b.Sockets() {
-		if socket.Owned {
-			owned[fmt.Sprintf("%s/%d/%s", socket.Network, socket.Port, net.ParseIP(socket.Address).String())] = true
-		}
+	old, oldErr := ReadState(filepath.Join(b.Root, "current", "state.json"))
+	if oldErr != nil || old.Validate() != nil {
+		old = State{}
 	}
-	for _, n := range s.Nodes {
-		if !n.Enabled {
-			continue
-		}
-		address := net.JoinHostPort(n.Listen, fmt.Sprint(n.Port))
-		for _, network := range Networks(n) {
-			if !owned[fmt.Sprintf("%s/%d/%s", network, n.Port, net.ParseIP(n.Listen).String())] {
-				if e := available(network, address); e != nil {
-					return fmt.Errorf("端口 %s/%s 无法绑定；请用 qingnode ports 查看占用并选择新端口：%w", address, network, e)
-				}
-			}
-		}
-		if n.Certificate != nil && n.Certificate.Mode == "acme" {
-			hadACME := false
-			for _, o := range old.Nodes {
-				if o.Enabled && o.Certificate != nil && o.Certificate.Mode == "acme" {
-					hadACME = true
-				}
-			}
-			if !hadACME {
-				if e := available("tcp", "0.0.0.0:80"); e != nil {
-					return errors.New("ACME HTTP-01 需要 TCP 80；该端口已被占用，请使用已有证书")
-				}
-			}
-		}
+	proc := b.ProcRoot
+	if proc == "" {
+		proc = "/proc"
+	}
+	pid := b.PID()
+	snapshot, _ := ReadSocketSnapshot(proc, pid)
+	if pid > 0 && !snapshot.NamespaceVerified {
+		return errors.New("无法在服务实际网络命名空间中完成本地监听预检；请先核对服务隔离设置")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if e := ValidateTopologyNetwork(ctx, s); e != nil {
+		return e
+	}
+	if _, e := ProbeLocalBindings(ctx, StateBindings(s), BindingProbeOptions{Previous: StateBindings(old), Sockets: snapshot.Sockets, SnapshotComplete: snapshot.Complete}); e != nil {
+		return e
+	}
+	return probeCertificateChallengeBindings(ctx, s, old, snapshot)
+}
+
+// CertMagic's fixed challenge solver uses net.Listen("tcp", ":port"). Match
+// its actual wildcard family instead of assuming IPv4, and defer a busy port
+// only when the complete socket snapshot proves an old challenge owns it.
+func probeCertificateChallengeBindings(ctx context.Context, next, old State, snapshot SocketSnapshot) error {
+	bindings := CertificateChallengeBindings(next)
+	if len(bindings) == 0 {
+		return nil
+	}
+	var lc net.ListenConfig
+	listener, e := lc.Listen(ctx, "tcp", ":0")
+	if e != nil {
+		return fmt.Errorf("无法预检ACME挑战监听能力：%w", e)
+	}
+	address, _, splitErr := net.SplitHostPort(listener.Addr().String())
+	closeErr := listener.Close()
+	if splitErr != nil || closeErr != nil {
+		return errors.New("无法确认ACME挑战实际监听地址族")
+	}
+	for i := range bindings {
+		bindings[i].Address = address
+	}
+	var previous []LocalBinding
+	for _, binding := range CertificateChallengeBindings(old) {
+		// Both are possible representations of the same fixed wildcard
+		// solver. Neither grants ownership without the observed inode.
+		binding.Address = "0.0.0.0"
+		previous = append(previous, binding)
+		binding.Address = "::"
+		previous = append(previous, binding)
+	}
+	_, e = ProbeLocalBindings(ctx, bindings, BindingProbeOptions{Previous: previous, Sockets: snapshot.Sockets, SnapshotComplete: snapshot.Complete && snapshot.NamespaceVerified})
+	if e != nil {
+		return fmt.Errorf("ACME本地挑战监听未通过；HTTP-01仍需公网80、TLS-ALPN仍需公网443正确转发：%w", e)
 	}
 	return nil
 }
-func available(network, address string) error {
-	if network == "udp" {
-		l, e := net.ListenPacket(network, address)
-		if e == nil {
-			l.Close()
+
+func CoreBuildTags(output string) []string {
+	var tags []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "Tags:") {
+			tags = append(tags, strings.FieldsFunc(strings.TrimPrefix(line, "Tags:"), func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' })...)
 		}
+	}
+	return tags
+}
+func available(network, address string) error {
+	host, port, e := splitLocalAddress(address)
+	if e != nil {
 		return e
 	}
-	l, e := net.Listen(network, address)
-	if e == nil {
-		l.Close()
-	}
+	_, e = ProbeLocalBindings(context.Background(), []LocalBinding{{Network: network, Address: host, Port: port}}, BindingProbeOptions{})
 	return e
 }
 func (b SystemBackend) Active() bool {
-	_, e := b.run(10*time.Second, "systemctl", "is-active", "--quiet", "qingnode.service")
-	return e == nil
+	active, e := b.ServiceManager().Active("qingnode")
+	return e == nil && active
+}
+
+// ActiveState preserves unknown controller results for write transactions.
+// Active remains the legacy observation convenience; false alone is not a
+// sufficient recovery snapshot when a backend can provide this stronger API.
+func (b SystemBackend) ActiveState() (bool, error) {
+	state, e := b.ServiceManager().State("qingnode")
+	if e != nil {
+		return false, e
+	}
+	switch state.State {
+	case "active":
+		if state.PID > 0 && state.SubState == "running" {
+			return true, nil
+		}
+	case "inactive", "failed":
+		if state.PID == 0 && (state.SubState == "dead" || state.SubState == "failed" || state.SubState == "stopped") {
+			return false, nil
+		}
+	}
+	return false, errors.New("服务状态未知或正在转换，未把它保存为停止状态")
 }
 func (b SystemBackend) restartService(s State) error {
+	manager := b.ServiceManager()
+	if manager.ResolvedKind() != platform.InitSystemd {
+		out, e := manager.Command("restart", "qingnode")
+		if e != nil {
+			return fmt.Errorf("%s restart qingnode 失败：%w；%s", manager.ResolvedKind(), e, strings.TrimSpace(Redact(string(out), s)))
+		}
+		return nil
+	}
 	commandError := func(action string, out []byte, err error) error {
 		detail := strings.TrimSpace(Redact(string(out), s))
 		if detail == "" {
@@ -363,10 +485,16 @@ func (b SystemBackend) Activate(s State) error {
 	if e := b.restartService(s); e != nil {
 		return e
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	unavailable, err := wireGuardUnavailableFamilies(ctx, s, net.ListenConfig{})
+	cancel()
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(45 * time.Second)
 	success := 0
 	for time.Now().Before(deadline) {
-		if b.Active() && SocketsReady(s, b.Sockets()) {
+		if b.Active() && socketsReadyWithUnavailableFamilies(s, b.Sockets(), unavailable) {
 			success++
 			if success >= 3 {
 				return nil
@@ -379,6 +507,5 @@ func (b SystemBackend) Activate(s State) error {
 	return errors.New("服务未通过持续运行检查")
 }
 func (b SystemBackend) Stop() error {
-	_, e := b.run(20*time.Second, "systemctl", "stop", "qingnode.service")
-	return e
+	return b.ServiceManager().Stop("qingnode")
 }
