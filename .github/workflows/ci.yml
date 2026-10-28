@@ -12,7 +12,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ['alpine:3.24.2', 'rockylinux:9.8']
+        # Rocky publishes maintained minor images in its own namespace.
+        # Pin the verified amd64 manifest; a missing library/rockylinux tag is not platform evidence.
+        image: ['alpine:3.24.2', 'rockylinux/rockylinux:9.8@sha256:ed654c694190a670bb5c33f68995b862214fc96ffbdca95e07a8935ba0a3717d']
     steps:
       - uses: actions/checkout@v4
         with:

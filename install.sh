@@ -390,9 +390,9 @@ qn_guard_transaction() {
         *) return 1;;
       esac
     done <<< "$properties"
-    ((seen_fragment==1 && seen_dropins==1)) && [[ -z $dropins && ( -z $fragment || $fragment == "$UNIT" ) ]] || {
-      echo '服务加载来源已由外部修改，停止恢复。' >&2; return 1;
-    }
+    if ((seen_fragment!=1 || seen_dropins!=1)) || [[ -n $dropins || ( -n $fragment && $fragment != "$UNIT" ) ]]; then
+      echo '服务加载来源已由外部修改，停止恢复。' >&2; return 1
+    fi
   fi
 }
 qn_remove_new_lib() {
