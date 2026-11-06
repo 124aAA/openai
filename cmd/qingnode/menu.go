@@ -885,7 +885,7 @@ func (a *app) exportNodeWizard(n node.Node) error {
 // Keep legacy exports unchanged; the normal validator still checks the choice.
 func lockedExportClientVersion(protocol, format string) string {
 	switch protocol {
-	case "anytls", "trojan", "ss-aead", "tuic", "vless", "vmess":
+	case "anytls", "trojan", "ss-aead", "tuic", "vless", "vmess", "hysteria2":
 		switch format {
 		case "sing-box":
 			return "1.14.0"
