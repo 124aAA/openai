@@ -1,3 +1,11 @@
+# QingNode 0.3.2 — 多协议传输与导出扩展
+
+- 新增 VLESS/VMess TLS 节点，支持 TCP 直连、WebSocket 和 gRPC；Trojan 同步支持 WebSocket/gRPC，VLESS 另提供高级 HTTPUpgrade。
+- 服务端、sing-box JSON、Mihomo YAML 与分享链接复用传输参数；VMess 使用 Base64 JSON 分享，连接地址统一使用公开地址和外部端口。
+- 创建向导按编号复用已有证书；节点管理可直接重新导出或修改传输，保留节点 ID、UUID 和密码。
+- HTTPUpgrade 不生成缺少兼容性依据的通用 URI/二维码，使用完整 JSON/YAML。Snell、NaiveProxy、ShadowTLS 暂缓，原因见[协议说明](PROTOCOLS.md)。
+- 保留配置校验、事务回滚和默认官方核心 1.14.0；实际 Linux 验证与发布结果由本提交的 Actions 给出，公网、手机客户端和生产证书仍需使用者验证。
+
 # QingNode 0.3.1 — 简化节点管理和导出
 
 - 创建节点、导出、备份与更新、服务管理可从主菜单直接进入。证书、设备订阅和网络设置集中在高级设置。

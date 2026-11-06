@@ -43,12 +43,17 @@ type nodeEdit struct {
 	EgressID            *string                    `json:"egress_id,omitempty"`
 	Tags                *[]string                  `json:"tags,omitempty"`
 	Method              *string                    `json:"method,omitempty"`
+	Transport           *string                    `json:"transport,omitempty"`
+	TransportPath       *string                    `json:"transport_path,omitempty"`
+	TransportHost       *string                    `json:"transport_host,omitempty"`
+	GRPCServiceName     *string                    `json:"grpc_service_name,omitempty"`
 }
 
 func (e nodeEdit) empty() bool {
 	return e.Name == nil && e.Server == nil && e.Listen == nil && e.Port == nil && e.ConnectPort == nil && e.AdditionalEndpoints == nil &&
 		e.Fingerprint == nil && e.SNI == nil && e.Target == nil && e.Cert == nil &&
-		e.Key == nil && e.ACMEEmail == nil && e.Enabled == nil && e.EgressID == nil && e.Tags == nil && e.Method == nil
+		e.Key == nil && e.ACMEEmail == nil && e.Enabled == nil && e.EgressID == nil && e.Tags == nil && e.Method == nil &&
+		e.Transport == nil && e.TransportPath == nil && e.TransportHost == nil && e.GRPCServiceName == nil
 }
 
 func editString(s string) *string {
@@ -93,7 +98,7 @@ func decodeEditBatch(data []byte) (editBatch, error) {
 		if e.ID == "" || e.empty() {
 			return batch, fmt.Errorf("第 %d 项需要 id 和至少一个修改字段", i+1)
 		}
-		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method} {
+		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method, e.Transport} {
 			if v != nil && *v == "" {
 				return batch, fmt.Errorf("第 %d 项不能用空字符串修改字段；保留旧值请省略字段", i+1)
 			}
@@ -192,6 +197,28 @@ func applyNodeEdits(s *node.State, edits []nodeEdit) ([]string, error) {
 }
 
 func (e nodeEdit) apply(n *node.Node) error {
+	if e.Transport != nil || e.TransportPath != nil || e.TransportHost != nil || e.GRPCServiceName != nil {
+		transport := node.V2RayTransport{Type: "tcp"}
+		if n.Transport != nil {
+			transport = *n.Transport
+		}
+		if e.Transport != nil && *e.Transport != transport.Type {
+			transport = node.V2RayTransport{Type: *e.Transport}
+		}
+		if e.TransportPath != nil {
+			transport.Path = *e.TransportPath
+		}
+		if e.TransportHost != nil {
+			transport.Host = *e.TransportHost
+		}
+		if e.GRPCServiceName != nil {
+			transport.ServiceName = *e.GRPCServiceName
+		}
+		if err := node.ValidateV2RayTransport(n.Protocol, &transport); err != nil {
+			return err
+		}
+		n.Transport = node.NormalizeV2RayTransport(&transport)
+	}
 	if e.Tags != nil {
 		if err := node.ValidateNodeTags(*e.Tags); err != nil {
 			return err
@@ -274,9 +301,9 @@ func (e nodeEdit) apply(n *node.Node) error {
 		if e.SNI != nil || e.Target != nil {
 			return node.RealityTargetPolicy(n.Reality)
 		}
-	case "hysteria2", "anytls", "trojan", "tuic":
+	case "hysteria2", "anytls", "trojan", "tuic", "vless", "vmess":
 		if e.Target != nil {
-			return errors.New("Hysteria2 不使用 REALITY 目标")
+			return errors.New("该TLS协议不使用 REALITY 目标")
 		}
 		if e.SNI != nil {
 			n.Certificate.ServerName = *e.SNI
@@ -290,7 +317,7 @@ func (e nodeEdit) apply(n *node.Node) error {
 		}
 	case "ss2022", "ss-aead":
 		if e.SNI != nil || e.Target != nil || e.Cert != nil || e.Key != nil || e.ACMEEmail != nil {
-			return errors.New("SS2022 不接受 TLS/REALITY 参数")
+			return errors.New("Shadowsocks 不接受 TLS/REALITY 参数")
 		}
 	}
 	return nil

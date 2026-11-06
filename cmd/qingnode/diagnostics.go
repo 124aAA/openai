@@ -227,6 +227,18 @@ func (a *app) info(args []string) error {
 			fmt.Fprintf(w, "\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), strings.Join(node.Networks(n), "+"), n.Enabled)
 			fmt.Fprintf(w, "出口：%s；最终客户端仅使用此入口地址与入口凭据，内部出口凭据不会加入分享。\n", displayEgress(n.EgressID))
 			fmt.Fprintf(w, "客户端端口：%d\n传输协议：%s\n", node.EffectiveConnectPort(n), strings.Join(node.Networks(n), "+"))
+			if transport := n.Transport; transport != nil {
+				fmt.Fprintf(w, "代理传输：%s\n", transport.Type)
+				if transport.Path != "" {
+					fmt.Fprintf(w, "传输路径：%s\n", transport.Path)
+				}
+				if transport.Host != "" {
+					fmt.Fprintf(w, "HTTP Host：%s\n", transport.Host)
+				}
+				if transport.ServiceName != "" {
+					fmt.Fprintf(w, "gRPC服务名：%s\n", transport.ServiceName)
+				}
+			}
 			fmt.Fprintln(w, "本地监听用于端口检查与防火墙；连接端点用于客户端，NAT/云安全组与公网入站尚需独立验证。")
 			for _, ep := range node.EffectiveEndpoints(n) {
 				fmt.Fprintf(w, "连接端点 %s：%s\n", ep.ID, net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)))
@@ -246,9 +258,10 @@ func (a *app) info(args []string) error {
 				}
 			}
 			fmt.Fprintf(w, "创建时间：%s\n更新时间：%s\n", n.CreatedAt, n.UpdatedAt)
+			uriAvailable := len(node.ProtocolExportWarnings(n, "uri")) == 0 && len(node.HY2ExportWarnings(n, "uri")) == 0
 			for _, u := range n.Users {
 				fmt.Fprintf(w, "凭据：%s (%s)\n", u.Name, u.ID)
-				if len(node.ProtocolExportWarnings(n, "uri")) == 0 {
+				if uriAvailable {
 					fmt.Fprintf(w, "导出链接：qingnode export --id %s --format uri --user %s\n", n.ID, u.ID)
 				} else {
 					fmt.Fprintln(w, "当前协议或高级设置需使用完整配置，不能等价表达为分享链接。")
@@ -272,7 +285,7 @@ func (a *app) info(args []string) error {
 							w.Raw(fmt.Sprintf("Password：%s\n", u.Password))
 						}
 					}
-					if len(node.ProtocolExportWarnings(n, "uri")) == 0 {
+					if uriAvailable {
 						w.Raw(fmt.Sprintf("分享链接：\n%s\n", node.URI(n, u)))
 					}
 				}

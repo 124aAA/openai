@@ -496,7 +496,7 @@ class InstallerTests(unittest.TestCase):
     def test_first_screen_protocol_selection_and_invalid_input_retry(self):
         for answer, protocol, scheme, args in [
                 ('1\n', 'reality', 'vless://', ()),
-                ('\n9\n2\n', 'ss2022', 'ss://',
+                ('\n99\n2\n', 'ss2022', 'ss://',
                  ('--reinstall', '--repo', '124aAA/openai', '--version', RELEASE_TAG))]:
             with self.subTest(protocol=protocol):
                 f = self.fixture(); f.remote_release()

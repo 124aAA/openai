@@ -27,7 +27,11 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	f := fs(cmd)
 	auto := f.Bool("auto", false, "无交互发现公网地址、验证 REALITY 目标并避开默认端口冲突")
 	name := f.String("name", "main", "节点名称")
-	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic")
+	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless / vmess")
+	transport := f.String("transport", "tcp", "VLESS/VMess/Trojan：tcp / ws / grpc；VLESS另支持httpupgrade")
+	transportPath := f.String("transport-path", "", "WebSocket/HTTPUpgrade路径，默认 /")
+	transportHost := f.String("transport-host", "", "WebSocket/HTTPUpgrade的HTTP Host；省略使用连接地址")
+	grpcService := f.String("grpc-service-name", "", "gRPC服务名，默认qingnode")
 	method := f.String("method", "aes-256-gcm", "仅传统ss-aead：aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305")
 	host := f.String("server", "", "客户端连接的公网 IP 或域名")
 	listen := f.String("listen", "", "监听 IP，默认按公网地址选择通配地址")
@@ -50,6 +54,14 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	}
 	if e := parse(f, args); e != nil {
 		return e
+	}
+	var transportOptions *node.V2RayTransport
+	if flagSet(f, "transport") || flagSet(f, "transport-path") || flagSet(f, "transport-host") || flagSet(f, "grpc-service-name") {
+		transportOptions = &node.V2RayTransport{Type: *transport, Path: *transportPath, Host: *transportHost, ServiceName: *grpcService}
+		if e := node.ValidateV2RayTransport(*protocol, transportOptions); e != nil {
+			return e
+		}
+		transportOptions = node.NormalizeV2RayTransport(transportOptions)
 	}
 	if cmd == "install" || cmd == "validate-install" {
 		if cmd == "install" && a.offline {
@@ -250,7 +262,7 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 				*listen = "::"
 			}
 		}
-		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Host: *host, Listen: *listen, Port: *port, Enabled: true, Users: []node.User{node.NewUser(*uname, *protocol)}, EgressID: directEgress(*egress)}
+		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Host: *host, Listen: *listen, Port: *port, Enabled: true, Users: []node.User{node.NewUser(*uname, *protocol)}, EgressID: directEgress(*egress), Transport: transportOptions}
 		if *protocol == "reality" {
 			if *cert != "" || *key != "" || *email != "" || *certificateID != "" {
 				return errors.New("REALITY 不使用证书参数")
@@ -466,6 +478,10 @@ func (a *app) list(args []string) error {
 }
 func (a *app) edit(args []string) error {
 	f := fs("edit")
+	transport := f.String("transport", "", "VLESS/VMess/Trojan传输；tcp恢复直连TLS；切换类型重置旧传输字段")
+	transportPath := f.String("transport-path", "", "WebSocket/HTTPUpgrade路径；空值恢复 /")
+	transportHost := f.String("transport-host", "", "WebSocket/HTTPUpgrade的HTTP Host；空值移除覆写")
+	grpcService := f.String("grpc-service-name", "", "gRPC服务名；空值恢复qingnode")
 	id := f.String("id", "", "节点 ID 或名称")
 	name := f.String("name", "", "新名称")
 	host := f.String("server", "", "新公网 IP/域名")
@@ -492,6 +508,21 @@ func (a *app) edit(args []string) error {
 	e := nodeEdit{ID: *id, Name: editString(*name), Server: editString(*host), Listen: editString(*listen),
 		Fingerprint: editString(*fingerprint), SNI: editString(*sni), Target: editString(*target),
 		Cert: editString(*cert), Key: editString(*key), ACMEEmail: editString(*email)}
+	if flagSet(f, "transport") {
+		if *transport == "" {
+			return errors.New("--transport不能为空；恢复直连TLS请填写tcp")
+		}
+		e.Transport = transport
+	}
+	if flagSet(f, "transport-path") {
+		e.TransportPath = transportPath
+	}
+	if flagSet(f, "transport-host") {
+		e.TransportHost = transportHost
+	}
+	if flagSet(f, "grpc-service-name") {
+		e.GRPCServiceName = grpcService
+	}
 	if flagSet(f, "method") {
 		if *method == "" {
 			return errors.New("方法不能为空")

@@ -127,23 +127,32 @@ func probeReality(ctx context.Context, r *Reality, resolve func(context.Context,
 			ips = append(ips, v6[i])
 		}
 	}
-	var raw net.Conn
+	// A reachable TCP socket does not prove TLS works on that address. Try the
+	// next checked address after a bad handshake, leaving time for IPv6 fallback.
 	for _, ip := range ips {
-		raw, e = dial(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
+		var raw net.Conn
+		raw, e = dial(attempt, "tcp", net.JoinHostPort(ip.String(), port))
+		if e != nil {
+			cancel()
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		c := tls.Client(raw, &tls.Config{ServerName: r.ServerName, RootCAs: roots, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}})
+		e = c.HandshakeContext(attempt)
+		if e == nil && c.ConnectionState().NegotiatedProtocol != "h2" {
+			e = errors.New("目标未协商 HTTP/2")
+		}
+		_ = c.Close()
+		cancel()
 		if e == nil {
+			return time.Since(started), nil
+		}
+		if ctx.Err() != nil {
 			break
 		}
 	}
-	if e != nil {
-		return 0, fmt.Errorf("目标 TCP 连接失败：%w", e)
-	}
-	c := tls.Client(raw, &tls.Config{ServerName: r.ServerName, RootCAs: roots, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}})
-	defer c.Close()
-	if e = c.HandshakeContext(ctx); e != nil {
-		return 0, fmt.Errorf("目标 TLS 握手失败（检查网络、SNI、证书）：%w", e)
-	}
-	if c.ConnectionState().NegotiatedProtocol != "h2" {
-		return 0, errors.New("目标未协商 HTTP/2")
-	}
-	return time.Since(started), nil
+	return 0, fmt.Errorf("目标 TCP/TLS 验证失败（检查网络、SNI、证书）：%w", e)
 }

@@ -39,7 +39,7 @@ func wizardOutput(t *testing.T, call func() error) (string, error) {
 }
 
 func TestWizardSelectionCancelAndEOFDoNotCreateState(t *testing.T) {
-	for _, input := range []string{"0\n", "", "\n9\n0\n"} {
+	for _, input := range []string{"0\n", "", "\n99\n0\n"} {
 		a := wizardApp(t, input)
 		out, e := wizardOutput(t, func() error { return a.installWizard(true, "", false) })
 		if e != nil && !errors.Is(e, io.EOF) {
@@ -61,7 +61,7 @@ func TestWizardSelectedProtocolAndResultMatchState(t *testing.T) {
 		{"3", "hysteria2", "node.example.com\nacme\nadmin@example.com\n"},
 	} {
 		t.Run(tc.protocol, func(t *testing.T) {
-			a := wizardApp(t, "9\n"+tc.choice+"\nmy-node\n203.0.113.9\n9443\n"+tc.extra)
+			a := wizardApp(t, "99\n"+tc.choice+"\nmy-node\n203.0.113.9\n9443\n"+tc.extra)
 			out, e := wizardOutput(t, func() error { return a.installWizard(true, "", false) })
 			if e != nil {
 				t.Fatal(e)

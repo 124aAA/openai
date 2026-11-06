@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -31,15 +33,26 @@ type outbound struct {
 	profileHY2Options
 	profileAnyTLSOptions
 	profileTUICOptions
-	Type     string     `json:"type"`
-	Tag      string     `json:"tag"`
-	Server   string     `json:"server"`
-	Port     uint16     `json:"server_port"`
-	UUID     string     `json:"uuid,omitempty"`
-	Flow     string     `json:"flow,omitempty"`
-	Method   string     `json:"method,omitempty"`
-	Password string     `json:"password,omitempty"`
-	TLS      *clientTLS `json:"tls,omitempty"`
+	Type      string           `json:"type"`
+	Tag       string           `json:"tag"`
+	Server    string           `json:"server"`
+	Port      uint16           `json:"server_port"`
+	UUID      string           `json:"uuid,omitempty"`
+	Flow      string           `json:"flow,omitempty"`
+	Method    string           `json:"method,omitempty"`
+	Password  string           `json:"password,omitempty"`
+	TLS       *clientTLS       `json:"tls,omitempty"`
+	Transport *clientTransport `json:"transport,omitempty"`
+	Security  string           `json:"security,omitempty"`
+	AlterID   *int             `json:"alter_id,omitempty"`
+}
+
+type clientTransport struct {
+	Type        string            `json:"type"`
+	Path        string            `json:"path,omitempty"`
+	Host        string            `json:"host,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	ServiceName string            `json:"service_name,omitempty"`
 }
 
 // These are the bounded client fields emitted by the manager, independently
@@ -106,7 +119,7 @@ func (o profileTUICOptions) validate(kind string) error {
 	return nil
 }
 
-const profileOutboundFields = "type tag server server_port uuid flow method password tls up_mbps down_mbps bbr_profile brutal_debug disable_chrome_parrot stream_receive_window connection_receive_window idle_timeout keep_alive_period max_concurrent_streams initial_packet_size disable_path_mtu_discovery idle_session_check_interval idle_session_timeout min_idle_session congestion_control udp_relay_mode zero_rtt_handshake heartbeat"
+const profileOutboundFields = "type tag server server_port uuid flow method password tls transport security alter_id up_mbps down_mbps bbr_profile brutal_debug disable_chrome_parrot stream_receive_window connection_receive_window idle_timeout keep_alive_period max_concurrent_streams initial_packet_size disable_path_mtu_discovery idle_session_check_interval idle_session_timeout min_idle_session congestion_control udp_relay_mode zero_rtt_handshake heartbeat"
 
 // Presence is checked before canonicalization: null, empty and explicit false
 // must not disguise an option placed on the wrong protocol.
@@ -118,6 +131,7 @@ func profileProtocolFields(raw []byte, kind string) error {
 	for protocol, names := range map[string]string{
 		"anytls": "idle_session_check_interval idle_session_timeout min_idle_session",
 		"tuic":   "congestion_control udp_relay_mode zero_rtt_handshake heartbeat",
+		"vmess":  "security alter_id",
 	} {
 		if kind == protocol {
 			continue
@@ -128,11 +142,35 @@ func profileProtocolFields(raw []byte, kind string) error {
 			}
 		}
 	}
+	transport := fields["transport"]
+	if transport != nil {
+		if kind != "vless" && kind != "vmess" && kind != "trojan" || string(transport) == "null" {
+			return errors.New("transport requires a supported native TLS protocol")
+		}
+		var t clientTransport
+		if err := StrictJSON(transport, &t); err != nil {
+			return err
+		}
+		allowed := map[string]string{"ws": "type path headers", "grpc": "type service_name", "httpupgrade": "type path host"}[t.Type]
+		if allowed == "" {
+			return errors.New("unsupported private profile transport")
+		}
+		if err := graphFields(transport, allowed); err != nil {
+			return err
+		}
+		var values map[string]json.RawMessage
+		_ = json.Unmarshal(transport, &values)
+		if headers := values["headers"]; headers != nil {
+			if err := graphFields(headers, "Host"); err != nil {
+				return err
+			}
+		}
+	}
 	if tls := fields["tls"]; tls != nil && string(tls) != "null" {
 		var values map[string]json.RawMessage
 		_ = json.Unmarshal(tls, &values)
-		if _, present := values["alpn"]; present && kind != "tuic" {
-			return errors.New("ALPN override is supported only for the bounded TUIC profile")
+		if _, present := values["alpn"]; present && kind != "tuic" && transport == nil {
+			return errors.New("ALPN override requires TUIC or an explicit supported transport")
 		}
 	}
 	return nil
@@ -242,6 +280,57 @@ type clientReality struct {
 
 var compatibleCore = regexp.MustCompile(`^1\.14\.(0|[1-9][0-9]*)$`)
 var profileUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var profileGRPCService = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
+func (o outbound) validateTransport() error {
+	t := o.Transport
+	if t == nil {
+		return nil
+	}
+	if o.TLS == nil || o.TLS.Reality != nil || o.TLS.UTLS != nil {
+		return errors.New("transport requires native TLS without REALITY or uTLS")
+	}
+	alpn := "http/1.1"
+	switch t.Type {
+	case "ws", "httpupgrade":
+		if t.Type == "httpupgrade" && o.Type != "vless" {
+			return errors.New("HTTPUpgrade profile currently requires VLESS")
+		}
+		if !utf8.ValidString(t.Path) || len(t.Path) > 2048 || !strings.HasPrefix(t.Path, "/") || strings.ContainsAny(t.Path, "?#%") || strings.IndexFunc(t.Path, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+			return errors.New("transport needs a literal absolute path without escapes or query")
+		}
+		host := t.Host
+		if t.Type == "ws" && t.Headers != nil {
+			if len(t.Headers) != 1 || t.Headers["Host"] == "" {
+				return errors.New("WebSocket profile permits only a nonempty Host header")
+			}
+			host = t.Headers["Host"]
+		}
+		if host != "" {
+			u, err := url.Parse("https://" + host)
+			if err != nil || u.Host != host || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !validGraphHost(u.Hostname()) {
+				return errors.New("invalid transport Host")
+			}
+			if port := u.Port(); port != "" {
+				v, err := strconv.Atoi(port)
+				if err != nil || v < 1 || v > 65535 {
+					return errors.New("invalid transport Host port")
+				}
+			}
+		}
+	case "grpc":
+		alpn = "h2"
+		if len(t.ServiceName) > 128 || !profileGRPCService.MatchString(t.ServiceName) {
+			return errors.New("gRPC profile requires a bounded literal service name")
+		}
+	default:
+		return errors.New("unsupported private profile transport")
+	}
+	if len(o.TLS.ALPN) != 1 || o.TLS.ALPN[0] != alpn {
+		return errors.New("TLS ALPN does not match the selected transport")
+	}
+	return nil
+}
 
 // StrictJSON rejects duplicate keys as well as unknown fields. Reports and
 // private profiles are versioned independently of the managed State schema.
@@ -383,6 +472,9 @@ func (p Profile) Validate() error {
 	if err := o.profileTUICOptions.validate(o.Type); err != nil {
 		return err
 	}
+	if err := o.validateTransport(); err != nil {
+		return err
+	}
 	switch o.Type {
 	case "shadowsocks":
 		modernAEAD := o.Method == "aes-128-gcm" || o.Method == "aes-256-gcm" || o.Method == "chacha20-ietf-poly1305"
@@ -390,8 +482,16 @@ func (p Profile) Validate() error {
 			return errors.New("unsupported Shadowsocks client profile")
 		}
 	case "vless":
-		if o.UUID == "" || o.Flow != "xtls-rprx-vision" || o.Password != "" || o.Method != "" || o.TLS == nil || o.TLS.Reality == nil || !o.TLS.Reality.Enabled || o.TLS.UTLS == nil || !o.TLS.UTLS.Enabled {
-			return errors.New("unsupported REALITY client profile")
+		if o.TLS != nil && o.TLS.Reality != nil {
+			if o.UUID == "" || o.Flow != "xtls-rprx-vision" || o.Password != "" || o.Method != "" || !o.TLS.Reality.Enabled || o.TLS.UTLS == nil || !o.TLS.UTLS.Enabled {
+				return errors.New("unsupported REALITY client profile")
+			}
+		} else if !profileUUID.MatchString(o.UUID) || o.Flow != "" || o.Password != "" || o.Method != "" || o.TLS == nil || o.TLS.UTLS != nil {
+			return errors.New("unsupported VLESS TLS client profile")
+		}
+	case "vmess":
+		if !profileUUID.MatchString(o.UUID) || o.Password != "" || o.Flow != "" || o.Method != "" || o.TLS == nil || o.TLS.Reality != nil || o.TLS.UTLS != nil || o.Security != "auto" || o.AlterID == nil || *o.AlterID != 0 {
+			return errors.New("unsupported VMess AEAD TLS client profile")
 		}
 	case "hysteria2":
 		if o.Password == "" || o.UUID != "" || o.Flow != "" || o.Method != "" || o.TLS == nil || o.TLS.Reality != nil || o.TLS.UTLS != nil {
@@ -417,7 +517,7 @@ func (p Profile) Validate() error {
 				return errors.New("client CA certificate exceeds limit")
 			}
 		}
-		if len(o.TLS.ALPN) > 0 && (o.Type != "tuic" || len(o.TLS.ALPN) != 1 || o.TLS.ALPN[0] != "h3") {
+		if o.Transport == nil && len(o.TLS.ALPN) > 0 && (o.Type != "tuic" || len(o.TLS.ALPN) != 1 || o.TLS.ALPN[0] != "h3") {
 			return errors.New("unsupported client TLS ALPN")
 		}
 	}

@@ -28,10 +28,11 @@ type ProtocolCapability struct {
 	Mihomo          bool     `json:"mihomo"`
 	URI             bool     `json:"uri"`
 	AdvancedOptions []string `json:"advanced_options"`
+	Transports      []string `json:"transports,omitempty"`
 }
 
 func ProtocolRequiresCertificate(name string) bool {
-	return name == "hysteria2" || name == "anytls" || name == "trojan" || name == "tuic"
+	return name == "hysteria2" || name == "anytls" || name == "trojan" || name == "tuic" || name == "vless" || name == "vmess"
 }
 
 func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
@@ -49,6 +50,14 @@ func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
 	// Exact test commands, source commit and transport evidence are in BATCH09.md.
 	// An accepted or tested version alone does not verify a custom core build.
 	switch name {
+	case "vless", "vmess":
+		c.Credentials = "UUID"
+		// Source compatibility is not a completed runtime connection test.
+		c.TestedCoreVersions = []string{}
+		c.Transports = []string{"tcp", "ws", "grpc"}
+		if name == "vless" {
+			c.Transports = append(c.Transports, "httpupgrade")
+		}
 	case "reality":
 		c.Credentials = "UUID"
 		c.ClientBuildTags = []string{"with_utls"}
@@ -61,6 +70,7 @@ func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
 		c.AdvancedOptions = []string{"idle_session_check_interval", "idle_session_timeout", "min_idle_session"}
 	case "trojan":
 		c.Credentials = "independent UTF-8 user password"
+		c.Transports = []string{"tcp", "ws", "grpc"}
 	case "hysteria2":
 		c.Credentials = "independent user password"
 		c.ServerBuildTags = []string{"with_quic"}
@@ -96,17 +106,21 @@ func ValidateProtocolCapabilities(st State, tags []string) error {
 }
 
 func ProtocolExportWarnings(n Node, format string) []string {
-	if n.Protocol == "trojan" && (format == "uri" || format == "base64" || format == "qr") && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
+	shareFormat := format == "uri" || format == "base64" || format == "qr"
+	if shareFormat && n.Transport != nil && n.Transport.Type == "httpupgrade" {
+		return []string{"Mihomo 1.19.30 不能完整导入 HTTPUpgrade 分享链接；请导出 sing-box JSON 或 Mihomo YAML"}
+	}
+	if (n.Protocol == "trojan" || n.Protocol == "vless") && shareFormat && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
 		cert, key, err := certificateMaterial(*n.Certificate)
 		if err != nil {
-			return []string{"无法核对Trojan分享链接的证书兼容性"}
+			return []string{"无法核对 TLS 分享链接的证书兼容性"}
 		}
 		leaf, _, err := parseCertificateChain(cert, key)
 		if err != nil {
-			return []string{"无法核对Trojan分享链接的证书兼容性"}
+			return []string{"无法核对 TLS 分享链接的证书兼容性"}
 		}
 		if leaf.PublicKeyAlgorithm == x509.Ed25519 {
-			return []string{"Mihomo1.19.30导入Trojan URI默认Chrome指纹不支持Ed25519证书；请导出原生TLS完整配置或使用ECDSA/RSA证书"}
+			return []string{"Mihomo 1.19.30 导入 TLS 分享链接时可能使用 Chrome 指纹，不能验证 Ed25519 证书；请导出原生 TLS 完整配置或使用 ECDSA/RSA 证书"}
 		}
 	}
 	if n.Protocol == "anytls" && AnyTLSClientSettingsPresent(n.AnyTLS) && (format == "uri" || format == "base64" || format == "qr") {
@@ -119,7 +133,7 @@ func ProtocolExportWarnings(n Node, format string) []string {
 }
 
 func ValidateProtocolClient(n Node, format, version string, tags []string) error {
-	if n.Protocol != "anytls" && n.Protocol != "trojan" && n.Protocol != "ss-aead" && n.Protocol != "tuic" {
+	if n.Protocol != "anytls" && n.Protocol != "trojan" && n.Protocol != "ss-aead" && n.Protocol != "tuic" && n.Protocol != "vless" && n.Protocol != "vmess" {
 		return nil
 	}
 	if (format == "sing-box" || format == "sing-box-outbounds") && version != "1.14.0" && version != "1.14.3" {

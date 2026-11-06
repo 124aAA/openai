@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"qingnode/internal/node"
 )
 
 func privateInstallTestDir(t *testing.T) string {
@@ -20,6 +22,33 @@ func privateInstallTestDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func TestInstallCollectionPreservesTransportThroughApply(t *testing.T) {
+	for _, tc := range []struct {
+		protocol string
+		flags    []string
+		want     node.V2RayTransport
+	}{
+		{"vless", []string{"--transport", "ws", "--transport-path", "/proxy", "--transport-host", "cdn.example.test"}, node.V2RayTransport{Type: "ws", Path: "/proxy", Host: "cdn.example.test"}},
+		{"vmess", []string{"--transport", "grpc", "--grpc-service-name", "my-service"}, node.V2RayTransport{Type: "grpc", ServiceName: "my-service"}},
+	} {
+		t.Run(tc.protocol, func(t *testing.T) {
+			path := filepath.Join(privateInstallTestDir(t), "fields")
+			fields := append([]string{"--protocol", tc.protocol, "--server", "203.0.113.7", "--sni", "proxy.example.test", "--acme-email", "owner@example.test", "--quiet"}, tc.flags...)
+			if err := writeInstallFields(path, fields); err != nil {
+				t.Fatal(err)
+			}
+			a := wizardApp(t, "")
+			if err := a.applyCollectedInstall(path, tc.protocol); err != nil {
+				t.Fatal(err)
+			}
+			st, err := a.store.Load()
+			if err != nil || len(st.Nodes) != 1 || st.Nodes[0].Protocol != tc.protocol || st.Nodes[0].Transport == nil || *st.Nodes[0].Transport != tc.want {
+				t.Fatal("private install fields lost selected transport", err)
+			}
+		})
+	}
 }
 
 func TestInstallCollectionReusesFormWithoutStateOrCredentials(t *testing.T) {

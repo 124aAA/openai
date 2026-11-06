@@ -10,14 +10,14 @@
 | --- | --- | --- | --- |
 | 管理器 | 静态Go CLI、Bash引导、本机systemd/OpenRC；状态当前schema9 | `version --json`、`help --json`、候选提交/摘要 | 管理器静态不证明官方核心没有动态加载器 |
 | 官方核心 | 默认1.14.0；1.14.3同兼容线候选；管理器协议最低适配版本1.14.0 | 归档摘要、实际ELF架构/加载器、version、构建标签和check分别检查 | 接受版本字符串不证明自定义核心有完整标签；不自动跨到1.15 |
-| 协议声明 | 七协议入站、单用户/多用户管理和客户端导出；监听网络与承载业务分开 | `protocols list`的版本化能力JSON、下表 | TCP监听也可能封装UDP业务，不能用一个supportsUDP字段概括 |
+| 协议声明 | 九种协议入站、单用户/多用户管理和客户端导出；监听网络与承载业务分开 | `protocols list`的版本化能力JSON、下表 | TCP监听也可能封装UDP业务，不能用一个supportsUDP字段概括 |
 | sing-box客户端 | 完整配置固定核对1.14.0/1.14.3，新协议要求明确客户端版本 | 官方解析与受控实际TCP/UDP；运行位置及源码见各批记录 | check通过不能替代代理认证、UDP或公网入口 |
 | Mihomo客户端 | 固定1.19.30；provider与完整配置不同，auto容差缺陷保留 | Mihomo实际解析、受控流量、具体策略专门测试 | YAML语法可读不等于Mihomo能用，更不等于FlClash/手机UI通过 |
 | GUI与用户网络 | 本轮没有从界面功能自动推造设备验收 | 真正设备导入、目标请求、节点停用负例和独立UDP测试 | 桌面/手机图形界面、用户运营商质量与本机回环不能互换 |
 | 人类终端显示 | 普通文本路径，按真实TTY列宽折行；清理终端控制/Bidi；不改raw模式 | 32/40/80列、中文/IPv6/emoji、NO_COLOR/dumb/nonTTY与PTY检查分记 | Unicode宽度表不是所有字体/终端的通用像素布局；PTY不等于每款手机SSH应用 |
 | 机器与私有文件 | 全局可选私有执行回执；领域数据按明确JSON或私有导出入口；URI/二维码/完整配置不进折行器 | [任务与机器接口](WORKFLOWS.md)，具体命令`--help` | 回执不是完整State或stdout副本；不能给全部命令追加`--json`，也不能从屏幕换行还原凭据；错误仍可能已提交 |
 
-### 七协议接口矩阵
+### 九种协议接口矩阵
 
 本表来自当前适配器和`ProtocolCapabilities`，协议业务均可声明TCP/UDP；是否真正到达目标仍须按组合实测。列出的核心版本是本项目固定基线，最低1.14.0，不是对全部上游版本的承诺。
 
@@ -27,11 +27,13 @@
 | SS2022 | TCP+UDP | 服务密钥及独立用户密钥 | 固定2022方法；不使用TLS证书 | 保持原复合密钥字节语义，不能套传统SS密码 |
 | Hysteria2 | UDP | 独立用户密码 | 匹配名称证书；两端with_quic；ACME另需with_acme | URI不包含所有性能设置，优先完整JSON/YAML；Chrome指纹/证书算法限制另列 |
 | AnyTLS | TCP | 独立用户密码 | 共享受管TLS证书 | 完整JSON/YAML可表达三项空闲设置，URI不能静默丢失 |
-| Trojan | TCP | 独立用户密码 | 可信匹配域名TLS；本批仅标准传输 | URI默认Chrome/Ed25519组合明确拒绝，完整原生TLS配置另核对 |
+| Trojan | TCP | 独立用户密码 | 可信匹配域名TLS；支持 TCP、WebSocket、gRPC | URI默认Chrome/Ed25519组合明确拒绝，完整原生TLS配置另核对 |
 | 传统SS AEAD | TCP+UDP | 独立UTF-8密码 | aes-128-gcm、aes-256-gcm、chacha20-ietf-poly1305；无旧流密码 | 不使用SS2022服务密钥/用户密钥拼法，方法分别验证 |
 | TUIC v5 | UDP | UUID+独立密码 | 共享TLS证书，两端with_quic；0-RTT默认关闭 | 完整JSON/YAML，无项目已核验的通用分享URI；不套HY2带宽字段 |
+| VLESS + TLS | TCP | UUID | 共享TLS证书；支持 TCP、WebSocket、gRPC，VLESS 另支持 HTTPUpgrade | sing-box JSON、Mihomo YAML；HTTPUpgrade 不生成通用分享URI |
+| VMess + TLS | TCP | UUID | 共享TLS证书；支持 TCP、WebSocket、gRPC | sing-box JSON、Mihomo YAML、标准 VMess Base64 JSON 分享 |
 
-服务器远程出口不是客户端导出列表：当前七协议的`client_outbound`均可声明，`server_egress`固定支持原REALITY/SS2022/HY2，其他新协议不能因有导出能力就宣称可作远程出口。SOCKS5、WireGuard及路由策略沿[拓扑说明](TOPOLOGY.md)的独立能力与权限边界。
+服务器远程出口不是客户端导出列表：当前九种协议的`client_outbound`均可声明，`server_egress`固定支持原REALITY/SS2022/HY2，其他新协议不能因有导出能力就宣称可作远程出口。SOCKS5、WireGuard及路由策略沿[拓扑说明](TOPOLOGY.md)的独立能力与权限边界。
 
 ### 平台与架构证据
 
@@ -51,7 +53,7 @@
 
 最终代码冻结为 `d0fd58a`：targeted8完整25/25项退出0，891项摘要独立审计通过；另补一个未被筛选式选中的能力JSON单测，实际Linux退出0。finalbuild6五步及39项离线发行保护通过，749个源码与7个产物经独立审计v2核对。完整race通过属于full2的 `481113f`，最终提交未重跑完整62项；full2的探针失败已定向复验，Alpine宿主识别失败与Ubuntu元数据夹具33/33分开保留。`client_outbound`与`server_egress`分别登记客户端导出与服务器远程出口，旧`outbound`仅为前者的兼容别名。准确命令与边界见[BATCH09.md](BATCH09.md)。
 
-七协议已实现：原三协议与AnyTLS/Trojan、传统SS AEAD三方法、TUIC。AnyTLS高级设置不能进入URI；Trojan URI默认Chrome/Ed25519组合拒绝；TUIC仅完整配置、无通用URI。传统SS使用同方法独立多用户password，不拼SS2022服务密钥。TUIC分开保存两端参数，心跳向Mihomo精确换算毫秒，0-RTT关闭。第09批当时State为schema8，旧1–7内存兼容，当前写入格式为第10批schema9。基线502cfda的8/8项通过；第一阶段1a7d58的10/11保留CLI端口冲突，521b9a7复验11/11通过；第二阶段ca0df8a定向25/25项通过，保留targeted3中断和targeted4真实失败。完整回归另列。字段、场景和限制见[PROTOCOLS.md](PROTOCOLS.md)，准确证据见[BATCH09.md](BATCH09.md)；以下旧批表不替代当前源码验收。
+第09批七协议及本轮新增 VLESS/VMess 适配器均已接入；AnyTLS高级设置不能进入URI；Trojan URI默认Chrome/Ed25519组合拒绝；TUIC仅完整配置、无通用URI。VLESS 的 HTTPUpgrade 同样不生成通用分享URI，优先完整 JSON/YAML。传统SS使用同方法独立多用户password，不拼SS2022服务密钥。TUIC分开保存两端参数，心跳向Mihomo精确换算毫秒，0-RTT关闭。第09批当时State为schema8，旧1–7内存兼容，当前写入格式为第10批schema9。基线502cfda的8/8项通过；第一阶段1a7d58的10/11保留CLI端口冲突，521b9a7复验11/11通过；第二阶段ca0df8a定向25/25项通过，保留targeted3中断和targeted4真实失败。完整回归另列。字段、场景和限制见[PROTOCOLS.md](PROTOCOLS.md)，准确证据见[BATCH09.md](BATCH09.md)；以下旧批表不替代当前源码验收。
 
 ## 第08批监控、流量观测和到期范围
 
@@ -129,7 +131,7 @@
 
 ## 协议与客户端
 
-下面三协议表与客户端解析/流量结果保留第01批历史范围；当前七协议和第09批已完成/待执行结果见[PROTOCOLS.md](PROTOCOLS.md)、[BATCH09.md](BATCH09.md)。`protocols list`的outbound=true表示客户端配置导出，远程Egress仍限SOCKS5/REALITY/SS2022/HY2/WireGuard，不自动新增四协议远程出口。
+下面三协议表与客户端解析/流量结果保留第01批历史范围；当前九种协议和第09批已完成/待执行结果见[PROTOCOLS.md](PROTOCOLS.md)、[BATCH09.md](BATCH09.md)。`protocols list`的outbound=true表示客户端配置导出，远程Egress仍限SOCKS5/REALITY/SS2022/HY2/WireGuard，不自动新增协议远程出口。
 
 | 本项目协议 | VPS 监听 | 本项目生成的认证/TLS配置 | 验收入口与边界 |
 | --- | --- | --- | --- |

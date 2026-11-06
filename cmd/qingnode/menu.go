@@ -237,6 +237,8 @@ var protocolMenuChoices = []struct{ number, protocol, description string }{
 	{"5", "trojan", "Trojan（标准TLS，需要证书）"},
 	{"6", "ss-aead", "传统 Shadowsocks（无需域名或证书）"},
 	{"7", "tuic", "TUIC v5（UDP，需要证书；导出完整配置）"},
+	{"8", "vless", "VLESS + TLS（可选 WebSocket / gRPC，需要证书）"},
+	{"9", "vmess", "VMess + TLS（兼容现有 VMess 客户端，需要证书）"},
 }
 
 func protocolMenuClientLabel(protocol string) string {
@@ -247,6 +249,8 @@ func protocolMenuClientLabel(protocol string) string {
 		return "客户端完整配置已核对：sing-box 1.14.0/1.14.3、Mihomo 1.19.30"
 	case "tuic":
 		return "客户端完整配置已核对：sing-box 1.14.0/1.14.3、Mihomo 1.19.30；分享URI未核验"
+	case "vless", "vmess":
+		return "目标客户端：sing-box 1.14.0/1.14.3、Mihomo 1.19.30；传输参数必须与服务端一致"
 	default:
 		return "客户端导出仍须按目标格式实际验证"
 	}
@@ -263,12 +267,14 @@ func (a *app) selectProtocolOptions() (protocolSelection, error) {
 	}
 	fmt.Fprintln(os.Stderr, "\n请选择要搭建的节点")
 	for _, choice := range protocolMenuChoices {
-		fmt.Fprintf(os.Stderr, "%s. %s\n", choice.number, choice.description)
+		if choice.protocol == "reality" || choice.protocol == "ss2022" || choice.protocol == "hysteria2" || choice.protocol == "trojan" || choice.protocol == "vless" {
+			fmt.Fprintf(os.Stderr, "%s. %s\n", choice.number, choice.description)
+		}
 	}
-	fmt.Fprintln(os.Stderr, "h. 帮我选  n. NAT/端口映射  ?. 查看核心和客户端要求\n0. 返回，不创建")
+	fmt.Fprintln(os.Stderr, "m. 更多协议：AnyTLS、传统 SS、TUIC、VMess\nh. 帮我选  n. NAT/端口映射  ?. 查看核心和客户端要求\n0. 返回，不创建")
 	nat := false
 	for {
-		choice, e := a.wizardPrompt("选择1至7、h、n、?，或0", "")
+		choice, e := a.wizardPrompt("选择编号、协议名称、m、h、n、?，或0", "")
 		if e != nil {
 			return protocolSelection{}, e
 		}
@@ -283,6 +289,14 @@ func (a *app) selectProtocolOptions() (protocolSelection, error) {
 		if choice == "n" {
 			nat = true
 			fmt.Fprintln(os.Stderr, "已选择端口映射：接下来选择协议，再分别填写本地与外部端口。")
+			continue
+		}
+		if choice == "m" {
+			for _, candidate := range protocolMenuChoices {
+				if candidate.protocol == "anytls" || candidate.protocol == "ss-aead" || candidate.protocol == "tuic" || candidate.protocol == "vmess" {
+					fmt.Fprintf(os.Stderr, "%s. %s\n", candidate.number, candidate.description)
+				}
+			}
 			continue
 		}
 		if choice == "?" {
@@ -304,7 +318,7 @@ func (a *app) selectProtocolOptions() (protocolSelection, error) {
 			}
 		}
 		if !recognized {
-			a.message("WARN", "请输入 1 至 7、协议名称、h、n、? 或 0；尚未创建节点")
+			a.message("WARN", "请输入列表编号、协议名称、m、h、n、? 或 0；尚未创建节点")
 		}
 	}
 }
@@ -321,7 +335,7 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 		}
 	}
 	if _, ok := node.Protocol(protocol); !ok {
-		return errors.New("不支持该协议；可用 reality、ss2022、hysteria2、anytls、trojan、ss-aead、tuic")
+		return errors.New("不支持该协议；可用 " + strings.Join(node.Protocols(), "、"))
 	}
 	if a.wizardCollect == nil && !selected {
 		status, e := a.inspectProtocolMenuCore()
@@ -335,12 +349,14 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 	fmt.Fprintln(os.Stderr, "安装输入中可随时输入 :cancel 返回；填写完这些参数后才创建节点。")
 	defaultName := "main"
 	initialized := false
+	var certificates []node.CertificateResource
 	if a.wizardCollect == nil {
 		if e := a.store.Inspect(func() error {
 			s, e := a.store.Load()
 			if e != nil {
 				return e
 			}
+			certificates = s.Certificates
 			if first && len(s.Nodes) > 0 {
 				initialized = true
 				return nil
@@ -432,7 +448,24 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 	} else if port != "auto" || a.offline {
 		args = append(args, "--port", port)
 	}
-	if protocol != "ss2022" && protocol != "ss-aead" {
+	if protocol == "vless" || protocol == "vmess" || protocol == "trojan" {
+		transportArgs, err := a.transportWizard(protocol, nil)
+		if err != nil {
+			return err
+		}
+		args = append(args, transportArgs...)
+	}
+	certificateID := ""
+	if node.ProtocolRequiresCertificate(protocol) && len(certificates) > 0 {
+		certificateID, e = a.selectWizardCertificate(certificates, host)
+		if e != nil {
+			return e
+		}
+		if certificateID != "" {
+			args = append(args, "--certificate-id", certificateID)
+		}
+	}
+	if protocol != "ss2022" && protocol != "ss-aead" && certificateID == "" {
 		label, def := "TLS证书名称（独立于连接地址；复用已有证书资源可留空）", ""
 		if protocol == "reality" {
 			label = "REALITY 伪装目标域名"
@@ -448,7 +481,7 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 			args = append(args, "--sni", sni)
 		}
 	}
-	if node.ProtocolRequiresCertificate(protocol) {
+	if node.ProtocolRequiresCertificate(protocol) && certificateID == "" {
 		mode, e := a.wizardPrompt("证书方式：acme HTTP01 / pem 导入 / resource 已有证书资源", "acme")
 		if e != nil {
 			return e
@@ -521,6 +554,99 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 		return nil
 	}
 }
+
+func (a *app) selectWizardCertificate(certificates []node.CertificateResource, host string) (string, error) {
+	fmt.Fprintln(os.Stderr, "可复用已有证书，无需重新填写证书域名或申请信息：")
+	def := "new"
+	for i, certificate := range certificates {
+		fmt.Fprintf(ui.HumanWriter(os.Stderr), "%d. %s（%s）\n", i+1, certificate.Name, certificate.Certificate.ServerName)
+		if len(certificates) == 1 || certificate.Certificate.ServerName == host {
+			def = strconv.Itoa(i + 1)
+		}
+	}
+	for {
+		value, err := a.wizardPrompt("证书编号 / new 使用另一张证书 / 0 返回", def)
+		if err != nil {
+			return "", err
+		}
+		if value == "0" {
+			return "", errMenuCanceled
+		}
+		if value == "new" {
+			return "", nil
+		}
+		if i, err := strconv.Atoi(value); err == nil && i >= 1 && i <= len(certificates) {
+			return certificates[i-1].ID, nil
+		}
+		a.message("WARN", "请选择证书编号，或输入new使用另一张证书")
+	}
+}
+
+func (a *app) transportWizard(protocol string, current *node.V2RayTransport) ([]string, error) {
+	if protocol != "vless" && protocol != "vmess" && protocol != "trojan" {
+		return nil, errors.New("此协议不使用WebSocket/gRPC传输；请选择VLESS、VMess或Trojan节点")
+	}
+	def := "1"
+	if current != nil {
+		def = current.Type
+	}
+	label := "传输：1 TLS直连 / 2 WebSocket / 3 gRPC / 0 返回"
+	if protocol == "vless" {
+		label += " / a 高级"
+	}
+	for {
+		value, err := a.wizardPrompt(label, def)
+		if err != nil {
+			return nil, err
+		}
+		switch value {
+		case "0":
+			return nil, errMenuCanceled
+		case "1":
+			value = "tcp"
+		case "2":
+			value = "ws"
+		case "3":
+			value = "grpc"
+		case "a":
+			if protocol == "vless" {
+				fmt.Fprintln(os.Stderr, "httpupgrade：HTTPUpgrade + TLS，需要明确支持该传输的客户端；优先导出完整配置。")
+				value = "httpupgrade"
+			}
+		}
+		if value != "tcp" && value != "ws" && value != "grpc" && !(protocol == "vless" && value == "httpupgrade") {
+			a.message("WARN", "请选择列出的传输类型")
+			continue
+		}
+		settings := node.NormalizeV2RayTransport(&node.V2RayTransport{Type: value})
+		if current != nil && current.Type == value {
+			settings = node.NormalizeV2RayTransport(current)
+		}
+		args := []string{"--transport", value}
+		if value == "ws" || value == "httpupgrade" {
+			path, err := a.wizardPrompt("传输路径（反向代理两端须一致）", settings.Path)
+			if err != nil {
+				return nil, err
+			}
+			host, err := a.wizardPrompt("HTTP Host（留空使用连接地址；输入 - 清除已有值）", settings.Host)
+			if err != nil {
+				return nil, err
+			}
+			if host == "-" {
+				host = ""
+			}
+			args = append(args, "--transport-path", path, "--transport-host", host)
+		} else if value == "grpc" {
+			service, err := a.wizardPrompt("gRPC服务名（两端须一致）", settings.ServiceName)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, "--grpc-service-name", service)
+		}
+		return args, nil
+	}
+}
+
 func (a *app) nodeMenu() error {
 	return a.taskMenu("nodes", func(choice string) error {
 		if choice == "1" {
@@ -529,7 +655,7 @@ func (a *app) nodeMenu() error {
 		if choice == "2" {
 			return a.installWizard(false, "", false)
 		}
-		if choice < "3" || choice > "9" || len(choice) != 1 {
+		if choice != "10" && choice != "11" && (choice < "3" || choice > "9" || len(choice) != 1) {
 			return menuInvalid()
 		}
 		n, e := a.selectNode()
@@ -574,6 +700,14 @@ func (a *app) nodeMenu() error {
 			return a.userMenu(n)
 		case "9":
 			return a.realityMenu(n)
+		case "10":
+			return a.exportNodeWizard(n)
+		case "11":
+			transportArgs, err := a.transportWizard(n.Protocol, n.Transport)
+			if err != nil {
+				return err
+			}
+			args = append([]string{"edit", "--id", n.ID}, transportArgs...)
 		}
 		return a.menuCommand(args)
 	})
@@ -698,7 +832,7 @@ func (a *app) exportNodeWizard(n node.Node) error {
 	if e != nil {
 		return e
 	}
-	uriWarning := node.ProtocolExportWarnings(n, "uri")
+	uriWarning := append(node.ProtocolExportWarnings(n, "uri"), node.HY2ExportWarnings(n, "uri")...)
 	if len(uriWarning) > 0 {
 		fmt.Fprintln(os.Stderr, "分享链接/二维码/Base64 当前节点不可用："+strings.Join(uriWarning, "；"))
 	}
@@ -751,7 +885,7 @@ func (a *app) exportNodeWizard(n node.Node) error {
 // Keep legacy exports unchanged; the normal validator still checks the choice.
 func lockedExportClientVersion(protocol, format string) string {
 	switch protocol {
-	case "anytls", "trojan", "ss-aead", "tuic":
+	case "anytls", "trojan", "ss-aead", "tuic", "vless", "vmess":
 		switch format {
 		case "sing-box":
 			return "1.14.0"

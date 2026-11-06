@@ -65,7 +65,7 @@ func TestRedactTextKeepsJSONValidAndCoversURIs(t *testing.T) {
 	if !strings.Contains(got, "public-value") || !strings.Contains(got, "example.com") {
 		t.Fatal("public diagnostic fields were hidden")
 	}
-	for _, scheme := range []string{"vless", "hysteria2", "hy2", "ss", "tuic"} {
+	for _, scheme := range []string{"vless", "vmess", "hysteria2", "hy2", "ss", "tuic", "trojan", "anytls"} {
 		if got := Redact(scheme + "://uri-secret@host:443\nconnection refused"); got != "[节点链接已隐藏]\nconnection refused" {
 			t.Fatalf("URI redaction failed: %q", got)
 		}

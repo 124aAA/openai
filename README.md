@@ -64,6 +64,7 @@ sudo qingnode
 | 传统 SS AEAD | 客户端支持相同的现代 AEAD 加密方法 |
 | Hysteria2 / TUIC | 可信 TLS 证书、UDP 入口和匹配客户端；TUIC 没有通用分享 URI |
 | AnyTLS / Trojan | TLS 证书及匹配客户端；部分高级设置需完整配置 |
+| VLESS / VMess + TLS | 可信证书；VLESS 和 VMess 支持 TLS 直连、WebSocket、gRPC，VLESS 另提供高级 HTTPUpgrade |
 
 列表输入 `0` 返回；表单按提示输入 `:cancel` 取消，提交前不会创建半个节点。删除、恢复、轮换密钥和卸载仍需明确确认。协议细节见[协议说明](docs/PROTOCOLS.md)，NAT 与 IPv6 见[连接端点](docs/ENDPOINTS.md)。
 

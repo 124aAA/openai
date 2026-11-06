@@ -98,7 +98,7 @@ func (a *app) guidedProtocol() (protocolSelection, error) {
 		return protocolSelection{}, err
 	}
 	for {
-		choice, err := a.wizardPrompt("协议（留空采用建议；可输入1–7或协议名称；0返回）", protocol)
+		choice, err := a.wizardPrompt("协议（留空采用建议；可输入1–9或协议名称；0返回）", protocol)
 		if err != nil {
 			return protocolSelection{}, err
 		}

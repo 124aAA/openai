@@ -68,7 +68,14 @@ func sandboxConfig(p Profile, port int, username, password string) ([]byte, erro
 func verifyProbeCore(ctx context.Context, p Profile, opts SandboxOptions) (string, error) {
 	var o outbound
 	_ = json.Unmarshal(p.Outbound, &o)
-	return verifyProbeCoreTypes(ctx, []string{o.Type}, opts)
+	return verifyProbeCoreTypes(ctx, []string{o.coreKind()}, opts)
+}
+
+func (o outbound) coreKind() string {
+	if o.Type == "vless" && o.TLS != nil && o.TLS.UTLS != nil {
+		return "reality"
+	}
+	return o.Type
 }
 
 func verifyProbeCoreTypes(ctx context.Context, kinds []string, opts SandboxOptions) (string, error) {
@@ -142,7 +149,7 @@ func checkProbeCoreCapabilities(version string, tags map[string]bool, kinds []st
 		return errors.New("client core is outside the supported stable 1.14.x line")
 	}
 	for _, kind := range kinds {
-		if kind == "vless" && !tags["with_utls"] {
+		if kind == "reality" && !tags["with_utls"] {
 			return errors.New("client core lacks with_utls")
 		}
 		if (kind == "hysteria2" || kind == "tuic") && !tags["with_quic"] {

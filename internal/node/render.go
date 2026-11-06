@@ -145,24 +145,34 @@ func exportUnchecked(n Node, u User, format string) ([]byte, error) {
 	}
 	if p, ok := Protocol(n.Protocol); !ok {
 		return nil, errors.New("不支持该协议")
-	} else if n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" {
+	} else {
 		if err := p.Validate(n); err != nil {
 			return nil, err
 		}
 	}
+	if err := ValidateV2RayTransport(n.Protocol, n.Transport); err != nil {
+		return nil, err
+	}
+	if !ValidHost(n.Host) || EffectiveConnectPort(n) < 1 || EffectiveConnectPort(n) > 65535 {
+		return nil, errors.New("连接地址或端口无效，请修正节点连接入口后重新导出")
+	}
 	if !n.Enabled {
 		return nil, errors.New("节点已停用，启用后才能导出")
 	}
-	if (format == "uri" || format == "base64" || format == "qr") && URI(n, u) == "" {
-		return nil, errors.New("该协议或高级设置不支持分享URI，请导出完整配置")
+	var uri string
+	if format == "uri" || format == "base64" || format == "qr" {
+		uri = URI(n, u)
+		if uri == "" {
+			return nil, errors.New("该协议或高级设置不支持分享URI，请导出完整配置")
+		}
 	}
 	switch format {
 	case "uri":
-		return []byte(URI(n, u) + "\n"), nil
+		return []byte(uri + "\n"), nil
 	case "base64":
-		return []byte(base64.StdEncoding.EncodeToString([]byte(URI(n, u)+"\n")) + "\n"), nil
+		return []byte(base64.StdEncoding.EncodeToString([]byte(uri+"\n")) + "\n"), nil
 	case "qr":
-		q, e := qrcode.New(URI(n, u), qrcode.Medium)
+		q, e := qrcode.New(uri, qrcode.Medium)
 		if e != nil {
 			return nil, e
 		}
