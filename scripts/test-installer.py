@@ -633,9 +633,8 @@ class InstallerTests(unittest.TestCase):
         history = f.state/'observations.json'
         observed = history.read_bytes() if history.exists() else None
         out = f.run(online=True, tty_input='8\n0\n')
-        self.assertIn('节点与用户', out)
         self.assertGreaterEqual(out.count('管理与说明'), 2)
-        for label in ('配置核心', '待验证', '8 刷新总览', '9 检查更新', '4 测速与诊断'):
+        for label in ('配置核心', '待验证', '2 节点管理', '4 状态与诊断', '8 刷新总览', '9 检查更新'):
             self.assertIn(label, out)
         self.assertEqual(before, f.data())
         self.assertEqual(host, f.host())
