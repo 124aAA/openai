@@ -13,6 +13,7 @@ import (
 type impactBackend struct {
 	fakeBackend
 	checks, stops, activeReads, prepares, finishes int
+	identityReads                                  int
 	identity                                       string
 	changeOnCheck, failAllActivations              bool
 }
@@ -33,10 +34,13 @@ func (b *impactBackend) Activate(st State) error {
 	}
 	return b.fakeBackend.Activate(st)
 }
-func (b *impactBackend) Stop() error                           { b.stops++; return b.fakeBackend.Stop() }
-func (b *impactBackend) PrepareEffects(State, State) error     { b.prepares++; return nil }
-func (b *impactBackend) FinishEffects(State, State) error      { b.finishes++; return nil }
-func (b *impactBackend) RuntimeIdentity(State) ([]byte, error) { return []byte(b.identity), nil }
+func (b *impactBackend) Stop() error                       { b.stops++; return b.fakeBackend.Stop() }
+func (b *impactBackend) PrepareEffects(State, State) error { b.prepares++; return nil }
+func (b *impactBackend) FinishEffects(State, State) error  { b.finishes++; return nil }
+func (b *impactBackend) RuntimeIdentity(State) ([]byte, error) {
+	b.identityReads++
+	return []byte(b.identity), nil
+}
 
 func impactStore(t *testing.T) (*Store, *impactBackend, State) {
 	t.Helper()
@@ -78,8 +82,12 @@ func TestMetadataAndClientChangesCheckAndSaveWithoutServiceOrEffects(t *testing.
 			}); err != nil {
 				t.Fatal(err)
 			}
+			identityReads := b.identityReads
 			if err := store.WithLock(func() error { return store.Apply(st) }); err != nil {
 				t.Fatal(err)
+			}
+			if b.identityReads != identityReads+2 {
+				t.Fatal("apply must read runtime identity once before and once after candidate validation")
 			}
 			after, _ := store.current()
 			parent, _ := os.ReadFile(filepath.Join(store.Root, after, "parent"))
@@ -92,6 +100,9 @@ func TestMetadataAndClientChangesCheckAndSaveWithoutServiceOrEffects(t *testing.
 			}
 			if err := store.WithLock(func() error { return store.Apply(st) }); err != nil {
 				t.Fatal(err)
+			}
+			if b.identityReads != identityReads+3 {
+				t.Fatal("no-op must reuse its single runtime identity read")
 			}
 			repeated, _ := store.current()
 			if repeated != after || b.checks != checks+1 {

@@ -342,7 +342,7 @@ func (s *Store) Apply(st State) error {
 			return e
 		}
 	}
-	impact, e := s.Preview(st)
+	impact, e := s.previewLoaded(st, old, previous, candidateIdentity)
 	if e != nil {
 		return e
 	}

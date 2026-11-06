@@ -5,57 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestBBRFailureRestoresRuntimeAndOwnedFile(t *testing.T) {
-	values := map[string]string{"net.core.default_qdisc": "fq_codel", "net.ipv4.tcp_congestion_control": "cubic", "net.ipv4.tcp_available_congestion_control": "cubic bbr"}
-	path := filepath.Join(t.TempDir(), "90-qingnode.conf")
-	old := []byte("# Managed by QingNode\n# previous\n")
-	os.WriteFile(path, old, 0644)
-	failed := false
-	h := Host{SysctlFile: path, Execute: func(_ time.Duration, name string, args ...string) ([]byte, error) {
-		if name != "sysctl" {
-			t.Fatal(name)
-		}
-		if args[0] == "-n" {
-			return []byte(values[args[1]]), nil
-		}
-		if args[0] != "-w" {
-			t.Fatal(args)
-		}
-		pair := strings.SplitN(args[1], "=", 2)
-		if pair[1] == "bbr" && !failed {
-			failed = true
-			return nil, errors.New("injected sysctl failure")
-		}
-		values[pair[0]] = pair[1]
-		return nil, nil
-	}}
-	if _, e := h.EnableBBR(); e == nil {
-		t.Fatal("failure ignored")
-	}
-	data, _ := os.ReadFile(path)
-	if !bytes.Equal(data, old) || values["net.core.default_qdisc"] != "fq_codel" || values["net.ipv4.tcp_congestion_control"] != "cubic" {
-		t.Fatal("BBR rollback incomplete")
-	}
-	changed, e := h.EnableBBR()
-	if e != nil || !changed {
-		t.Fatal(e)
-	}
-	before, _ := os.Stat(path)
-	changed, e = h.EnableBBR()
-	after, _ := os.Stat(path)
-	if e != nil || changed || !os.SameFile(before, after) {
-		t.Fatal("BBR re-enable not idempotent")
-	}
-}
 
 type ufwFixture struct {
 	rules       []FirewallRule

@@ -328,6 +328,12 @@ func (s *Store) Preview(next State) (ChangeImpact, error) {
 		return ChangeImpact{}, err
 	}
 	next = normalizeCandidate(next, old)
+	return s.previewLoaded(next, old, previous, nil)
+}
+
+// Apply already owns a validated candidate and loaded state under the same
+// lock. Reuse that snapshot and identity instead of repeating Preview's I/O.
+func (s *Store) previewLoaded(next, old State, previous string, identity []byte) (ChangeImpact, error) {
 	result, err := compareImpact(old, next, s.Root)
 	if err != nil {
 		return result, err
@@ -344,9 +350,11 @@ func (s *Store) Preview(next State) (ChangeImpact, error) {
 	core, coreErr := os.ReadFile(filepath.Join(s.Root, previous, "core-version"))
 	result.RepairDerived = configErr != nil || coreErr != nil || !bytes.Equal(expected, actual) || string(core) != old.CoreVersion
 	if provider, ok := s.Backend.(RuntimeIdentityBackend); ok {
-		identity, err := provider.RuntimeIdentity(next)
-		if err != nil {
-			return result, err
+		if identity == nil {
+			identity, err = provider.RuntimeIdentity(next)
+			if err != nil {
+				return result, err
+			}
 		}
 		saved, err := os.ReadFile(filepath.Join(s.Root, previous, "runtime-identity"))
 		if os.IsNotExist(err) {

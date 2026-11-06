@@ -255,17 +255,19 @@ func (a *app) selfUpdate(args []string) error {
 	return nil
 }
 func (a *app) coreVersions() error {
-	return a.store.Inspect(func() error {
+	var current string
+	if e := a.store.Inspect(func() error {
 		s, e := a.store.Load()
-		if e != nil {
-			return e
-		}
-		fmt.Println("当前版本：" + s.CoreVersion)
-		r, e := node.LatestStable("SagerNet/sing-box")
-		if e != nil {
-			return e
-		}
-		fmt.Printf("官方最新稳定版：%s\n当前管理器适配：%t\n", r.Tag, node.SupportedVersion(strings.TrimPrefix(r.Tag, "v")))
-		return nil
-	})
+		current = s.CoreVersion
+		return e
+	}); e != nil {
+		return e
+	}
+	fmt.Println("当前版本：" + current)
+	r, e := node.LatestStable("SagerNet/sing-box")
+	if e != nil {
+		return e
+	}
+	fmt.Printf("官方最新稳定版：%s\n当前管理器适配：%t\n", r.Tag, node.SupportedVersion(strings.TrimPrefix(r.Tag, "v")))
+	return nil
 }

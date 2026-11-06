@@ -251,8 +251,8 @@ func (a *app) serviceLogs(manager platform.Manager, name string, lines int) erro
 				}
 			}
 		}
-		fmt.Print(node.Redact(text))
-		return nil
+		_, err = fmt.Print(node.Redact(text))
+		return err
 	})
 }
 

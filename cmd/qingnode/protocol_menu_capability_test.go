@@ -42,7 +42,7 @@ func TestProtocolMenuUsesObservedBuildTagsNotCoreVersionAlone(t *testing.T) {
 }
 
 func TestProtocolMenuIsReadOnlyAndExplainsClientBoundary(t *testing.T) {
-	a := wizardApp(t, "7\n")
+	a := wizardApp(t, "?\n7\n")
 	printed, err := captureProtocolMenuStderr(t, func() error {
 		protocol, err := a.selectProtocol()
 		if err == nil && protocol != "tuic" {
@@ -60,6 +60,20 @@ func TestProtocolMenuIsReadOnlyAndExplainsClientBoundary(t *testing.T) {
 	}
 	if _, err := os.Lstat(a.store.Root); !os.IsNotExist(err) {
 		t.Fatal("read-only protocol menu created the state directory", err)
+	}
+}
+
+func TestProtocolMenuCompactSelectionPreservesNAT(t *testing.T) {
+	a := wizardApp(t, "n\n2\n")
+	printed, err := captureProtocolMenuStderr(t, func() error {
+		selection, err := a.selectProtocolOptions()
+		if err == nil && (selection.Protocol != "ss2022" || !selection.NAT) {
+			t.Fatalf("lost protocol or NAT selection: %+v", selection)
+		}
+		return err
+	})
+	if err != nil || strings.Contains(printed, "客户端完整配置已核对") || !strings.Contains(printed, "?. 查看核心和客户端要求") {
+		t.Fatal("compact menu did not defer detailed requirements", err, printed)
 	}
 }
 

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
+	"qingnode/internal/node"
 	"qingnode/internal/ui"
 )
 
@@ -22,7 +22,7 @@ func (a *app) taskMenu(key string, action func(string) error) error {
 		if err = action(choice); errors.Is(err, io.EOF) {
 			return err
 		} else if err != nil && !errors.Is(err, errMenuCanceled) {
-			a.message("ERROR", err.Error())
+			a.message("ERROR", node.Redact(err.Error()))
 		}
 	}
 }
@@ -34,33 +34,12 @@ func (a *app) menuRequired(label string) (string, error) {
 	}
 	return value, err
 }
-func (a *app) quickMenu() error {
-	return a.taskMenu("quick", func(choice string) error {
-		switch choice {
-		case "1":
-			return a.installWizard(false, "", false)
-		case "2":
-			selected, err := a.guidedProtocol()
-			if err != nil {
-				return err
-			}
-			return a.installWizardOptions(false, selected.Protocol, false, selected.NAT)
-		case "3":
-			return a.installWizardOptions(false, "", false, true)
-		case "4":
-			return a.menuCommand([]string{"protocols", "list"})
-		}
-		return menuInvalid()
-	})
-}
 func (a *app) exportTaskMenu() error {
 	return a.taskMenu("exports", func(choice string) error {
 		switch choice {
 		case "1":
-			return a.exportWizard()
-		case "2":
 			return a.menuCommand([]string{"device", "list"})
-		case "3":
+		case "2":
 			n, err := a.selectNode()
 			if err != nil {
 				return err
@@ -75,8 +54,8 @@ func (a *app) exportTaskMenu() error {
 			}
 			fmt.Fprintln(ui.HumanWriter(os.Stderr), "本设备仅绑定所选节点和凭据，默认手动选择；自动/主备策略请在完整Profile中明确配置。")
 			return a.menuCommand([]string{"device", "create", "--name", name, "--binding", n.ID + ":" + u, "--strategy", "manual"})
-		case "4":
-			id, err := a.menuRequired("设备ID或名称（先用2查看）")
+		case "3":
+			id, err := a.menuRequired("设备ID或名称（先用1查看）")
 			if err != nil {
 				return err
 			}
@@ -95,9 +74,9 @@ func (a *app) exportTaskMenu() error {
 				return err
 			}
 			return a.menuCommand([]string{"export", "--device", id, "--format", format, "--client-version", version, "--out", out})
-		case "5":
+		case "4":
 			return a.menuCommand([]string{"subscription", "status"})
-		case "6":
+		case "5":
 			fmt.Fprintln(ui.HumanWriter(os.Stderr), "须先按订阅指南初始化独立发布目录并部署可信HTTPS；这里不会接管80/443。令牌只写所选设备的私有文件，不显示在普通状态页。")
 			id, err := a.menuRequired("设备ID或名称")
 			if err != nil {
@@ -112,7 +91,7 @@ func (a *app) exportTaskMenu() error {
 				return err
 			}
 			return a.menuCommand([]string{"subscription", "issue", "--device", id, "--base-url", origin, "--out", out})
-		case "7":
+		case "6":
 			id, err := a.menuRequired("仅撤销此设备下载权限：设备ID或名称")
 			if err != nil {
 				return err
@@ -165,6 +144,8 @@ func (a *app) diagnosticTaskMenu() error {
 			return a.publicCheckWizard()
 		case "7":
 			return a.menuCommand([]string{"monitor", "status"})
+		case "8":
+			return a.menuCommand([]string{"status"})
 		}
 		return menuInvalid()
 	})
@@ -196,8 +177,6 @@ func (a *app) certificateTaskMenu() error {
 				return err
 			}
 			return a.menuCommand([]string{"certificate", "bind", "--id", id, "--node", n.ID})
-		case "5":
-			return a.maintenanceMenu()
 		}
 		return menuInvalid()
 	})
@@ -240,23 +219,14 @@ func (a *app) advancedTaskMenu() error {
 			return nil
 		case "6":
 			return a.systemMenu()
-		}
-		return menuInvalid()
-	})
-}
-func (a *app) maintenanceTaskMenu() error {
-	return a.taskMenu("maintenance-system", func(choice string) error {
-		switch strings.TrimSpace(choice) {
-		case "1":
-			return a.serviceMenu()
-		case "2":
-			return a.maintenanceMenu()
-		case "3":
+		case "7":
+			return a.certificateTaskMenu()
+		case "8":
+			return a.exportTaskMenu()
+		case "9":
 			return a.menuCommand([]string{"capabilities"})
-		case "4":
-			return a.menuCommand([]string{"monitor", "status"})
-		case "5":
-			return a.menuCommand([]string{"check-updates"})
+		case "10":
+			return a.menuCommand([]string{"protocols", "list"})
 		}
 		return menuInvalid()
 	})

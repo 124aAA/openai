@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,6 +50,93 @@ func TestSelectionRetriesAndCancellation(t *testing.T) {
 		if e = a.nodeMenu(); !errors.Is(e, io.EOF) {
 			t.Fatal("subflow did not propagate EOF", e)
 		}
+	}
+	// Canceling an edit stays in node management, where 0 returns normally.
+	a.in = bufio.NewReader(strings.NewReader("3\n1\n:cancel\n0\n"))
+	if e = a.nodeMenu(); e != nil {
+		t.Fatal("canceling an edit left its menu", e)
+	}
+}
+
+func TestCreatedNodeExportUsesSavedIdentityAndCanBeCanceled(t *testing.T) {
+	for _, next := range []string{"0\n", "1\n0\n", "1\n1\n\n"} {
+		a, original := menuFixture(t, "")
+		// A valid new name can equal an older node's ID; export the new node.
+		a.in = bufio.NewReader(strings.NewReader(original.ID + "\n203.0.113.9\n9444\n" + next))
+		out, err := wizardOutput(t, func() error { return a.installWizard(false, "ss2022", false) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := a.store.Load()
+		if err != nil || len(s.Nodes) != 2 || !reflect.DeepEqual(s.Nodes[0], original) {
+			t.Fatal("create/export changed the existing node", err)
+		}
+		created := s.Nodes[1]
+		uri := node.URI(created, created.Users[0])
+		if strings.Contains(out, uri) != (next == "1\n1\n\n") || strings.Contains(out, node.URI(original, original.Users[0])) {
+			t.Fatal("export did not respect the chosen node or explicit consent")
+		}
+	}
+	a, original := menuFixture(t, "")
+	printed, err := captureProtocolMenuStderr(t, func() error { return a.installWizard(true, "ss2022", false) })
+	if err != nil || strings.Contains(printed, "节点已创建") {
+		t.Fatal("idempotent init offered a nonexistent new node", err)
+	}
+	s, err := a.store.Load()
+	if err != nil || len(s.Nodes) != 1 || !reflect.DeepEqual(s.Nodes[0], original) {
+		t.Fatal("repeated init changed existing credentials", err)
+	}
+	path := filepath.Join(t.TempDir(), "existing-link.txt")
+	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.in = bufio.NewReader(strings.NewReader("another\n203.0.113.9\n9444\n1\n1\n" + path + "\n"))
+	_, err = wizardOutput(t, func() error { return a.installWizard(false, "ss2022", false) })
+	if err == nil || !strings.Contains(err.Error(), "节点已保存，导出失败") {
+		t.Fatal("export failure hid the successful creation", err)
+	}
+	s, err = a.store.Load()
+	if err != nil || len(s.Nodes) != 2 || !reflect.DeepEqual(s.Nodes[0], original) {
+		t.Fatal("failed export lost or changed nodes", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+		t.Fatal("failed export overwrote a file", err)
+	}
+}
+
+type menuReadFunc func([]byte) (int, error)
+
+func (read menuReadFunc) Read(p []byte) (int, error) { return read(p) }
+
+func TestCreatedNodeExportFollowsIDAfterConcurrentRename(t *testing.T) {
+	a, original := menuFixture(t, "")
+	var created node.Node
+	answer := strings.NewReader("1\n1\n\n")
+	renameBeforeExport := menuReadFunc(func(p []byte) (int, error) {
+		if created.ID == "" {
+			if err := a.mutate(func(s *node.State) error {
+				if len(s.Nodes) != 2 {
+					return errors.New("expected two saved nodes before export")
+				}
+				s.Nodes[0].Name = "new"
+				s.Nodes[1].Name = "renamed"
+				created = s.Nodes[1]
+				return nil
+			}); err != nil {
+				return 0, err
+			}
+		}
+		return answer.Read(p)
+	})
+	a.in = bufio.NewReader(io.MultiReader(strings.NewReader("new\n203.0.113.9\n9444\n"), renameBeforeExport))
+	out, err := wizardOutput(t, func() error { return a.installWizard(false, "ss2022", false) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Name = "new"
+	if !strings.Contains(out, node.URI(created, created.Users[0])) ||
+		strings.Contains(out, node.URI(original, original.Users[0])) {
+		t.Fatal("export must follow the created node ID when its name is reused")
 	}
 }
 

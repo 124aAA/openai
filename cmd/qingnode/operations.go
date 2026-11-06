@@ -14,9 +14,8 @@ import (
 )
 
 func (a *app) operation(cmd string, args []string) error {
-	// Preserve the historical no-argument core logs path. Explicit selection
-	// shares the bounded, read-only service logs entry point.
-	if cmd == "logs" && len(args) > 0 {
+	// All explicit log requests share the bounded, read-only service path.
+	if cmd == "logs" {
 		return a.service(append([]string{"logs"}, args...))
 	}
 	f := fs(cmd)
@@ -43,7 +42,7 @@ func (a *app) operation(cmd string, args []string) error {
 			return nil
 		})
 	}
-	if cmd == "status" || cmd == "doctor" || cmd == "logs" {
+	if cmd == "status" || cmd == "doctor" {
 		return a.store.Inspect(func() error {
 			s, err := a.store.Load()
 			if err != nil {
@@ -56,14 +55,8 @@ func (a *app) operation(cmd string, args []string) error {
 					return e
 				}
 				return err
-			case "doctor":
-				return a.doctor(s, err)
 			default:
-				if a.offline {
-					return errors.New("离线模式没有宿主服务日志")
-				}
-				a.recentLogs(s)
-				return err
+				return a.doctor(s, err)
 			}
 		})
 	}

@@ -75,7 +75,7 @@ func (a *app) status(s node.State) (err error) {
 	}
 	b := []byte(formatServiceState(serviceState))
 	fmt.Fprint(w, a.safeText(string(b), s))
-	pid := (node.SystemBackend{Root: a.store.Root}).PID()
+	pid := serviceState.PID
 	if pid > 0 {
 		if elapsed, e := node.Run(5*time.Second, "ps", "-p", fmt.Sprint(pid), "-o", "etime="); e == nil {
 			fmt.Fprintln(w, "运行时长："+strings.TrimSpace(string(elapsed)))

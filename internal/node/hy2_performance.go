@@ -82,9 +82,6 @@ func validateHY2Performance(p *HY2Performance) error {
 	if p.IgnoreClientBandwidth != nil && *p.IgnoreClientBandwidth && (p.ClientUpMbps != nil || p.ClientDownMbps != nil || p.ClientMode == "brutal") {
 		return errors.New("服务端忽略带宽申报时不能同时选择客户端固定Brutal速率；实际协商会改用BBR")
 	}
-	if p.IgnoreClientBandwidth != nil && *p.IgnoreClientBandwidth && (p.ClientUpMbps != nil || p.ClientDownMbps != nil) {
-		return errors.New("服务端明确要求非Brutal时，客户端不能同时声明固定Brutal预期速率")
-	}
 	if (p.ClientUpMbps == nil) != (p.ClientDownMbps == nil) {
 		return errors.New("客户端Brutal预期上传与下载须同时提供")
 	}

@@ -22,6 +22,9 @@ import (
 	"time"
 )
 
+// BBRFile remains reserved so exports cannot overwrite older installations' settings.
+const BBRFile = "/etc/sysctl.d/90-qingnode-bbr.conf"
+
 const NetworkSysctlFile = "/etc/sysctl.d/90-qingnode-network.conf"
 const NetworkStateDir = "/var/lib/qingnode-host-network"
 const networkFileHeader = "# QingNode host-network v1\n"

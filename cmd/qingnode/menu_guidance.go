@@ -54,7 +54,7 @@ func (a *app) guidedChoice(label string, options map[string]string) (string, err
 func (a *app) guidedProtocol() (protocolSelection, error) {
 	var c protocolConditions
 	var err error
-	fmt.Fprintln(ui.HumanWriter(os.Stderr), "只按你已知的客户端和入站条件给建议，不测试或推断用户端最快协议；任何一步可输入:cancel取消。客户端版本是配置内核版本，不等于手机GUI导入已验收。")
+	fmt.Fprintln(ui.HumanWriter(os.Stderr), "按客户端和网络条件帮你选；不确定就选“不确定”。任何一步输入 :cancel 返回。")
 	c.Client, err = a.guidedChoice("目标客户端：1 sing-box 1.14 / 2 Mihomo 1.19.30 / 3 其他或不确定", map[string]string{"1": "sing-box", "2": "mihomo", "3": "other"})
 	if err != nil {
 		return protocolSelection{}, err
@@ -87,7 +87,9 @@ func (a *app) guidedProtocol() (protocolSelection, error) {
 	if protocol == "" {
 		return protocolSelection{}, errMenuCanceled
 	}
-	fmt.Fprintln(ui.HumanWriter(os.Stderr), "只能DNS01签发时，先通过证书菜单导入私有ACME资源，再在创建表单选择resource；把HTTP01本地端口改高不会改变CA从公网80验证的要求。")
+	if c.Certificate != "none" {
+		fmt.Fprintln(ui.HumanWriter(os.Stderr), "只能用DNS验证申请证书时，先在“高级设置 → 证书管理”导入资源，创建时选择 resource。HTTP验证仍要求公网80端口可达。")
+	}
 	if c.NAT == "nat" {
 		fmt.Fprintln(ui.HumanWriter(os.Stderr), "将分别填写本地监听和外部连接端口；工具不会修改云厂商NAT，TCP/UDP映射仍须分别验证。")
 	}

@@ -34,11 +34,6 @@ func (a *app) menuChoice(key string) (string, error) {
 	fmt.Fprintln(ui.HumanWriter(os.Stderr), "\n"+ui.Text(key))
 	return a.wizardPrompt(ui.Text("exit_choice"), "")
 }
-func (a *app) executeMenu(args ...string) {
-	if e := a.menuCommand(args); e != nil {
-		a.message("ERROR", node.Redact(e.Error()))
-	}
-}
 func (a *app) confirm(key string) bool {
 	s, e := a.wizardPrompt(ui.Text(key), "")
 	return e == nil && s == "yes"
@@ -62,19 +57,19 @@ func (a *app) menu() error {
 		case "0":
 			return nil
 		case "1":
-			e = a.quickMenu()
+			e = a.installWizard(false, "", false)
 		case "2":
 			e = a.nodeMenu()
 		case "3":
-			e = a.exportTaskMenu()
+			e = a.exportWizard()
 		case "4":
 			e = a.diagnosticTaskMenu()
 		case "5":
-			e = a.certificateTaskMenu()
+			e = a.maintenanceMenu()
 		case "6":
 			e = a.advancedTaskMenu()
 		case "7":
-			e = a.maintenanceTaskMenu()
+			e = a.serviceMenu()
 		case "8":
 			continue
 		case "9":
@@ -108,8 +103,12 @@ func (a *app) selectNode() (node.Node, error) {
 		}
 		fmt.Fprintf(ui.HumanWriter(os.Stderr), "%d. %s [%s / %s]\n   ID: %s  %s\n", i+1, n.Name, n.Protocol, status, n.ID, node.PortLabel(n))
 	}
+	defaultChoice := ""
+	if len(nodes) == 1 {
+		defaultChoice = "1"
+	}
 	for {
-		answer, e := a.wizardPrompt("节点序号，0 返回", "")
+		answer, e := a.wizardPrompt("节点序号，0 返回", defaultChoice)
 		if e != nil {
 			return node.Node{}, e
 		}
@@ -234,10 +233,10 @@ var protocolMenuChoices = []struct{ number, protocol, description string }{
 	{"1", "reality", "VLESS REALITY / Vision（无需自己的域名）"},
 	{"2", "ss2022", "Shadowsocks 2022（客户端需支持 SS2022）"},
 	{"3", "hysteria2", "Hysteria2（UDP，需要域名及证书）"},
-	{"4", "anytls", "AnyTLS（TCP监听，需要证书；UDP业务封装）"},
+	{"4", "anytls", "AnyTLS（TCP，需要证书和支持的客户端）"},
 	{"5", "trojan", "Trojan（标准TLS，需要证书）"},
-	{"6", "ss-aead", "传统 SS AEAD（默认AES-256-GCM，不使用2022组合密钥）"},
-	{"7", "tuic", "TUIC v5（UDP/QUIC，需要证书；0-RTT关闭）"},
+	{"6", "ss-aead", "传统 Shadowsocks（无需域名或证书）"},
+	{"7", "tuic", "TUIC v5（UDP，需要证书；导出完整配置）"},
 }
 
 func protocolMenuClientLabel(protocol string) string {
@@ -264,11 +263,12 @@ func (a *app) selectProtocolOptions() (protocolSelection, error) {
 	}
 	fmt.Fprintln(os.Stderr, "\n请选择要搭建的节点")
 	for _, choice := range protocolMenuChoices {
-		fmt.Fprintf(os.Stderr, "%s. %s\n   %s；%s\n", choice.number, choice.description, status.label(choice.protocol), protocolMenuClientLabel(choice.protocol))
+		fmt.Fprintf(os.Stderr, "%s. %s\n", choice.number, choice.description)
 	}
-	fmt.Fprintln(os.Stderr, "h. 根据客户端、证书、UDP和NAT条件帮我选\n0. 返回，不创建")
+	fmt.Fprintln(os.Stderr, "h. 帮我选  n. NAT/端口映射  ?. 查看核心和客户端要求\n0. 返回，不创建")
+	nat := false
 	for {
-		choice, e := a.wizardPrompt("选择1至7、h帮我选，或0", "")
+		choice, e := a.wizardPrompt("选择1至7、h、n、?，或0", "")
 		if e != nil {
 			return protocolSelection{}, e
 		}
@@ -276,21 +276,35 @@ func (a *app) selectProtocolOptions() (protocolSelection, error) {
 			return protocolSelection{}, nil
 		}
 		if choice == "h" {
-			return a.guidedProtocol()
+			selected, err := a.guidedProtocol()
+			selected.NAT = selected.NAT || nat
+			return selected, err
+		}
+		if choice == "n" {
+			nat = true
+			fmt.Fprintln(os.Stderr, "已选择端口映射：接下来选择协议，再分别填写本地与外部端口。")
+			continue
+		}
+		if choice == "?" {
+			for _, candidate := range protocolMenuChoices {
+				fmt.Fprintf(ui.HumanWriter(os.Stderr), "%s：%s；%s\n", candidate.description, status.label(candidate.protocol), protocolMenuClientLabel(candidate.protocol))
+			}
+			continue
 		}
 		recognized := false
 		for _, candidate := range protocolMenuChoices {
 			if choice == candidate.number || choice == candidate.protocol {
 				recognized = true
 				if reason := status.unavailableReason(candidate.protocol); reason != "" {
-					a.message("WARN", reason+"；先运行 qingnode core install/check")
+					a.message("WARN", "当前不可用："+reason+"；先运行 qingnode core install/check")
 					break
 				}
-				return protocolSelection{Protocol: candidate.protocol}, nil
+				fmt.Fprintln(ui.HumanWriter(os.Stderr), status.label(candidate.protocol))
+				return protocolSelection{Protocol: candidate.protocol, NAT: nat}, nil
 			}
 		}
 		if !recognized {
-			a.message("WARN", "请输入 1 至 7、协议名称或 0；尚未创建节点")
+			a.message("WARN", "请输入 1 至 7、协议名称、h、n、? 或 0；尚未创建节点")
 		}
 	}
 }
@@ -298,6 +312,7 @@ func (a *app) installWizard(first bool, protocol string, quiet bool) error {
 	return a.installWizardOptions(first, protocol, quiet, false)
 }
 func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool) error {
+	selected := protocol == ""
 	if protocol == "" {
 		selection, e := a.selectProtocolOptions()
 		protocol, nat = selection.Protocol, nat || selection.NAT
@@ -308,7 +323,7 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 	if _, ok := node.Protocol(protocol); !ok {
 		return errors.New("不支持该协议；可用 reality、ss2022、hysteria2、anytls、trojan、ss-aead、tuic")
 	}
-	if a.wizardCollect == nil {
+	if a.wizardCollect == nil && !selected {
 		status, e := a.inspectProtocolMenuCore()
 		if e != nil {
 			return e
@@ -319,11 +334,16 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 	}
 	fmt.Fprintln(os.Stderr, "安装输入中可随时输入 :cancel 返回；填写完这些参数后才创建节点。")
 	defaultName := "main"
+	initialized := false
 	if a.wizardCollect == nil {
 		if e := a.store.Inspect(func() error {
 			s, e := a.store.Load()
 			if e != nil {
 				return e
+			}
+			if first && len(s.Nodes) > 0 {
+				initialized = true
+				return nil
 			}
 			for i := 2; ; i++ {
 				if _, e := s.Find(defaultName); e != nil {
@@ -334,6 +354,9 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 		}); e != nil {
 			return e
 		}
+	}
+	if initialized {
+		return a.menuCommand([]string{"init", "--quiet"})
 	}
 	name, e := a.wizardPrompt("节点名称", defaultName)
 	if e != nil {
@@ -461,45 +484,57 @@ func (a *app) installWizardOptions(first bool, protocol string, quiet, nat bool)
 	if a.wizardCollect != nil {
 		return a.wizardCollect(args[1:])
 	}
-	return a.menuCommand(args)
-}
-func (a *app) nodeMenu() error {
+	var createdID string
+	err := a.withMenuPreview(func() error {
+		return a.addNode(cmd, args[1:], defaultAutoProbes(), &createdID)
+	})
+	if err != nil || quiet || createdID == "" {
+		return err
+	}
+	// Creation is committed. Canceling the optional export never undoes it.
 	for {
-		choice, e := a.menuChoice("nodes")
-		if e != nil {
-			return e
-		}
-		if choice == "0" {
+		choice, err := a.wizardPrompt("节点已创建。1 立即导出链接/二维码/配置，0 返回", "0")
+		if errors.Is(err, io.EOF) || errors.Is(err, errMenuCanceled) || choice == "0" {
 			return nil
 		}
-		if choice == "1" {
-			a.executeMenu("info")
+		if err != nil {
+			return err
+		}
+		if choice != "1" {
+			a.message("WARN", "请输入 1 导出，或 0 返回；节点已保存")
 			continue
+		}
+		var created node.Node
+		if err := a.inspectState(func(s *node.State) error {
+			n, err := s.Find(createdID)
+			if err != nil || n.ID != createdID {
+				return errors.New("刚创建的节点已不在当前配置中，请返回节点管理查看")
+			}
+			created = *n
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := a.exportNodeWizard(created); err != nil && !errors.Is(err, errMenuCanceled) && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("节点已保存，导出失败：%w", err)
+		}
+		return nil
+	}
+}
+func (a *app) nodeMenu() error {
+	return a.taskMenu("nodes", func(choice string) error {
+		if choice == "1" {
+			return a.menuCommand([]string{"info"})
 		}
 		if choice == "2" {
-			if e = a.installWizard(false, "", false); e != nil {
-				if errors.Is(e, io.EOF) {
-					return e
-				}
-				if !errors.Is(e, errMenuCanceled) {
-					a.message("ERROR", e.Error())
-				}
-			}
-			continue
+			return a.installWizard(false, "", false)
 		}
 		if choice < "3" || choice > "9" || len(choice) != 1 {
-			a.message("WARN", "请选择菜单中的数字")
-			continue
+			return menuInvalid()
 		}
 		n, e := a.selectNode()
 		if e != nil {
-			if errors.Is(e, io.EOF) {
-				return e
-			}
-			if !errors.Is(e, errMenuCanceled) {
-				a.message("WARN", e.Error())
-			}
-			continue
+			return e
 		}
 		args := []string{}
 		switch choice {
@@ -532,35 +567,16 @@ func (a *app) nodeMenu() error {
 			args = []string{"disable", "--id", n.ID}
 		case "7":
 			if !a.confirm("delete_warning") {
-				continue
+				return errMenuCanceled
 			}
 			args = []string{"delete", "--id", n.ID, "--yes"}
 		case "8":
-			if e = a.userMenu(n); e != nil {
-				if errors.Is(e, io.EOF) {
-					return e
-				}
-				if !errors.Is(e, errMenuCanceled) {
-					a.message("ERROR", e.Error())
-				}
-			}
-			continue
+			return a.userMenu(n)
 		case "9":
-			if e = a.realityMenu(n); e != nil {
-				if errors.Is(e, io.EOF) {
-					return e
-				}
-				if !errors.Is(e, errMenuCanceled) {
-					a.message("ERROR", e.Error())
-				}
-			}
-			continue
-		default:
-			a.message("WARN", "请选择菜单中的数字")
-			continue
+			return a.realityMenu(n)
 		}
-		a.executeMenu(args...)
-	}
+		return a.menuCommand(args)
+	})
 }
 func (a *app) userMenu(n node.Node) error {
 	menu := "users-basic"
@@ -674,6 +690,10 @@ func (a *app) exportWizard() error {
 	if e != nil {
 		return e
 	}
+	return a.exportNodeWizard(n)
+}
+
+func (a *app) exportNodeWizard(n node.Node) error {
 	u, e := a.selectUser(n)
 	if e != nil {
 		return e
@@ -684,9 +704,13 @@ func (a *app) exportWizard() error {
 	}
 	fmt.Fprintln(os.Stderr, "1 分享链接（手机客户端优先）\n2 终端二维码（终端需支持方块字符）\n3 Mihomo 完整配置\n4 sing-box 完整配置\n5 Mihomo provider（供已有配置引用）\n6 Base64 链接文本（不是在线订阅）\n0 返回；也可输入原格式名称")
 	formats := map[string]string{"1": "uri", "2": "qr", "3": "mihomo", "4": "sing-box", "5": "provider", "6": "base64"}
+	defaultFormat := "1"
+	if len(uriWarning) > 0 {
+		defaultFormat = "4"
+	}
 	var f string
 	for {
-		value, err := a.wizardPrompt("导出方式", "1")
+		value, err := a.wizardPrompt("导出方式", defaultFormat)
 		if err != nil {
 			return err
 		}
@@ -715,12 +739,12 @@ func (a *app) exportWizard() error {
 	if e != nil {
 		return e
 	}
-	args := []string{"export", "--id", n.ID, "--user", u, "--format", f, "--out", out}
+	args := []string{"--id", n.ID, "--user", u, "--format", f, "--out", out}
 	if version := lockedExportClientVersion(n.Protocol, f); version != "" {
 		fmt.Fprintf(os.Stderr, "目标客户端版本：%s（已核验固定版本）\n", version)
 		args = append(args, "--client-version", version)
 	}
-	return a.menuCommand(args)
+	return a.exportSelection("export", args, true)
 }
 
 // New protocols have only been verified against these fixed client lines.
@@ -738,38 +762,23 @@ func lockedExportClientVersion(protocol, format string) string {
 	return ""
 }
 func (a *app) serviceMenu() error {
-	for {
-		choice, e := a.menuChoice("service")
-		if e != nil {
-			return e
-		}
-		if choice == "0" {
-			return nil
-		}
+	return a.taskMenu("service", func(choice string) error {
 		commands := map[string][]string{"1": {"status"}, "2": {"start"}, "3": {"stop"}, "4": {"restart"}, "5": {"service", "enable"}, "6": {"service", "disable"}, "7": {"logs"}}
 		if args, ok := commands[choice]; ok {
-			a.executeMenu(args...)
-		} else {
-			a.message("WARN", "无效选择")
+			return a.menuCommand(args)
 		}
-	}
+		return menuInvalid()
+	})
 }
 func (a *app) maintenanceMenu() error {
-	for {
-		choice, e := a.menuChoice("maintenance")
-		if e != nil {
-			return e
-		}
-		if choice == "0" {
-			return nil
-		}
+	return a.taskMenu("maintenance", func(choice string) error {
 		switch choice {
 		case "1":
 			file, e := a.wizardPrompt("备份路径（留空按时间命名）", "")
 			if e != nil {
 				return e
 			}
-			a.executeMenu("backup", "--file", file)
+			return a.menuCommand([]string{"backup", "--file", file})
 		case "2":
 			file, e := a.wizardPrompt("备份路径（.qnbak 加密 / .json 卸载快照）", "")
 			if e != nil {
@@ -780,85 +789,72 @@ func (a *app) maintenanceMenu() error {
 				if strings.HasSuffix(file, ".json") {
 					args = append(args, "--snapshot")
 				}
-				a.executeMenu(args...)
+				return a.menuCommand(args)
 			}
+			return errMenuCanceled
 		case "3":
-			if e = a.coreVersions(); e != nil {
-				a.message("ERROR", e.Error())
-				continue
+			if e := a.coreVersions(); e != nil {
+				return e
 			}
 			v, e := a.wizardPrompt("目标版本（输入数字版本；留空返回）", "")
 			if e != nil {
 				return e
 			}
 			if v == "" {
-				continue
+				return errMenuCanceled
 			}
 			sum, e := a.wizardPrompt("官方归档 SHA-256（默认锁定版本可留空）", "")
 			if e != nil {
 				return e
 			}
-			a.executeMenu("core", "update", "--version", strings.TrimPrefix(v, "v"), "--sha256", sum)
+			return a.menuCommand([]string{"core", "update", "--version", strings.TrimPrefix(v, "v"), "--sha256", sum})
 		case "4":
 			bundle, e := a.wizardPrompt("新版已解压发行包目录", "")
 			if e != nil {
 				return e
 			}
-			a.executeMenu("self-update", "--bundle", bundle)
-			return nil
+			if err := a.menuCommand([]string{"self-update", "--bundle", bundle}); err != nil {
+				return err
+			}
+			a.message("OK", "管理器已更新，请重新运行 qingnode")
+			return io.EOF
 		case "5":
 			if a.confirm("回退将恢复上一代节点/核心，相关链接可能变化。输入 yes 继续") {
-				a.executeMenu("rollback")
+				return a.menuCommand([]string{"rollback"})
 			}
+			return errMenuCanceled
 		case "6":
-			a.executeMenu("recover")
+			return a.menuCommand([]string{"recover"})
 		case "7":
 			mode, e := a.menuChoice("uninstall")
 			if e != nil {
 				return e
 			}
 			if mode == "0" {
-				continue
+				return errMenuCanceled
 			}
 			if mode != "1" && mode != "2" {
-				continue
+				return menuInvalid()
 			}
 			if !a.confirm("确认停止服务并卸载选定内容？输入 yes 继续") {
-				continue
+				return errMenuCanceled
 			}
 			args := []string{"uninstall", "--yes"}
 			if mode == "2" {
 				args = append(args, "--purge")
 			}
 			if e = a.menuCommand(args); e != nil {
-				a.message("ERROR", e.Error())
-			} else {
-				return io.EOF
+				return e
 			}
-		default:
-			a.message("WARN", "无效选择")
+			return io.EOF
 		}
-	}
+		return menuInvalid()
+	})
 }
 func (a *app) systemMenu() error {
-	for {
-		choice, e := a.menuChoice("system")
-		if e != nil {
-			return e
-		}
-		if choice == "0" {
-			return nil
-		}
+	return a.taskMenu("system", func(choice string) error {
 		switch choice {
 		case "1":
-			a.executeMenu("diagnose")
-		case "2":
-			a.executeMenu("ports")
-		case "5":
-			a.executeMenu("logs")
-		case "6":
-			e = a.publicCheckWizard()
-		case "3":
 			c, e := a.menuChoice("firewall")
 			if e != nil {
 				return e
@@ -870,12 +866,15 @@ func (a *app) systemMenu() error {
 						return e
 					}
 					if !a.confirm("将修改本项目的宿主防火墙规则，不清空全局规则。输入yes继续") {
-						continue
+						return errMenuCanceled
 					}
 				}
-				a.executeMenu("firewall", cmd)
+				return a.menuCommand([]string{"firewall", cmd})
 			}
-		case "4":
+			if c == "0" {
+				return nil
+			}
+		case "2":
 			c, e := a.menuChoice("network")
 			if e != nil {
 				return e
@@ -887,13 +886,15 @@ func (a *app) systemMenu() error {
 						return e
 					}
 					if !a.confirm("将应用上面预览的TCP拥塞/队列设置并保存恢复快照；这不控制HY2的QUIC。输入yes继续") {
-						continue
+						return errMenuCanceled
 					}
 				}
-				a.executeMenu("network", cmd)
+				return a.menuCommand([]string{"network", cmd})
 			}
-		default:
-			a.message("WARN", "无效选择")
+			if c == "0" {
+				return nil
+			}
 		}
-	}
+		return menuInvalid()
+	})
 }

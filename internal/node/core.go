@@ -40,48 +40,54 @@ func Run(timeout time.Duration, name string, args ...string) ([]byte, error) {
 	return b, e
 }
 func VerifyCore(root, v string) error {
+	_, err := verifyCore(root, v)
+	return err
+}
+
+// Keep the verified build tags with the version observation so Check does not
+// start the same executable twice just to ask for its capabilities.
+func verifyCore(root, v string) ([]string, error) {
 	if !SupportedVersion(v) {
-		return errors.New("核心版本尚未适配")
+		return nil, errors.New("核心版本尚未适配")
 	}
 	p := CorePath(root, v)
 	i, e := os.Lstat(p)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	if !i.Mode().IsRegular() {
-		return errors.New("核心必须为普通文件")
+		return nil, errors.New("核心必须为普通文件")
 	}
 	f, e := os.Open(p)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	h := sha256.New()
 	_, e = io.Copy(h, f)
 	f.Close()
 	if e != nil {
-		return e
+		return nil, e
 	}
 	sum, e := os.ReadFile(p + ".sha256")
 	if e != nil || strings.TrimSpace(string(sum)) != hex.EncodeToString(h.Sum(nil)) {
-		return errors.New("已安装核心摘要不匹配，请重新安装")
+		return nil, errors.New("已安装核心摘要不匹配，请重新安装")
 	}
 	b, e := Run(10*time.Second, p, "version")
 	if e != nil || !strings.Contains(string(b), "sing-box version "+v+"\n") {
-		return errors.New("核心版本与锁定版本不一致")
+		return nil, errors.New("核心版本与锁定版本不一致")
 	}
-	return verifyCoreTags(string(b))
+	if e = verifyCoreTags(string(b)); e != nil {
+		return nil, e
+	}
+	return CoreBuildTags(string(b)), nil
 }
 
 // A compatible version alone does not guarantee that the upstream binary was
 // built with the TLS, QUIC and certificate features used by our adapters.
 func verifyCoreTags(output string) error {
 	tags := map[string]bool{}
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "Tags:") {
-			for _, tag := range strings.FieldsFunc(strings.TrimPrefix(line, "Tags:"), func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
-				tags[tag] = true
-			}
-		}
+	for _, tag := range CoreBuildTags(output) {
+		tags[tag] = true
 	}
 	for _, tag := range []string{"with_quic", "with_utls", "with_acme"} {
 		if !tags[tag] {
@@ -301,18 +307,15 @@ func (b SystemBackend) Check(s State, path string) error {
 	if e := ValidateCertificateDates(s); e != nil {
 		return e
 	}
-	if e := VerifyCore(b.Root, s.CoreVersion); e != nil {
+	tags, e := verifyCore(b.Root, s.CoreVersion)
+	if e != nil {
 		return e
 	}
 	if len(s.Egresses) > 0 || len(s.Nodes) > 0 {
-		version, err := Run(10*time.Second, CorePath(b.Root, s.CoreVersion), "version")
-		if err != nil {
-			return errors.New("无法读取节点与拓扑所需的核心构建能力")
-		}
-		if err = ValidateProtocolCapabilities(s, CoreBuildTags(string(version))); err != nil {
+		if err := ValidateProtocolCapabilities(s, tags); err != nil {
 			return err
 		}
-		if err = ValidateEgressCapabilities(s, CoreBuildTags(string(version))); err != nil {
+		if err := ValidateEgressCapabilities(s, tags); err != nil {
 			return err
 		}
 	}

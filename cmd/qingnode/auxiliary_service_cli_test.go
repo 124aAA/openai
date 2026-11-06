@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -239,6 +240,33 @@ func TestAuxiliaryCLIFlagsAndTopLevelLogSelection(t *testing.T) {
 	out, err := wizardOutput(t, func() error { return a.operation("logs", []string{"--name", "qingnode-subscription"}) })
 	if err != nil || queries != 1 || !strings.Contains(out, "selected log") || strings.Contains(out, state.Nodes[0].Users[0].Password) {
 		t.Fatal("top-level log selection bypassed bounded/redacted path", out, err, queries)
+	}
+}
+
+func TestTopLevelLogsUseServicePathAndReturnReadFailure(t *testing.T) {
+	a, state := batchFixture(t)
+	a.offline = false
+	oldFactory := auxiliaryManager
+	t.Cleanup(func() { auxiliaryManager = oldFactory })
+	queries := 0
+	var readErr error
+	auxiliaryManager = func() platform.Manager {
+		return platform.Manager{Kind: platform.InitSystemd, Execute: func(_ time.Duration, command string, args ...string) ([]byte, error) {
+			if command != "journalctl" || strings.Join(args, " ") != "-u qingnode.service -n 40 --no-pager" {
+				t.Fatal("unexpected default log query", command, args)
+			}
+			queries++
+			return []byte("core log " + state.Nodes[0].Users[0].Password), readErr
+		}}
+	}
+	out, err := wizardOutput(t, func() error { return a.operation("logs", nil) })
+	if err != nil || queries != 1 || !strings.Contains(out, "core log") || strings.Contains(out, state.Nodes[0].Users[0].Password) {
+		t.Fatal("default logs bypassed service log path", out, err, queries)
+	}
+	readErr = errors.New("fixture log read failed")
+	out, err = wizardOutput(t, func() error { return a.operation("logs", nil) })
+	if err == nil || out != "" || queries != 2 {
+		t.Fatal("failed default log query reported success or exposed output", out, err, queries)
 	}
 }
 

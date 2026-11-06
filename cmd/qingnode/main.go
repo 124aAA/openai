@@ -19,7 +19,7 @@ import (
 	"qingnode/internal/ui"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -579,6 +579,10 @@ func writeOutput(out string, b []byte) error {
 	return f.Sync()
 }
 func (a *app) export(cmd string, args []string) error {
+	return a.exportSelection(cmd, args, false)
+}
+
+func (a *app) exportSelection(cmd string, args []string, exactIDs bool) error {
 	f := fs(cmd)
 	id := f.String("id", "", "节点 ID 或名称")
 	uid := f.String("user", "", "凭据 ID 或名称")
@@ -614,9 +618,15 @@ func (a *app) export(cmd string, args []string) error {
 			if err != nil {
 				return err
 			}
+			if exactIDs && n.ID != *id {
+				return errors.New("所选节点已不在当前配置中，请重新选择")
+			}
 			u, err := node.SelectUser(*n, *uid)
 			if err != nil {
 				return err
+			}
+			if exactIDs && u.ID != *uid {
+				return errors.New("所选凭据已不在当前配置中，请重新选择")
 			}
 			selected, err := node.WithEndpoint(*n, *endpoint)
 			if err != nil {

@@ -1,6 +1,6 @@
 # 协议选择、能力与完整配置
 
-第09批当前源码提供七协议：REALITY、SS2022、Hysteria2、AnyTLS、Trojan、传统SS AEAD和TUIC。源码尚未发行，最终代码d0fd58a的定向25/25项、独立能力补测和五步构建已通过；完整回归的准确提交与保留失败见 [BATCH09.md](BATCH09.md)。默认官方核心仍为1.14.0，候选1.14.3不会自动替换。
+当前源码提供七协议：REALITY、SS2022、Hysteria2、AnyTLS、Trojan、传统 SS AEAD 和 TUIC。实际安装版本用 `qingnode version` 核对，正式发行与验证来源见 [TEST_REPORT.md](TEST_REPORT.md)。第09批的准确提交、测试及保留失败作为历史记录保留在 [BATCH09.md](BATCH09.md)。默认官方核心为 1.14.0，候选 1.14.3 不会自动替换。
 
 ## 先按需要选，再在自己的链路测试
 

@@ -11,7 +11,7 @@ ROTATION=/etc/logrotate.d/qingnode
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.3.0 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.3.1 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 VERSION_EXPLICIT=0
 INIT_ARGS=()
 QN_RECOVERING=0
@@ -41,7 +41,7 @@ while (($#)); do
       echo 'NAT：--listen 本地IP --port 本地端口 --connect-port 外部端口；仅声明，不修改云NAT。'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
       echo '默认在线入口选择已公开的最新正式发行；完整本地包不联网选择版本。'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.3.0 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.3.1 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;

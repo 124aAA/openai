@@ -1,6 +1,6 @@
-# QingNode 0.3.0 架构
+# QingNode 0.3.1 架构
 
-第11批把已有功能整理为七类任务入口：快速建节点、管理节点/用户、导出/订阅、测速诊断、证书与备份、进阶网络、系统维护。分组仅调用原CLI和事务，不另建状态来源或协议配置器。State继续为9，默认官方核心继续为1.14.0；本批不新增协议、持久字段或TUI依赖。当前实现与最终实测分开记录在[BATCH11.md](BATCH11.md)，短流程和脚本契约见[GETTING_STARTED.md](GETTING_STARTED.md)、[WORKFLOWS.md](WORKFLOWS.md)。本批同字节Ubuntu/systemd VM与完整22项本地门槛的准确证据见实施记录；手机SSH/GUI、公网和原生ARM仍未验证。
+当前菜单直接连接创建、节点管理、导出、状态诊断、备份更新、服务管理；证书、设备订阅和复杂网络配置收在高级设置。菜单复用原 CLI 和配置事务，不另建状态来源或协议配置器。创建后的可选导出复用同一节点导出向导，不自动显示认证。State 保持 9，默认官方核心保持 1.14.0；没有新增协议、持久字段或界面依赖。短流程和脚本契约见[上手指南](GETTING_STARTED.md)、[工作流程](WORKFLOWS.md)。历史第11批验证见[BATCH11.md](BATCH11.md)，不替代后续修改的验证。
 
 第10批将宿主探测、包依赖、服务生命周期/定义、计划任务和防火墙效果集中到小型适配边界：`internal/platform`与既有node后端。systemd原unit保留，OpenRC使用标准supervise-daemon，订阅/监控共享服务管理接口。当前State9只因新的firewalld值升级，旧1–8只在内存迁移；协议与身份不改变。实现/实际平台证据见[PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。下方各前批描述保留历史范围。
 
@@ -10,13 +10,26 @@
 
 ## 保留的主干
 
-Bash引导 → Go管理器 → 统一JSON State与配置代 → 官方sing-box → 本机systemd/OpenRC。保留语言、JSON持久化和轻量服务运行模式，不引入必装Docker、面板或数据库服务；格式变化使用明确schema。
+实际执行链为：
+
+```text
+install.sh：下载校验、账户/文件安装
+  → cmd/qingnode/main.go：CLI 分派或启动菜单
+  → menu*.go：收集输入、选择目标、显示结果
+  → 节点/维护命令：构造业务操作
+  → Store：读取 State、持锁修改、配置代切换与失败回滚
+  → 协议适配器：生成 sing-box 配置并校验
+  → 系统服务后端：由 systemd/OpenRC 托管官方 sing-box
+```
+
+查询走 Inspect，不因进入菜单而恢复事务；修改走现有 Apply 路径。保留 Bash、Go、JSON 持久化和轻量服务运行模式，不引入必装 Docker、面板或数据库服务；格式变化使用明确 schema。
 
 | 模块 | 职责 |
 | --- | --- |
 | install.sh | 系统识别、依赖、发行包校验、账户与文件安装、捕获失败回滚 |
 | cmd/qingnode/main.go | 参数分派、全局选项、核心安装/更新 |
-| nodes.go / menu.go / menu_tasks.go / menu_guidance.go | 节点与凭据生命周期、七类任务入口、客户端/证书/公网条件建议；不以服务器探测排名用户体验 |
+| nodes.go / devices.go 等业务命令 | 节点与凭据生命周期，复用模型、Store 和协议实现 |
+| menu.go / menu_tasks.go / menu_guidance.go | 输入、选择、反馈与按需协议指导；直达高频业务命令，不独立保存状态 |
 | menu_preview.go / batch.go | 同一持锁候选的派生影响预览，复用Store.Preview与Apply；不重新生成身份 |
 | status_report.go / cli_output.go | 版本1公共状态/帮助/版本与脱敏错误；JSON保持独立机器格式，不输出State认证 |
 | doctor_report.go / ports_report.go / query_reports.go | 独立版本1诊断、受限监听及公开对象声明；未知、未测与失败不归为通过；不拼接普通文字到JSON |

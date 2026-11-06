@@ -58,8 +58,12 @@ func (a *app) previewMenuMutation(candidate node.State) error {
 }
 
 func (a *app) menuCommand(args []string) error {
+	return a.withMenuPreview(func() error { return a.command(args) })
+}
+
+func (a *app) withMenuPreview(run func() error) error {
 	before, done := a.menuPreview, a.menuPreviewDone
 	a.menuPreview, a.menuPreviewDone = true, false
 	defer func() { a.menuPreview, a.menuPreviewDone = before, done }()
-	return a.command(args)
+	return run()
 }

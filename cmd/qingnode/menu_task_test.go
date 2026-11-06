@@ -14,8 +14,8 @@ import (
 	"qingnode/internal/ui"
 )
 
-func TestTaskMenuListsSevenUserJobs(t *testing.T) {
-	for _, label := range []string{"1 快速建节点", "2 节点与用户", "3 导出与订阅", "4 测速与诊断", "5 证书与备份", "6 进阶网络", "7 系统维护", "8 刷新总览", "9 检查更新"} {
+func TestTaskMenuListsDirectUserJobs(t *testing.T) {
+	for _, label := range []string{"1 创建节点", "2 节点管理", "3 导出链接", "4 状态与诊断", "5 备份与更新", "6 高级设置", "7 服务管理", "8 刷新总览", "9 检查更新"} {
 		if !strings.Contains(ui.Text("main"), label) {
 			t.Fatal("missing task entry", label)
 		}
@@ -142,7 +142,7 @@ func TestMenuInvalidWizardFieldsDoNotInstallCoreOrCreateGeneration(t *testing.T)
 	}
 }
 func TestTaskSubmenusCancelBeforeAnyWrites(t *testing.T) {
-	for _, call := range []func(*app) error{func(a *app) error { return a.quickMenu() }, func(a *app) error { return a.exportTaskMenu() }, func(a *app) error { return a.diagnosticTaskMenu() }, func(a *app) error { return a.certificateTaskMenu() }, func(a *app) error { return a.advancedTaskMenu() }, func(a *app) error { return a.maintenanceTaskMenu() }} {
+	for _, call := range []func(*app) error{func(a *app) error { return a.exportTaskMenu() }, func(a *app) error { return a.diagnosticTaskMenu() }, func(a *app) error { return a.certificateTaskMenu() }, func(a *app) error { return a.advancedTaskMenu() }, func(a *app) error { return a.maintenanceMenu() }, func(a *app) error { return a.serviceMenu() }, func(a *app) error { return a.systemMenu() }} {
 		a := wizardApp(t, "0\n")
 		if err := call(a); err != nil {
 			t.Fatal(err)

@@ -20,6 +20,10 @@ func (a *app) add(cmd string, args []string) error {
 }
 
 func (a *app) addWithProbes(cmd string, args []string, probes autoProbes) error {
+	return a.addNode(cmd, args, probes, nil)
+}
+
+func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *string) error {
 	f := fs(cmd)
 	auto := f.Bool("auto", false, "无交互发现公网地址、验证 REALITY 目标并避开默认端口冲突")
 	name := f.String("name", "main", "节点名称")
@@ -348,6 +352,9 @@ func (a *app) addWithProbes(cmd string, args []string, probes autoProbes) error 
 	})
 	if err != nil {
 		return err
+	}
+	if createdID != nil {
+		*createdID = created
 	}
 	if created != "" && !*quiet {
 		return a.info([]string{"--id", created})
