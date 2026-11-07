@@ -11,7 +11,7 @@ import (
 func TestVMessSubscriptionUsesEmbeddedNameAndSelectedEndpoint(t *testing.T) {
 	n := tlsProtocolFixture(t, "vmess")
 	n.Users = []User{NewUser("手机 # 一", "vmess"), NewUser("其他设备", "vmess")}
-	n.Transport = &V2RayTransport{Type: "ws", Path: "/节点", Host: "front.example.test"}
+	n.Transport = &V2RayTransport{Type: "ws", Path: "/node+:@&=", Host: "front.example.test"}
 	n.AdditionalEndpoints = []ConnectionEndpoint{{ID: "nat", Host: "2001:db8::99", Port: 30443}}
 	s := NewState()
 	s.Nodes = []Node{n}
@@ -47,7 +47,7 @@ func TestVMessSubscriptionUsesEmbeddedNameAndSelectedEndpoint(t *testing.T) {
 		if err = json.Unmarshal(decoded, &share); err != nil {
 			t.Fatal(err)
 		}
-		if share["ps"] != deviceExportName(n, n.Users[0], p.Bindings[0]) || share["id"] != n.Users[0].UUID || share["add"] != "2001:db8::99" || share["port"] != "30443" || share["path"] != "/节点" || share["host"] != "front.example.test" {
+		if share["ps"] != deviceExportName(n, n.Users[0], p.Bindings[0]) || share["id"] != n.Users[0].UUID || share["add"] != "2001:db8::99" || share["port"] != "30443" || share["path"] != "/node+:@&=" || share["host"] != "front.example.test" {
 			t.Fatal("subscription lost its selected name, identity, NAT endpoint or transport")
 		}
 		if bytes.Contains(decoded, []byte(n.Users[1].UUID)) {
