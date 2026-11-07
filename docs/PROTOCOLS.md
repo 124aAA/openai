@@ -53,6 +53,8 @@ TLS协议还可使用既有 PEM、用户文件引用、稳定证书资源与核�
 
 传输选项复用节点的 `transport` 参数。默认 TLS 直连；WebSocket/HTTPUpgrade 路径默认 `/`，gRPC 服务名默认 `qingnode`。使用 WebSocket/HTTPUpgrade 时 ALPN 为 `http/1.1`，gRPC 为 `h2`，两端路径、Host 和服务名须一致。修改后重新导入客户端，原 UUID、密码和节点 ID 保留。
 
+当前固定版本的 sing-box 无法正确匹配 WebSocket 中文路径，因此 WebSocket 路径只接受 ASCII 字符，例如 `/qingnode`；节点名称仍可使用中文。HTTPUpgrade 路径不受这一限制。
+
 新增组合对应 sing-box 1.14.0/1.14.3 与 Mihomo 1.19.30；官方字段参见 [VLESS](https://sing-box.sagernet.org/configuration/inbound/vless/)、[VMess](https://sing-box.sagernet.org/configuration/inbound/vmess/)、[Trojan](https://sing-box.sagernet.org/configuration/inbound/trojan/) 和 [V2Ray 传输](https://sing-box.sagernet.org/configuration/shared/v2ray-transport/)。gRPC 需要目标核心具备 gRPC 支持，配置检查与受控连接测试由发布流程执行。HTTPUpgrade 的 Mihomo 分享链接转换不能可靠保留参数，因此仅提供完整 JSON/YAML，不生成 URI、二维码或 Base64 链接集合。配置通过和受控回环连接不能代替真实公网或手机客户端验收。
 
 暂缓候选：NaiveProxy 需要额外构建标签和 libcronet，当前安装路线未覆盖；ShadowTLS v3 需要嵌套连接图，当前单节点适配器未覆盖；Snell 的核心/客户端多用户与独立撤销能力尚未满足同一管理契约。本版不为数量增加不可用入口。

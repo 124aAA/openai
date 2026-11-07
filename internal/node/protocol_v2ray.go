@@ -69,6 +69,9 @@ func ValidateV2RayTransport(protocol string, p *V2RayTransport) error {
 		if !utf8.ValidString(t.Path) || len(t.Path) > 2048 || !strings.HasPrefix(t.Path, "/") || strings.ContainsAny(t.Path, "?#%") || strings.IndexFunc(t.Path, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
 			return errors.New("传输路径须以 / 开头，不能含空白、控制字符、?、# 或百分号编码；请填写原始路径")
 		}
+		if t.Type == "ws" && strings.IndexFunc(t.Path, func(r rune) bool { return r > unicode.MaxASCII }) >= 0 {
+			return errors.New("当前 sing-box WebSocket 路径请使用 ASCII 字符，例如 /qingnode；中文可用于节点名称")
+		}
 		if t.Host != "" {
 			u, err := url.Parse("https://" + t.Host)
 			if err != nil || u.Host != t.Host || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !ValidHost(u.Hostname()) {

@@ -22,6 +22,9 @@ func TestOfficialCoreV2RayTLSAndMihomoTransportPayloads(t *testing.T) {
 					Transport:   NormalizeV2RayTransport(&V2RayTransport{Type: transport})}
 				if transport == "ws" || transport == "httpupgrade" {
 					n.Transport.Path, n.Transport.Host = "/连接+:@&=", "localhost"
+					if transport == "ws" {
+						n.Transport.Path = "/ws+:@&="
+					}
 				}
 				state := NewState()
 				state.CoreVersion, state.Nodes = version, []Node{n}

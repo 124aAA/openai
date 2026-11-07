@@ -24,6 +24,9 @@ func TestV2RayTLSFormatsPreserveTransportAndEndpoint(t *testing.T) {
 				n.Transport = NormalizeV2RayTransport(&V2RayTransport{Type: transport})
 				if transport == "ws" || transport == "httpupgrade" {
 					n.Transport.Path, n.Transport.Host = "/连接+:@&=", "cdn.example.test:8443"
+					if transport == "ws" {
+						n.Transport.Path = "/ws+:@&="
+					}
 				}
 				if transport == "grpc" {
 					n.Transport.ServiceName = "qingnode.Test-v2"
@@ -121,6 +124,7 @@ func TestV2RayTransportDefaultsDoNotDiscardOrMutateInput(t *testing.T) {
 		{"vless", V2RayTransport{Type: "grpc", ServiceName: "service/path"}},
 		{"vless", V2RayTransport{Type: "ws", ServiceName: "ignored"}},
 		{"vless", V2RayTransport{Type: "ws", Path: "/path%20different"}},
+		{"vless", V2RayTransport{Type: "ws", Path: "/连接+:@&="}},
 		{"vless", V2RayTransport{Type: "ws", Host: "bad.test\r\nHeader: x"}},
 		{"trojan", V2RayTransport{Type: "httpupgrade"}},
 	} {
