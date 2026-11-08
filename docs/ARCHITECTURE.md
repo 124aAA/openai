@@ -1,6 +1,6 @@
 # QingNode 0.3.1 架构
 
-当前菜单直接连接创建、节点管理、导出、状态诊断、备份更新、服务管理；证书、设备订阅和复杂网络配置收在高级设置。菜单复用原 CLI 和配置事务，不另建状态来源或协议配置器。创建后的可选导出复用同一节点导出向导，不自动显示认证。State 保持 9，默认官方核心保持 1.14.0。本轮增加 VLESS/VMess 适配器及可选 TCP、WebSocket、gRPC、HTTPUpgrade 传输，复用既有证书、凭据与回滚机制。短流程和脚本契约见[上手指南](GETTING_STARTED.md)、[工作流程](WORKFLOWS.md)。历史第11批验证见[BATCH11.md](BATCH11.md)，不替代后续修改的验证。
+当前菜单直接连接创建、节点管理、导出、状态诊断、备份更新、服务管理；证书、设备订阅和复杂网络配置收在高级设置。菜单复用原 CLI 和配置事务，不另建状态来源或协议配置器。创建后的可选导出复用同一节点导出向导，不自动显示认证。State 保持 9，默认官方核心保持 1.14.0；没有新增协议、持久字段或界面依赖。短流程和脚本契约见[上手指南](GETTING_STARTED.md)、[工作流程](WORKFLOWS.md)。历史第11批验证见[BATCH11.md](BATCH11.md)，不替代后续修改的验证。
 
 第10批将宿主探测、包依赖、服务生命周期/定义、计划任务和防火墙效果集中到小型适配边界：`internal/platform`与既有node后端。systemd原unit保留，OpenRC使用标准supervise-daemon，订阅/监控共享服务管理接口。当前State9只因新的firewalld值升级，旧1–8只在内存迁移；协议与身份不改变。实现/实际平台证据见[PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。下方各前批描述保留历史范围。
 
@@ -56,7 +56,7 @@ install.sh：下载校验、账户/文件安装
 | firewall.go / host.go / removal.go | UFW 效果、BBR、事务卸载 |
 | internal/ui/catalog.go | 简体中文菜单文本及稳定键 |
 
-协议注册表是编译期适配，不从任意路径加载脚本。当前九种协议各自接入参数创建/交互和测试，没有宣称完全插件化；VLESS、VMess、Trojan 的传输选项复用同一套参数与导出逻辑。能力登记的outbound指客户端配置导出，远程Egress由独立受限类型处理，仍只有SOCKS5/REALITY/SS2022/HY2/WireGuard，不由协议注册表自动扩展。
+协议注册表是编译期适配，不从任意路径加载脚本。当前七协议仍各自接入参数创建/交互和测试，没有宣称完全插件化；完整英文尚未实现。能力登记的outbound指客户端配置导出，远程Egress由独立受限类型处理，仍只有SOCKS5/REALITY/SS2022/HY2/WireGuard，不由七协议注册表自动扩展。
 
 ## 交互与机器输出边界
 

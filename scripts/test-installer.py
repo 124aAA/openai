@@ -372,23 +372,14 @@ class Fixture:
             # Ctrl-D on the empty canonical input line models terminal EOF.
             master, slave = pty.openpty()
             try:
-                p = subprocess.Popen(command, env=env, stdin=slave, text=True, start_new_session=True,
+                p = subprocess.Popen(command, env=env, stdin=slave, text=True,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 os.close(slave); slave = -1
                 os.write(master, tty_input.encode())
                 try:
                     output, _ = p.communicate(timeout=35)
                 except subprocess.TimeoutExpired:
-                    # Kill descendants too: a waiting form can retain stdout
-                    # after Bash exits and otherwise block communicate forever.
-                    try:
-                        os.killpg(p.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        output, _ = p.communicate(timeout=5)
-                    except subprocess.TimeoutExpired as error:
-                        raise AssertionError('interactive installer output stayed open after process-group cleanup') from error
+                    p.kill(); output, _ = p.communicate()
                     raise AssertionError('interactive installer did not finish:\n'+output)
             finally:
                 os.close(master)
@@ -484,7 +475,7 @@ class InstallerTests(unittest.TestCase):
     def test_first_screen_cancel_and_eof_precede_every_host_operation(self):
         for answer, args in [('0\n', ()), ('\x04', ()),
                              ('\n99\n0\n', ('--reinstall', '--repo', '124aAA/openai',
-                                           '--version', RELEASE_TAG, '--core-archive', '/unused.tar.gz'))]:
+                                            '--version', RELEASE_TAG, '--core-archive', '/unused.tar.gz'))]:
             with self.subTest(answer=repr(answer), args=args):
                 f = self.fixture(); f.remote_release()
                 out = f.run(*args, online=True, tty_input=answer)

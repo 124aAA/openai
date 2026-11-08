@@ -80,23 +80,13 @@ func DecodeState(data []byte) (State, error) {
 				}
 				for _, n := range nodes {
 					for key, value := range n {
-						if header.Schema < 9 && strings.EqualFold(key, "transport") {
-							return st, errors.New("旧状态不能包含传输设置；请使用版本9")
-						}
-						if header.Schema < 9 && strings.EqualFold(key, "protocol") {
-							var protocol string
-							_ = json.Unmarshal(value, &protocol)
-							if protocol == "vless" || protocol == "vmess" {
-								return st, errors.New("旧状态不能声明 VLESS TLS 或 VMess；请使用版本9")
-							}
-						}
-						if header.Schema < 8 && (strings.EqualFold(key, "anytls") || strings.EqualFold(key, "tuic")) {
+						if header.Schema < 8 && (strings.EqualFold(key, "anytls") || strings.EqualFold(key, "tuic") || strings.EqualFold(key, "transport")) {
 							return st, errors.New("旧状态不能包含新协议设置；请使用版本8")
 						}
 						if header.Schema < 8 && strings.EqualFold(key, "protocol") {
 							var protocol string
 							_ = json.Unmarshal(value, &protocol)
-							if protocol == "anytls" || protocol == "trojan" || protocol == "ss-aead" || protocol == "tuic" {
+							if protocol == "anytls" || protocol == "trojan" || protocol == "ss-aead" || protocol == "tuic" || protocol == "vless-tls" || protocol == "vmess-tls" {
 								return st, errors.New("旧状态不能声明新协议；请使用版本8")
 							}
 						}
@@ -160,19 +150,12 @@ func DecodeState(data []byte) (State, error) {
 // MigrateState is deterministic and has no disk, identity or runtime effects.
 // The caller must retain original bytes when persisting a newly migrated state.
 func MigrateState(st State) (State, error) {
-	if st.Schema < 9 {
-		for _, n := range st.Nodes {
-			if n.Transport != nil || n.Protocol == "vless" || n.Protocol == "vmess" {
-				return State{}, errors.New("旧状态不能包含新增协议或传输设置")
-			}
-		}
-	}
 	if st.Schema < 9 && st.Firewall == "firewalld" {
 		return State{}, errors.New("旧状态不能声明firewalld受管模式")
 	}
 	if st.Schema < 8 {
 		for _, n := range st.Nodes {
-			if n.AnyTLS != nil || n.TUIC != nil || n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" {
+			if n.AnyTLS != nil || n.TUIC != nil || n.Transport != nil || n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls" {
 				return State{}, errors.New("旧状态不能包含新协议字段或类型")
 			}
 		}

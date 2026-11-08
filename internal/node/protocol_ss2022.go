@@ -28,7 +28,7 @@ func validateSS2022(n Node) error {
 	if s == nil || s.Method != SS2022Method || !validSSKey(s.ServerKey) {
 		return errors.New("SS2022 需要 AES-256-GCM 方法和 32 字节 Base64 服务密钥")
 	}
-	if n.Reality != nil || n.Certificate != nil {
+	if n.Reality != nil || n.Certificate != nil || n.Transport != nil {
 		return errors.New("SS2022 不使用 REALITY 或 TLS 证书参数")
 	}
 	for _, u := range n.Users {

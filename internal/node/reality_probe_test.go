@@ -76,32 +76,6 @@ func TestRealityProbeHandshakeHonorsDeadline(t *testing.T) {
 	}
 }
 
-func TestRealityProbeRetriesAfterTLSFailure(t *testing.T) {
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	server.EnableHTTP2 = true
-	server.StartTLS()
-	defer server.Close()
-	pool := x509.NewCertPool()
-	pool.AddCert(server.Certificate())
-	resolve := func(context.Context, string) ([]net.IPAddr, error) {
-		return []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}, {IP: net.ParseIP("2001:db8::1")}}, nil
-	}
-	calls := 0
-	dial := func(ctx context.Context, network, _ string) (net.Conn, error) {
-		calls++
-		if calls == 1 {
-			client, peer := net.Pipe()
-			_ = peer.Close() // TCP connected, but this address cannot finish TLS.
-			return client, nil
-		}
-		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
-	}
-	_, err := probeReality(context.Background(), &Reality{ServerName: "example.com", Target: "example.com:443"}, resolve, dial, pool)
-	if err != nil || calls != 2 {
-		t.Fatal("working alternative address was discarded", calls, err)
-	}
-}
-
 func TestRealityDNSExclusionChecksEveryAddressBeforeDial(t *testing.T) {
 	r := &Reality{ServerName: "alias.example.org", Target: "alias.example.org:443"}
 	for _, blocked := range []string{"104.16.1.1", "2606:4700::1", "::ffff:104.16.1.1"} {

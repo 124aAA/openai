@@ -11,7 +11,7 @@ import (
 	"syscall"
 )
 
-var version = "0.3.2"
+var version = "0.4.0"
 var revision = "source"
 
 func main() {

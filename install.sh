@@ -11,7 +11,7 @@ ROTATION=/etc/logrotate.d/qingnode
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.3.2 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.4.0 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 VERSION_EXPLICIT=0
 INIT_ARGS=()
 QN_RECOVERING=0
@@ -21,7 +21,7 @@ ACCOUNT_RECORD=/var/backups/qingnode/.qingnode-account
 step() { printf '[%s/8] %s\n' "$1" "$2"; }
 while (($#)); do
   case "$1" in
-    --repo|--version|--server|--sni|--port|--connect-port|--core-archive|--name|--protocol|--listen|--target|--fingerprint|--cert|--key|--acme-email|--user|--certificate-id|--method|--transport|--transport-path|--transport-host|--grpc-service-name)
+    --repo|--version|--server|--sni|--port|--connect-port|--core-archive|--name|--protocol|--listen|--target|--fingerprint|--cert|--key|--acme-email|--user|--certificate-id|--method|--transport|--path|--transport-host|--service-name)
       (($# >= 2)) || { echo '参数缺少值' >&2; exit 2; }
       case "$1" in
         --repo) REPO=$2;; --version) VERSION=$2; VERSION_EXPLICIT=1;;
@@ -38,11 +38,11 @@ while (($#)); do
       echo '自动安装：sudo bash install.sh --auto（跳过选择，自动搭建 REALITY）'
       echo '本地安装：sudo bash install.sh [--server 公网IP --sni 目标域名 --port 443]'
       echo 'SS2022：sudo bash install.sh --protocol ss2022 --server 公网IP --random-port'
-      echo 'VLESS/VMess/Trojan：--transport tcp|ws|grpc；WS用--transport-path/--transport-host，gRPC用--grpc-service-name。'
+      echo 'TLS/传输组合：sudo bash install.sh --protocol vless-ws-tls --server 域名 --sni 域名 --acme-email 邮箱'
       echo 'NAT：--listen 本地IP --port 本地端口 --connect-port 外部端口；仅声明，不修改云NAT。'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
       echo '默认在线入口选择已公开的最新正式发行；完整本地包不联网选择版本。'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.3.1 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.4.0 [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
@@ -57,23 +57,32 @@ fi
 if ((HAS_ARGS==0 && REINSTALL==0)) && [[ -x $BIN && -f $ROOT/.qingnode-owner && $(cat "$ROOT/.qingnode-owner") == "$OWNER" ]]; then exec "$BIN"; fi
 if ((${#INIT_ARGS[@]}==0)) && [[ ! -e $ROOT/current ]]; then
   [[ -t 0 ]] || { echo '首次安装需要交互终端选择协议；无人值守请加 --auto，或提供完整初始化参数。' >&2; exit 2; }
-  printf '\nQingNode 青节点 — 请选择要搭建的节点\n1. VLESS REALITY / Vision（无需自己的域名）\n2. Shadowsocks 2022（客户端需支持 SS2022）\n3. Hysteria2（UDP，需要域名及证书）\n5. Trojan（标准TLS，可选WebSocket/gRPC）\n8. VLESS + TLS（可选WebSocket/gRPC，需要证书）\nm. 更多协议：AnyTLS、传统SS、TUIC、VMess\n0. 退出，不安装\n'
+  printf '\nQingNode 青节点 — 请选择要搭建的节点\n1. VLESS REALITY / Vision（无需自己的域名，自动筛选伪装目标）\n2. Shadowsocks 2022（无需域名，客户端需支持 SS2022）\n3. Hysteria2（UDP，需要域名及证书）\n4. AnyTLS（TCP监听，需要证书）\n5. Trojan（标准TLS，支持TCP/WS/gRPC/HTTPUpgrade）\n6. 传统 SS AEAD（默认AES-256-GCM）\n7. TUIC v5（UDP/QUIC，需要证书）\n8. VLESS + TLS（标准TLS，支持TCP/WS/gRPC/HTTPUpgrade）\n9. VMess + TLS（AEAD，支持TCP/WS/gRPC/HTTPUpgrade）\nm. 查看 WS / gRPC / HTTPUpgrade 组合简写\n0. 退出，不安装\n'
   while :; do
-    printf '选择编号、m查看全部，或0：'
+    printf '选择 [1至9、m、组合简写，或0]：'
     if ! read -r choice; then echo '已取消，未开始安装。'; exit 0; fi
     case "$choice" in
-      1) INIT_ARGS=(--auto --protocol reality); break;;
-      2) INIT_ARGS=(--auto --protocol ss2022); break;;
-      3) WIZARD_PROTOCOL=hysteria2; break;;
-      4) WIZARD_PROTOCOL=anytls; break;;
-      5) WIZARD_PROTOCOL=trojan; break;;
-      6) INIT_ARGS=(--auto --protocol ss-aead); break;;
-      7) WIZARD_PROTOCOL=tuic; break;;
-      8) WIZARD_PROTOCOL=vless; break;;
-      9) WIZARD_PROTOCOL=vmess; break;;
-      m) printf '4. AnyTLS（需要证书及支持的客户端）\n6. 传统 SS AEAD（无需证书）\n7. TUIC v5（UDP，需要证书）\n9. VMess + TLS（可选WebSocket/gRPC，需要证书）\n';;
+      1|reality) INIT_ARGS=(--auto --protocol reality); break;;
+      2|ss2022) INIT_ARGS=(--auto --protocol ss2022); break;;
+      3|hysteria2) WIZARD_PROTOCOL=hysteria2; break;;
+      4|anytls) WIZARD_PROTOCOL=anytls; break;;
+      5|trojan) WIZARD_PROTOCOL=trojan; break;;
+      6|ss-aead) INIT_ARGS=(--auto --protocol ss-aead); break;;
+      7|tuic) WIZARD_PROTOCOL=tuic; break;;
+      8|vless-tls) WIZARD_PROTOCOL=vless-tls; break;;
+      9|10|vmess-tls) WIZARD_PROTOCOL=vmess-tls; break;;
+      w1|vless-ws-tls) WIZARD_PROTOCOL=vless-ws-tls; break;;
+      w2|vless-grpc-tls) WIZARD_PROTOCOL=vless-grpc-tls; break;;
+      w3|vless-httpupgrade-tls) WIZARD_PROTOCOL=vless-httpupgrade-tls; break;;
+      w4|vmess-ws-tls) WIZARD_PROTOCOL=vmess-ws-tls; break;;
+      w5|vmess-grpc-tls) WIZARD_PROTOCOL=vmess-grpc-tls; break;;
+      w6|trojan-ws-tls) WIZARD_PROTOCOL=trojan-ws-tls; break;;
+      w7|trojan-grpc-tls) WIZARD_PROTOCOL=trojan-grpc-tls; break;;
+      w8|vmess-httpupgrade-tls) WIZARD_PROTOCOL=vmess-httpupgrade-tls; break;;
+      w9|trojan-httpupgrade-tls) WIZARD_PROTOCOL=trojan-httpupgrade-tls; break;;
+      m) printf '支持直接输入：w1(vless-ws-tls) w2(vless-grpc-tls) w3(vless-httpupgrade-tls) w4(vmess-ws-tls) w5(vmess-grpc-tls) w6(trojan-ws-tls) w7(trojan-grpc-tls) w8(vmess-httpupgrade-tls) w9(trojan-httpupgrade-tls)\n';;
       0) echo '已取消，未开始安装。'; exit 0;;
-      *) echo '请输入 1 至 9、m，或 0；尚未开始安装。';;
+      *) echo '请输入 1 至 9、m、组合简写，或 0；尚未开始安装。';;
     esac
   done
 fi

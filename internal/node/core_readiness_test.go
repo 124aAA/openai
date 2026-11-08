@@ -38,7 +38,7 @@ func coreListenerRequirements(config []byte) ([]coreListener, error) {
 		}
 		var networks []string
 		switch inbound.Type {
-		case "mixed", "socks", "http", "vless", "vmess", "anytls", "trojan":
+		case "mixed", "socks", "http", "vless", "anytls", "trojan":
 			networks = []string{"tcp"}
 		case "hysteria2", "tuic":
 			networks = []string{"udp"}
@@ -159,8 +159,8 @@ func waitCoreListeners(pid int, config []byte, exited <-chan struct{}, timeout t
 }
 
 func TestCoreListenerRequirements(t *testing.T) {
-	listeners, e := coreListenerRequirements([]byte(`{"inbounds":[{"type":"mixed","listen_port":10001},{"type":"hysteria2","listen_port":10002},{"type":"shadowsocks","listen_port":10003},{"type":"vmess","listen_port":10004}]}`))
-	if e != nil || len(listeners) != 5 || listeners[0] != (coreListener{"tcp", 10001}) || listeners[1] != (coreListener{"udp", 10002}) || listeners[2] != (coreListener{"tcp", 10003}) || listeners[3] != (coreListener{"udp", 10003}) || listeners[4] != (coreListener{"tcp", 10004}) {
+	listeners, e := coreListenerRequirements([]byte(`{"inbounds":[{"type":"mixed","listen_port":10001},{"type":"hysteria2","listen_port":10002},{"type":"shadowsocks","listen_port":10003}]}`))
+	if e != nil || len(listeners) != 4 || listeners[0] != (coreListener{"tcp", 10001}) || listeners[1] != (coreListener{"udp", 10002}) || listeners[2] != (coreListener{"tcp", 10003}) || listeners[3] != (coreListener{"udp", 10003}) {
 		t.Fatal("actual TCP/UDP inbound requirements lost", listeners, e)
 	}
 	for _, raw := range []string{`{}`, `{"inbounds":[{"type":"hysteria2","listen_port":0}]}`, `{"inbounds":[{"type":"tun","listen_port":10001}]}`} {

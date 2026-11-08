@@ -15,10 +15,10 @@ type Adapter struct {
 }
 
 var adapters = map[string]Adapter{
-	"vless":     {[]string{"tcp"}, v2rayCredential, validateV2RayTLS, v2rayInbound, vlessURI, v2rayOutbound, v2rayMihomo},
-	"vmess":     {[]string{"tcp"}, v2rayCredential, validateV2RayTLS, v2rayInbound, vmessURI, v2rayOutbound, v2rayMihomo},
 	"anytls":    {[]string{"tcp"}, anytlsCredential, validateAnyTLS, anytlsInbound, anytlsURI, anytlsOutbound, anytlsMihomo},
 	"trojan":    {[]string{"tcp"}, trojanCredential, validateTrojan, trojanInbound, trojanURI, trojanOutbound, trojanMihomo},
+	"vless-tls": {[]string{"tcp"}, vlessTLSCredential, validateVLESSTLS, vlessTLSInbound, vlessTLSURI, vlessTLSOutbound, vlessTLSMihomo},
+	"vmess-tls": {[]string{"tcp"}, vmessTLSCredential, validateVMessTLS, vmessTLSInbound, vmessTLSURI, vmessTLSOutbound, vmessTLSMihomo},
 	"ss-aead":   {[]string{"tcp", "udp"}, ssAEADCredential, validateSSAEAD, ssAEADInbound, ssAEADURI, ssAEADOutbound, ssAEADMihomo},
 	"tuic":      {[]string{"udp"}, tuicCredential, validateTUIC, tuicInbound, tuicURI, tuicOutbound, tuicMihomo},
 	"reality":   {[]string{"tcp"}, realityCredential, validateReality, realityInbound, realityURI, realityOutbound, realityMihomo},

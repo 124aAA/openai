@@ -401,7 +401,7 @@ func (p GraphProfile) SupportsNetwork(network string) bool {
 		switch m.kind {
 		case "hysteria2", "tuic", "wireguard":
 			needTCP, needUDP = false, true
-		case "vless", "vmess", "anytls", "trojan":
+		case "vless", "anytls", "trojan":
 			needTCP, needUDP = true, false
 		case "socks":
 			needTCP = needTCP || needUDP // UDP ASSOCIATE needs a TCP control channel.
@@ -447,7 +447,7 @@ func StartGraphSandbox(ctx context.Context, p GraphProfile, opts SandboxOptions)
 	for _, raw := range p.Outbounds {
 		var o graphOutbound
 		_ = json.Unmarshal(raw, &o)
-		kinds = append(kinds, o.outbound.coreKind())
+		kinds = append(kinds, o.Type)
 	}
 	if len(p.Endpoints) > 0 {
 		kinds = append(kinds, "wireguard")

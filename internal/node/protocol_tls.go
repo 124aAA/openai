@@ -24,9 +24,6 @@ func safeTLSCredential(u User) error {
 // validateTLSNode is also used by restore, where externally owned certificate
 // files may be checked later on the destination host. All other rules still run.
 func validateTLSNode(n Node, checkExternalFiles bool) error {
-	if err := ValidateV2RayTransport(n.Protocol, n.Transport); err != nil {
-		return err
-	}
 	if n.Certificate == nil || !ValidHost(n.Certificate.ServerName) {
 		return errors.New("TLS 代理需要有效证书名称")
 	}
@@ -41,12 +38,11 @@ func validateTLSNode(n Node, checkExternalFiles bool) error {
 			return err
 		}
 	}
+	if err := validateTransport(n); err != nil {
+		return err
+	}
 	for _, u := range n.Users {
-		if n.Protocol == "vless" || n.Protocol == "vmess" {
-			if !uuidRE.MatchString(u.UUID) || u.Password != "" {
-				return errors.New("VLESS/VMess 需要有效 UUID，不能混入密码")
-			}
-		} else if err := safeTLSCredential(u); err != nil {
+		if err := safeTLSCredential(u); err != nil {
 			return err
 		}
 	}
@@ -56,9 +52,6 @@ func validateTLSNode(n Node, checkExternalFiles bool) error {
 func tlsInbound(n Node, root string) M {
 	c := n.Certificate
 	tls := M{"enabled": true, "server_name": c.ServerName}
-	if alpn := transportALPN(n.Transport); len(alpn) != 0 {
-		tls["alpn"] = alpn
-	}
 	switch c.Mode {
 	case "pem":
 		tls["certificate"], tls["key"] = []string{c.CertPEM}, []string{c.KeyPEM}
@@ -71,11 +64,7 @@ func tlsInbound(n Node, root string) M {
 }
 
 func tlsOutbound(n Node) M {
-	tls := M{"enabled": true, "server_name": n.Certificate.ServerName}
-	if alpn := transportALPN(n.Transport); len(alpn) != 0 {
-		tls["alpn"] = alpn
-	}
-	return tls
+	return M{"enabled": true, "server_name": n.Certificate.ServerName}
 }
 
 func tlsPasswordUsers(n Node) []any {

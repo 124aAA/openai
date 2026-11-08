@@ -43,8 +43,8 @@ sudo qingnode
 
 | 编号 | 入口 | 用途 |
 | --- | --- | --- |
-| 1 | 创建节点 | 直接选择协议；`h` 帮我选，`n` 设置 NAT，`?` 查看详细能力 |
-| 2 | 节点管理 | 查看、添加、修改地址/端口、启停、删除与凭据管理 |
+| 1 | 创建节点 | 直接选择协议或输入 `m` 选择传输组合；`h` 帮我选，`n` 设置 NAT，`?` 查看详细能力 |
+| 2 | 节点管理 | 查看、添加、修改地址/端口/传输参数、启停、删除、凭据管理与直接导出 |
 | 3 | 导出链接、二维码或配置 | 直接选择节点，导出链接、二维码或客户端配置 |
 | 4 | 状态与诊断 | 运行状态、监听端口、自检、测速与监控结果 |
 | 5 | 备份与更新 | 加密备份、恢复、更新管理器/核心、回退与卸载 |
@@ -53,26 +53,26 @@ sudo qingnode
 | 8 / 9 | 刷新 / 检查更新 | 8 只读本机；9 联网查询，不自动升级 |
 | 0 | 退出 | 结束菜单 |
 
-创建时通常只需填写名称、客户端连接地址和协议必要参数。端口可用默认 `auto`；REALITY 握手目标也可用 `auto` 自动筛选。UUID、密码和密钥由程序生成并保存，普通修改不会重新生成它们。
+创建时通常只需填写名称、客户端连接地址、证书域名（`--sni`，TLS 协议）和端口。端口可用默认 `auto`；REALITY 握手目标也可用 `auto` 自动筛选。协议从原来的 7 种扩展为 **9 种底层协议**（新增 `VLESS + TLS`、`VMess + TLS`），`VLESS + TLS` 与 `VMess + TLS` 各支持直连（`tcp`）、WebSocket（`ws`）、gRPC（`grpc`）、HTTPUpgrade（`httpupgrade`），`Trojan` 新增 `ws`、`grpc`、`httpupgrade` 三种传输，共 **11 个新组合**。`--port` 填服务器本机监听端口；仅在 NAT 端口映射且外部端口不同时才需填写 `--connect-port`（或菜单先选 `n`）。UUID、密码和密钥由程序生成并保存，普通修改不会重新生成它们。
 
 协议默认只显示简要条件；详细限制按需查看：
 
 | 协议 | 主要条件 |
 | --- | --- |
 | REALITY / Vision | 无需自己的域名或证书；客户端支持，服务器可访问适用握手目标 |
+| VLESS + TLS / VMess + TLS | 标准 TLS 证书；支持直连 TCP、WebSocket（`ws`）、gRPC（`grpc`）、HTTPUpgrade（`httpupgrade`）；VMess 支持标准 URI 与 `v2rayN`（`vmess-v2rayn`）导出 |
 | Shadowsocks 2022 | 无需证书；客户端支持 SS2022 多用户密码格式 |
 | 传统 SS AEAD | 客户端支持相同的现代 AEAD 加密方法 |
-| Hysteria2 / TUIC | 可信 TLS 证书、UDP 入口和匹配客户端；TUIC 没有通用分享 URI |
-| AnyTLS / Trojan | TLS 证书及匹配客户端；部分高级设置需完整配置 |
-| VLESS / VMess + TLS | 可信证书；VLESS 和 VMess 支持 TLS 直连、WebSocket、gRPC，VLESS 另提供高级 HTTPUpgrade |
+| Hysteria2 / TUIC | 可信 TLS 证书、UDP 入口和匹配客户端；TUIC 没有通用分享 URI，需导出完整配置 |
+| AnyTLS / Trojan | TLS 证书及匹配客户端；Trojan 支持直连 TCP 及 `ws`/`grpc`/`httpupgrade` 传输组合 |
 
-列表输入 `0` 返回；表单按提示输入 `:cancel` 取消，提交前不会创建半个节点。删除、恢复、轮换密钥和卸载仍需明确确认。协议细节见[协议说明](docs/PROTOCOLS.md)，NAT 与 IPv6 见[连接端点](docs/ENDPOINTS.md)。
+列表输入 `0` 返回；表单按提示输入 `:cancel` 取消，提交前不会创建半个节点。删除、恢复、轮换密钥和卸载仍需明确确认。完整菜单示例见[上手指南](docs/GETTING_STARTED.md)，协议细节见[协议说明](docs/PROTOCOLS.md)，NAT 与 IPv6 见[连接端点](docs/ENDPOINTS.md)。
 
 ## 导出给客户端
 
-**在菜单中创建成功后，选择 `1 立即导出`，即可继续导出刚创建的节点；默认 `0 返回`，不会自动显示凭据。** 以后直接进入主菜单 `3 导出链接、二维码或配置`，无需逐层寻找。静默创建不显示摘要；需要导出时运行 `qingnode info` 查看对应命令。
+**在菜单中创建成功后，选择 `1 立即导出`，即可继续获取刚创建节点的分享链接、终端二维码或完整客户端配置；默认 `0 返回`，不会自动显示凭据。** 以后直接进入主菜单 `3 导出链接、二维码或配置`（或 `2 节点管理 → 10`），无需逐层寻找。静默创建不显示摘要；需要导出时运行 `qingnode info` 查看对应命令。
 
-选择自己的凭据，再选链接、二维码或完整配置；可以保存为新私有文件。二维码在本机生成，不发送到外部网站。终端太窄导致二维码换行时，改用链接或配置文件。
+选择自己的凭据，再选链接、二维码或完整配置；可以保存为新私有文件。二维码在本机生成，不发送到外部网站；若 SSH 终端过窄导致二维码折行，请拉宽终端或改用分享链接/配置文件。
 
 也可直接使用命令，先用 `list` 找到真实节点 ID；示例中的 `NODE_ID`、`USER_ID` 和输出路径都需替换：
 
@@ -80,13 +80,15 @@ sudo qingnode
 sudo qingnode list
 sudo qingnode info --id NODE_ID
 sudo qingnode export --id NODE_ID --user USER_ID --format uri --out /root/node-link.txt
+sudo qingnode export --id NODE_ID --user USER_ID --format vmess-v2rayn --out /root/vmess-v2rayn.txt # 仅 VMess 节点
+sudo qingnode qr --id NODE_ID --user USER_ID
 sudo qingnode export --id NODE_ID --user USER_ID --format sing-box --client-version 1.14.0 --out /root/node-client.json
 sudo qingnode export --id NODE_ID --user USER_ID --format mihomo --client-version 1.19.30 --out /root/node-client.yaml
 ```
 
 把文件安全传到设备并从客户端的本地配置入口导入。分享链接、二维码和配置都含认证信息，不能公开；已有输出文件会被拒绝覆盖。普通 `info` 默认隐藏凭据，确需查看时显式使用 `--show-secrets`。
 
-URI 无法表达的高级设置请使用完整配置；`provider` 片段不是可独立运行的完整客户端配置。设备多节点配置和在线订阅是可选能力，在 `6 高级设置 → 设备与订阅` 中管理，详见[导出与订阅](docs/SUBSCRIPTIONS.md)。
+适用范围区分：标准 URI 与二维码适合常规单节点导入；`tuic`、配置了连接池参数的 `anytls`、非默认速率的 `hysteria2` 及静态 Ed25519 证书节点请使用完整 `sing-box` JSON 或 `mihomo` YAML 配置；`provider` 片段不是可独立运行的完整客户端配置。设备多节点配置和在线订阅是可选能力，在 `6 高级设置 → 设备与订阅` 中管理，详见[导出与订阅](docs/SUBSCRIPTIONS.md)。
 
 ## 连不上时怎么查
 
@@ -118,7 +120,7 @@ sudo qingnode firewall status # 本机防火墙和所需端口
 | 预览备份恢复 | `sudo qingnode restore --file /root/config.qnbak --preview` |
 | 确认恢复备份 | `sudo qingnode restore --file /root/config.qnbak --yes` |
 
-先在 [Releases](https://github.com/124aAA/openai/releases) 核对目标版本。默认核心为 1.14.0，只在已适配的 1.14.x 范围内更新；不会自动跨兼容线升级。更新管理器保留节点身份和凭据，完成后重新打开菜单。需要重装时，在已校验的完整包中运行 `sudo bash install.sh --reinstall`，保留现有参数和运行/自启选择。
+先在 [Releases](https://github.com/124aAA/openai/releases) 核对目标版本。升级请遵循**先备份（`sudo qingnode backup`）→ 再升级（`self-update` 或 `install.sh --reinstall`）→ 最后检查旧节点是否正常（`sudo qingnode status`、`check`、`list` 及客户端实测）**的流程。默认核心为 1.14.0，只在已适配的 1.14.x 范围内更新；不会自动跨兼容线升级。更新管理器保留节点身份和凭据，完成后重新打开菜单。需要重装时，在已校验的完整包中运行 `sudo bash install.sh --reinstall`，保留现有参数和运行/自启选择。
 
 备份口令至少 12 字节，交互输入不回显；自动化使用权限 `0600` 的 `--password-file`，不要把口令写到命令行。恢复前会备份当前配置，验证或启动失败走现有回滚流程。重要备份请复制到 VPS 之外并保管口令。
 

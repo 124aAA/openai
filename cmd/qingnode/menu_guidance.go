@@ -8,8 +8,9 @@ import (
 )
 
 type protocolSelection struct {
-	Protocol string
-	NAT      bool
+	Protocol  string
+	Transport string
+	NAT       bool
 }
 type protocolConditions struct {
 	Client, Certificate, TCP, UDP, NAT, Resources string
@@ -98,34 +99,32 @@ func (a *app) guidedProtocol() (protocolSelection, error) {
 		return protocolSelection{}, err
 	}
 	for {
-		choice, err := a.wizardPrompt("协议（留空采用建议；可输入1–9或协议名称；0返回）", protocol)
+		choice, err := a.wizardPrompt("协议（留空采用建议；可输入编号或协议名称；0返回）", protocol)
 		if err != nil {
 			return protocolSelection{}, err
 		}
 		if choice == "0" {
 			return protocolSelection{}, errMenuCanceled
 		}
-		for _, candidate := range protocolMenuChoices {
-			if choice != candidate.protocol && choice != candidate.number {
+		cand, ok := matchMenuProtocolChoice(choice)
+		if ok {
+			if reason := status.unavailableReason(cand.protocol); reason != "" {
+				a.message("WARN", reason)
 				continue
 			}
-			if reason := status.unavailableReason(candidate.protocol); reason != "" {
-				a.message("WARN", reason)
-				break
-			}
-			if c.TCP == "no" && candidate.protocol != "hysteria2" && candidate.protocol != "tuic" {
+			if c.TCP == "no" && cand.protocol != "hysteria2" && cand.protocol != "tuic" {
 				a.message("WARN", "所填条件没有TCP入口，此协议不能在这里提供完整TCP业务；请改选或先补齐TCP映射。")
-				break
+				continue
 			}
-			if c.UDP == "no" && (candidate.protocol == "hysteria2" || candidate.protocol == "tuic") {
+			if c.UDP == "no" && (cand.protocol == "hysteria2" || cand.protocol == "tuic") {
 				a.message("WARN", "所填条件只有TCP，此UDP监听协议当前不能部署；请改选或先核实UDP条件。")
-				break
+				continue
 			}
-			if c.Certificate == "none" && candidate.protocol != "reality" && candidate.protocol != "ss2022" && candidate.protocol != "ss-aead" {
+			if c.Certificate == "none" && cand.protocol != "reality" && cand.protocol != "ss2022" && cand.protocol != "ss-aead" {
 				a.message("WARN", "所填条件没有TLS证书；请先准备证书资源，或选择不需要自有证书的协议。")
-				break
+				continue
 			}
-			return protocolSelection{candidate.protocol, c.NAT == "nat"}, nil
+			return protocolSelection{Protocol: cand.protocol, Transport: cand.transport, NAT: c.NAT == "nat"}, nil
 		}
 		a.message("WARN", "协议未选定；可修改选择，尚未安装核心或创建节点。")
 	}

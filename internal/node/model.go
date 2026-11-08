@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -78,7 +77,7 @@ type Node struct {
 	HY2                 *HY2Performance      `json:"hysteria2,omitempty"`
 	AnyTLS              *AnyTLSOptions       `json:"anytls,omitempty"`
 	TUIC                *TUICOptions         `json:"tuic,omitempty"`
-	Transport           *V2RayTransport      `json:"transport,omitempty"`
+	Transport           *TransportOptions    `json:"transport,omitempty"`
 	CreatedAt           string               `json:"created_at,omitempty"`
 	UpdatedAt           string               `json:"updated_at,omitempty"`
 }
@@ -210,11 +209,11 @@ func (s State) validate(deferExternalFiles bool) error {
 	ids := map[string]bool{}
 	names := map[string]bool{}
 	for _, n := range s.Nodes {
-		if err := ValidateV2RayTransport(n.Protocol, n.Transport); err != nil {
-			return err
-		}
 		if n.AnyTLS != nil && n.Protocol != "anytls" || n.TUIC != nil && n.Protocol != "tuic" {
 			return errors.New("协议专用设置不能用于其他协议")
+		}
+		if err := validateTransport(n); err != nil {
+			return fmt.Errorf("节点 %s：%w", n.Name, err)
 		}
 		if err := ValidateNodeTags(n.Tags); err != nil {
 			return err
@@ -264,15 +263,17 @@ func (s State) validate(deferExternalFiles bool) error {
 			}
 			users[u.ID] = true
 			unames[u.Name] = true
-			c := strings.ToLower(u.UUID) + "/" + u.Password
+			c := u.UUID + "/" + u.Password
 			if credentials[c] {
 				return errors.New("同一节点的认证信息重复")
 			}
 			credentials[c] = true
 		}
 		var protocolErr error
-		if deferExternalFiles && (n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "vless" || n.Protocol == "vmess") {
+		if deferExternalFiles && (n.Protocol == "anytls" || n.Protocol == "trojan") {
 			protocolErr = validateTLSNode(n, false)
+		} else if deferExternalFiles && (n.Protocol == "vless-tls" || n.Protocol == "vmess-tls") {
+			protocolErr = validateTLSUUIDNode(n, false)
 		} else if deferExternalFiles && n.Protocol == "hysteria2" {
 			protocolErr = validateHysteriaCertificate(n, false)
 		} else if deferExternalFiles && n.Protocol == "tuic" {

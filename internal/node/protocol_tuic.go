@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// Persist server and client choices independently. The first Batch09 schema
+// reserves no raw core fields: only these explicitly supported options enter it.
+type TUICOptions struct {
+	ServerCongestionControl string `json:"server_congestion_control,omitempty"`
+	ClientCongestionControl string `json:"client_congestion_control,omitempty"`
+	AuthTimeout             string `json:"auth_timeout,omitempty"`
+	ServerHeartbeat         string `json:"server_heartbeat,omitempty"`
+	ClientHeartbeat         string `json:"client_heartbeat,omitempty"`
+	UDPRelayMode            string `json:"udp_relay_mode,omitempty"`
+	ZeroRTTHandshake        *bool  `json:"zero_rtt_handshake,omitempty"`
+}
+
 func tuicCredential(u *User) {
 	realityCredential(u)
 	u.Password = Token(24)
@@ -19,7 +31,7 @@ func validateTUICCertificate(n Node, checkExternalFiles bool) error {
 	if n.Certificate == nil || !ValidHost(n.Certificate.ServerName) {
 		return errors.New("TUIC 需要有效证书名称")
 	}
-	if n.Reality != nil || n.Shadowsocks != nil || n.HY2 != nil || n.AnyTLS != nil {
+	if n.Reality != nil || n.Shadowsocks != nil || n.HY2 != nil || n.AnyTLS != nil || n.Transport != nil {
 		return errors.New("TUIC 不能混入其他协议参数")
 	}
 	if err := validateTUICOptions(n.TUIC); err != nil {

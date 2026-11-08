@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"qingnode/internal/node"
@@ -29,7 +28,7 @@ func defaultAutoProbes() autoProbes {
 func autoEndpoint(protocol, host, sni, target string, probes autoProbes) (string, string, string, error) {
 	fail := func(e error) (string, string, string, error) { return "", "", "", e }
 	if _, ok := node.Protocol(protocol); !ok {
-		return fail(errors.New("不支持该协议；可用 " + strings.Join(node.Protocols(), "、")))
+		return fail(errors.New("不支持该协议；可用 reality、ss2022、hysteria2、anytls、trojan、ss-aead、tuic、vless-tls、vmess-tls"))
 	}
 	if protocol == "reality" && target != "" && sni == "" {
 		return fail(errors.New("显式 --target 必须搭配 --sni，不能推测目标证书名称"))

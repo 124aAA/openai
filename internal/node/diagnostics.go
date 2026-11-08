@@ -137,6 +137,10 @@ func PublicIP(family string) (string, error) {
 	network := "tcp4"
 	if family == "6" {
 		host = "https://api6.ipify.org"
+		network := "tcp6"
+		_ = network
+	}
+	if family == "6" {
 		network = "tcp6"
 	}
 	d := net.Dialer{Timeout: 4 * time.Second}

@@ -22,7 +22,7 @@ func validateReality(n Node) error {
 	if r == nil || !ValidHost(r.ServerName) || net.ParseIP(r.ServerName) != nil {
 		return errors.New("REALITY 需要有效 SNI 域名")
 	}
-	if n.Certificate != nil || n.Shadowsocks != nil {
+	if n.Certificate != nil || n.Shadowsocks != nil || n.Transport != nil {
 		return errors.New("REALITY 不接受其他协议的私密参数")
 	}
 	switch Fingerprint(r) {

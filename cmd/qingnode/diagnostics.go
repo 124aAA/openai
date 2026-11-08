@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,10 +9,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -34,15 +37,21 @@ func (a *app) message(level, text string) {
 	}
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", color, ui.WrapText("["+level+"] "+text, ui.Width(os.Stderr)), end)
 }
-func (a *app) safeText(text string, s node.State) string {
+func (a *app) allStates(s node.State) []node.State {
 	states := []node.State{s}
+	if a.store == nil || a.store.Root == "" {
+		return states
+	}
 	paths, _ := filepath.Glob(filepath.Join(a.store.Root, "generations", "g-*", "state.json"))
 	for _, p := range paths {
 		if old, e := node.ReadState(p); e == nil {
 			states = append(states, old)
 		}
 	}
-	return node.Redact(text, states...)
+	return states
+}
+func (a *app) safeText(text string, s node.State) string {
+	return node.Redact(text, a.allStates(s)...)
 }
 func redact(text string, s node.State) string { return node.Redact(text, s) }
 func (a *app) recentLogs(s node.State) {
@@ -227,16 +236,16 @@ func (a *app) info(args []string) error {
 			fmt.Fprintf(w, "\n节点：%s\nID：%s\n协议：%s\n服务器：%s\n监听：%s (%s)\n启用：%t\n", n.Name, n.ID, n.Protocol, n.Host, net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), strings.Join(node.Networks(n), "+"), n.Enabled)
 			fmt.Fprintf(w, "出口：%s；最终客户端仅使用此入口地址与入口凭据，内部出口凭据不会加入分享。\n", displayEgress(n.EgressID))
 			fmt.Fprintf(w, "客户端端口：%d\n传输协议：%s\n", node.EffectiveConnectPort(n), strings.Join(node.Networks(n), "+"))
-			if transport := n.Transport; transport != nil {
-				fmt.Fprintf(w, "代理传输：%s\n", transport.Type)
-				if transport.Path != "" {
-					fmt.Fprintf(w, "传输路径：%s\n", transport.Path)
+			if node.EffectiveTransport(n) != "tcp" && n.Transport != nil {
+				fmt.Fprintf(w, "应用层传输：%s\n", node.TransportName(node.EffectiveTransport(n)))
+				if n.Transport.Path != "" {
+					fmt.Fprintf(w, "传输路径：%s\n", n.Transport.Path)
 				}
-				if transport.Host != "" {
-					fmt.Fprintf(w, "HTTP Host：%s\n", transport.Host)
+				if n.Transport.Host != "" {
+					fmt.Fprintf(w, "传输 Host：%s\n", n.Transport.Host)
 				}
-				if transport.ServiceName != "" {
-					fmt.Fprintf(w, "gRPC服务名：%s\n", transport.ServiceName)
+				if n.Transport.ServiceName != "" {
+					fmt.Fprintf(w, "gRPC ServiceName：%s\n", n.Transport.ServiceName)
 				}
 			}
 			fmt.Fprintln(w, "本地监听用于端口检查与防火墙；连接端点用于客户端，NAT/云安全组与公网入站尚需独立验证。")
@@ -258,10 +267,9 @@ func (a *app) info(args []string) error {
 				}
 			}
 			fmt.Fprintf(w, "创建时间：%s\n更新时间：%s\n", n.CreatedAt, n.UpdatedAt)
-			uriAvailable := len(node.ProtocolExportWarnings(n, "uri")) == 0 && len(node.HY2ExportWarnings(n, "uri")) == 0
 			for _, u := range n.Users {
 				fmt.Fprintf(w, "凭据：%s (%s)\n", u.Name, u.ID)
-				if uriAvailable {
+				if len(node.ProtocolExportWarnings(n, "uri")) == 0 {
 					fmt.Fprintf(w, "导出链接：qingnode export --id %s --format uri --user %s\n", n.ID, u.ID)
 				} else {
 					fmt.Fprintln(w, "当前协议或高级设置需使用完整配置，不能等价表达为分享链接。")
@@ -285,8 +293,11 @@ func (a *app) info(args []string) error {
 							w.Raw(fmt.Sprintf("Password：%s\n", u.Password))
 						}
 					}
-					if uriAvailable {
+					if len(node.ProtocolExportWarnings(n, "uri")) == 0 {
 						w.Raw(fmt.Sprintf("分享链接：\n%s\n", node.URI(n, u)))
+						if n.Protocol == "vmess-tls" {
+							w.Raw(fmt.Sprintf("V2RayN 兼容链接：\n%s\n", node.VMessV2RayNURI(n, u)))
+						}
 					}
 				}
 			}
@@ -302,11 +313,13 @@ func (a *app) doctor(s node.State, loadErr error) error {
 func (a *app) doctorWithReport(s node.State, loadErr error, report *diagnosticReport) error {
 	errorsFound := 0
 	warnings := 0
+	states := a.allStates(s)
+	redactMsg := func(msg string) string { return node.Redact(msg, states...) }
 	check := func(id, scope, label string, e error, warning bool, advice string) {
 		if report != nil {
 			status, message := "healthy", ""
 			if e != nil {
-				message = a.safeText(e.Error(), s)
+				message = redactMsg(e.Error())
 				if warning {
 					status = "degraded"
 					warnings++
@@ -331,7 +344,7 @@ func (a *app) doctorWithReport(s node.State, loadErr error, report *diagnosticRe
 		} else {
 			errorsFound++
 		}
-		a.message(level, sign+" "+label+"："+a.safeText(e.Error(), s))
+		a.message(level, sign+" "+label+"："+redactMsg(e.Error()))
 		if advice != "" {
 			fmt.Fprintln(os.Stderr, "  建议："+advice)
 		}
@@ -468,4 +481,132 @@ func (a *app) doctorWithReport(s node.State, loadErr error, report *diagnosticRe
 		return fmt.Errorf("发现 %d 项错误，请按上方建议处理", errorsFound)
 	}
 	return nil
+}
+
+var errDiagnosticOutputLimit = errors.New("diagnostic output exceeded 4MiB")
+
+type diagnosticOutput struct {
+	mu       sync.Mutex
+	data     []byte
+	overflow bool
+	cancel   context.CancelFunc
+}
+
+func (b *diagnosticOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := (4 << 20) - len(b.data)
+	if len(p) > remaining {
+		b.data = append(b.data, p[:remaining]...)
+		b.overflow = true
+		b.cancel()
+		return remaining, errDiagnosticOutputLimit
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+// A result size check after CombinedOutput would already have allocated the
+// unbounded output. Cancel this owned command while collecting at the limit.
+func runBoundedDiagnostic(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	parent, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runBoundedDiagnosticContext(parent, timeout, name, args...)
+}
+
+func runBoundedDiagnosticContext(parent context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	output := &diagnosticOutput{cancel: cancel}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "SYSTEMD_COLORS=0", "SYSTEMD_PAGER=")
+	cmd.Stdout, cmd.Stderr = output, output
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	if output.overflow {
+		return output.data, errDiagnosticOutputLimit
+	}
+	if ctx.Err() != nil {
+		return output.data, ctx.Err()
+	}
+	return output.data, err
+}
+
+type diagnosticCheck struct {
+	ID       string `json:"id"`
+	Scope    string `json:"scope"`
+	Label    string `json:"label"`
+	Status   string `json:"status"`
+	Message  string `json:"message,omitempty"`
+	NextStep string `json:"next_step,omitempty"`
+}
+
+type diagnosticReport struct {
+	Version       int               `json:"version"`
+	Kind          string            `json:"kind"`
+	At            time.Time         `json:"at"`
+	Location      string            `json:"measurement_location"`
+	Offline       bool              `json:"offline"`
+	PublicIngress string            `json:"public_ingress"`
+	Status        string            `json:"status"`
+	Checks        []diagnosticCheck `json:"checks"`
+	Issues        []string          `json:"issues"`
+}
+
+func (r *diagnosticReport) add(s node.State, id, scope, label, status, message, next string) {
+	clean := func(v string) string { return ui.SanitizeText(node.Redact(v, s)) }
+	r.Checks = append(r.Checks, diagnosticCheck{ID: id, Scope: scope, Label: clean(label), Status: status, Message: clean(message), NextStep: clean(next)})
+}
+
+func (r *diagnosticReport) finish() {
+	if len(r.Checks) == 0 {
+		r.Status = "unknown"
+		return
+	}
+	r.Status = "healthy"
+	if len(r.Issues) > 0 {
+		r.Status = "degraded"
+	}
+	for _, c := range r.Checks {
+		if c.Status == "failed" {
+			r.Status = "failed"
+			return
+		}
+		if c.Status == "degraded" {
+			r.Status = "degraded"
+		} else if c.Status == "unknown" && r.Status == "healthy" {
+			r.Status = "unknown"
+		}
+	}
+}
+
+func (a *app) doctorJSON(w io.Writer) error {
+	r := diagnosticReport{Version: 1, Kind: "qingnode-diagnostic", At: time.Now().UTC(), Location: "server", Offline: a.offline, PublicIngress: "unknown", Checks: []diagnosticCheck{}, Issues: []string{}}
+	err := a.store.Inspect(func() error {
+		if _, err := os.Lstat(filepath.Join(a.store.Root, "current")); errors.Is(err, os.ErrNotExist) {
+			r.add(node.NewState(), "state", "local", "已提交配置", "unknown", "未发现已提交配置；尚未初始化或恢复材料需要核对", "qingnode status --json")
+			r.add(node.NewState(), "remaining-checks", "not-measured", "其余检查", "unknown", "没有以默认配置代替真实配置进行检查", "")
+			return errors.New("未发现已提交配置；未执行其余检查")
+		}
+		s, err := a.store.Load()
+		if err == nil {
+			err = s.Validate()
+		}
+		if err != nil {
+			// Do not inspect a fabricated default State when the real format
+			// cannot be read, or echo arbitrary unknown JSON keys as an error.
+			r.add(node.NewState(), "state", "local", "读取受管状态", "failed", "状态格式、所有权或读取失败；保留原文件排查", "qingnode restore --help")
+			r.add(node.NewState(), "remaining-checks", "local", "其余检查", "unknown", "缺少可读取的真实配置，未执行核心或网络检查", "")
+			return errors.New("诊断无法读取受管状态；未执行其余检查")
+		}
+		return a.doctorWithReport(s, nil, &r)
+	})
+	if len(r.Checks) == 0 {
+		r.add(node.NewState(), "inspection", "local", "只读检查锁与受管路径", "failed", "无法取得一致的只读视图；未修复事务或启动服务", "qingnode status --help")
+		r.add(node.NewState(), "remaining-checks", "not-measured", "其余检查", "unknown", "未执行", "")
+	}
+	r.finish()
+	return errors.Join(err, json.NewEncoder(w).Encode(r))
 }

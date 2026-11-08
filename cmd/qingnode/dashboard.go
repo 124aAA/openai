@@ -229,7 +229,11 @@ func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, his
 		if !n.Enabled {
 			mode = "停用"
 		}
-		fmt.Fprintf(w, "  %s [%s / %s]\n    证书：%s\n", n.Name, n.Protocol, mode, certificateLabel(n, now))
+		protoLabel := n.Protocol
+		if node.EffectiveTransport(n) != "tcp" && n.Transport != nil {
+			protoLabel = fmt.Sprintf("%s (%s)", n.Protocol, node.ProtocolDisplaySummary(n))
+		}
+		fmt.Fprintf(w, "  %s [%s / %s]\n    证书：%s\n", n.Name, protoLabel, mode, certificateLabel(n, now))
 		if historyErr != nil {
 			fmt.Fprintln(w, "    公网：记录不可用，待验证")
 		} else {

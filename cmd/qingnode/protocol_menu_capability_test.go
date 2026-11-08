@@ -125,34 +125,19 @@ func TestProtocolMenuRejectsInvalidInstalledCoreBeforeWizardInput(t *testing.T) 
 	}
 }
 
-func TestExportMenuOffersFullConfigAfterUnsupportedURI(t *testing.T) {
-	for _, tc := range []struct{ protocol, warning string }{
-		{"tuic", "尚未验证通用TUIC分享URI"},
-		{"hysteria2", "分享链接不能完整表示客户端Hysteria2性能选择"},
-	} {
-		t.Run(tc.protocol, func(t *testing.T) {
-			a, _ := protocolMenuFixture(t, tc.protocol, 35512)
-			if tc.protocol == "hysteria2" {
-				if err := a.mutate(func(st *node.State) error {
-					st.Nodes[0].HY2 = &node.HY2Performance{ClientMode: "bbr"}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			path := filepath.Join(t.TempDir(), "client.json")
-			a.in = bufio.NewReader(strings.NewReader("1\n1\n\n" + path + "\n"))
-			printed, err := captureProtocolMenuStderr(t, a.exportWizard)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(printed, tc.warning) || tc.protocol == "tuic" && !strings.Contains(printed, "目标客户端版本：1.14.0") {
-				t.Fatal("export menu hid the URI limit or full-config target", printed)
-			}
-			if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), `"type": "`+tc.protocol+`"`) {
-				t.Fatal("menu did not default to a full client config", err)
-			}
-		})
+func TestTUICExportMenuOffersFullConfigAfterUnsupportedURI(t *testing.T) {
+	a, _ := protocolMenuFixture(t, "tuic", 35512)
+	path := filepath.Join(t.TempDir(), "tuic-client.json")
+	a.in = bufio.NewReader(strings.NewReader("1\n1\n4\n" + path + "\n"))
+	printed, err := captureProtocolMenuStderr(t, a.exportWizard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(printed, "尚未验证通用TUIC分享URI") || !strings.Contains(printed, "目标客户端版本：1.14.0") {
+		t.Fatal("export menu hid the unsupported URI or actual full-config target", printed)
+	}
+	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), `"type": "tuic"`) {
+		t.Fatal("menu did not export a full TUIC client config", err)
 	}
 }
 

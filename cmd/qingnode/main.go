@@ -19,7 +19,7 @@ import (
 	"qingnode/internal/ui"
 )
 
-var version = "0.3.2"
+var version = "0.4.0"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -196,10 +196,10 @@ func help() {
 result.json缺失或status非completed不能当通过；返回错误仍可能已经提交配置，禁止据此盲目重试。
 
  init         初始化节点；--auto 自动探测地址/目标/端口，重复执行保留原节点
- add          添加 reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless / vmess 节点
+ add          添加 reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless-tls / vmess-tls（及 vless-ws-tls 等组合）
  protocols    list查看分层能力；options以私有JSON预览/应用协议高级设置
  list / info  查看节点概要（凭据脱敏）
- edit         修改名称、地址、端口、证书、传输或目标；--preview 只读查看影响
+ edit         修改名称、地址、端口、证书或目标；--preview 只读查看影响
  batch        --file JSON 批量编辑并统一应用；--preview 只读查看影响
  hy2          show / plan / apply / revert / compare，隔离管理HY2性能选择
  enable       启用节点
@@ -250,7 +250,6 @@ result.json缺失或status非completed不能当通过；返回错误仍可能已
  version
 
 带参数的命令可追加 --help；recover 等无参数命令请查看本帮助。导出完整配置优先使用 --out 文件。
-VLESS/VMess/Trojan用--transport tcp|ws|grpc选择传输；VLESS另支持httpupgrade。证书可用--certificate-id复用。
 远程出口失效不会自动回落direct。显式主备须主动运行egress health --apply或有预算的--watch。
 拓扑运行配置统一由共享核心承载，应用或切换可能打断已有连接；不会无损迁移TCP会话。
 设备批量导出用export --device ID --format 格式 --client-version 固定版本 --out 私有文件。

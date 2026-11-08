@@ -23,6 +23,10 @@ func collectInstall(args []string) error {
 	if err := parse(f, args); err != nil {
 		return err
 	}
+	rawProtocol := *protocol
+	if normProto, _, err := node.NormalizeProtocolAndTransport(*protocol, "", "", "", ""); err == nil {
+		*protocol = normProto
+	}
 	if !node.ProtocolRequiresCertificate(*protocol) {
 		return errors.New("此收集入口仅用于需要证书的首次安装")
 	}
@@ -31,7 +35,7 @@ func collectInstall(args []string) error {
 	}
 	a := app{in: bufio.NewReader(os.Stdin)}
 	a.wizardCollect = func(fields []string) error { return writeInstallFields(*out, fields) }
-	return a.installWizardOptions(true, *protocol, true, false)
+	return a.installWizardOptions(true, rawProtocol, true, false)
 }
 
 func writeInstallFields(out string, fields []string) error {
@@ -111,10 +115,14 @@ func (a *app) applyCollectedInstall(path, protocol string) error {
 	if len(fields) > 64 {
 		return errors.New("安装参数数量无效")
 	}
+	normProto := protocol
+	if p, _, err := node.NormalizeProtocolAndTransport(protocol, "", "", "", ""); err == nil {
+		normProto = p
+	}
 	matched := false
 	for index, value := range fields {
 		if value == "--protocol" {
-			if index+1 >= len(fields) || fields[index+1] != protocol {
+			if index+1 >= len(fields) || (fields[index+1] != protocol && fields[index+1] != normProto) {
 				return errors.New("安装参数协议与选择不一致")
 			}
 			matched = true
@@ -126,7 +134,7 @@ func (a *app) applyCollectedInstall(path, protocol string) error {
 			return errors.New("首次安装不能引用不存在的证书资源")
 		}
 	}
-	if !matched || !node.ProtocolRequiresCertificate(protocol) {
+	if !matched || !node.ProtocolRequiresCertificate(normProto) {
 		return errors.New("安装参数缺少所选TLS协议")
 	}
 	if err := (&app{}).add("validate-install", fields); err != nil {

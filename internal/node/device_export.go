@@ -107,9 +107,6 @@ func ExportDeviceProfile(st State, p DeviceProfile, format, clientVersion string
 		if err = adapter.Validate(n); err != nil {
 			return r, fmt.Errorf("节点 %s 的协议配置无效", n.ID)
 		}
-		if err = ValidateV2RayTransport(n.Protocol, n.Transport); err != nil {
-			return r, err
-		}
 		if err = ValidateHY2ClientCertificate(n, format); err != nil {
 			return r, fmt.Errorf("节点 %s：%w", n.ID, err)
 		}
@@ -148,11 +145,6 @@ func ExportDeviceProfile(st State, p DeviceProfile, format, clientVersion string
 		proxy["name"] = name
 		proxies, names = append(proxies, proxy), append(names, name)
 		if format == "uri" || format == "base64" {
-			if n.Protocol == "vmess" {
-				// VMess stores its label inside the Base64 JSON document.
-				uris = append(uris, vmessNamedURI(n, u, name))
-				continue
-			}
 			raw := URI(n, u)
 			if raw == "" {
 				return r, errors.New("该协议或高级设置不支持分享URI；请导出完整配置")

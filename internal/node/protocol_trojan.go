@@ -14,20 +14,30 @@ func trojanCredential(u *User) {
 func validateTrojan(n Node) error { return validateTLSNode(n, true) }
 
 func trojanInbound(n Node, root string) M {
-	return withV2RayTransport(M{"type": "trojan", "users": tlsPasswordUsers(n), "tls": tlsInbound(n, root)}, n.Transport)
+	out := M{"type": "trojan", "users": tlsPasswordUsers(n), "tls": tlsInboundWithTransport(n, root)}
+	if tr := transportInbound(n); tr != nil {
+		out["transport"] = tr
+	}
+	return out
 }
 
 func trojanURI(n Node, u User) string {
-	q := url.Values{"sni": {n.Certificate.ServerName}, "allowInsecure": {"false"}, "type": {"tcp"}}
-	addTransportQuery(q, n.Transport)
+	q := url.Values{"sni": {n.Certificate.ServerName}, "allowInsecure": {"false"}}
+	applyTransportURIQuery(q, n)
 	x := url.URL{Scheme: "trojan", User: url.User(u.Password), Host: net.JoinHostPort(n.Host, strconv.Itoa(EffectiveConnectPort(n))), RawQuery: q.Encode(), Fragment: n.Name + " / " + u.Name}
 	return x.String()
 }
 
 func trojanOutbound(n Node, u User) M {
-	return withV2RayTransport(M{"type": "trojan", "password": u.Password, "tls": tlsOutbound(n)}, n.Transport)
+	out := M{"type": "trojan", "password": u.Password, "tls": tlsOutboundWithTransport(n)}
+	if tr := transportOutbound(n); tr != nil {
+		out["transport"] = tr
+	}
+	return out
 }
 
 func trojanMihomo(n Node, u User) M {
-	return withMihomoTransport(M{"type": "trojan", "password": u.Password, "udp": true, "skip-cert-verify": false, "sni": n.Certificate.ServerName, "network": "tcp"}, n.Transport)
+	out := M{"type": "trojan", "password": u.Password, "udp": true, "skip-cert-verify": false, "sni": n.Certificate.ServerName, "network": "tcp"}
+	applyTransportMihomo(out, n)
+	return out
 }

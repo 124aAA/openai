@@ -182,7 +182,7 @@ func TestGraphCanceledOrInvalidCoreLeavesNoPrivateFiles(t *testing.T) {
 func TestGraphCoreCapabilitiesKeepVersionsAndTagsSeparate(t *testing.T) {
 	all := map[string]bool{"with_quic": true, "with_utls": true, "with_wireguard": true, "with_gvisor": true}
 	for _, version := range []string{"1.14.0", "1.14.3"} {
-		if err := checkProbeCoreCapabilities(version, all, []string{"reality", "hysteria2", "wireguard"}); err != nil {
+		if err := checkProbeCoreCapabilities(version, all, []string{"vless", "hysteria2", "wireguard"}); err != nil {
 			t.Fatal(version, err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestGraphCoreCapabilitiesKeepVersionsAndTagsSeparate(t *testing.T) {
 			tags[key] = value
 		}
 		delete(tags, tag)
-		if err := checkProbeCoreCapabilities("1.14.3", tags, []string{"reality", "hysteria2", "wireguard"}); err == nil {
+		if err := checkProbeCoreCapabilities("1.14.3", tags, []string{"vless", "hysteria2", "wireguard"}); err == nil {
 			t.Fatal("accepted version masked missing feature tag", tag)
 		}
 	}
