@@ -181,3 +181,48 @@ func TestListAndImpactJSONDoNotContainCredentialsOrProgress(t *testing.T) {
 		t.Fatal("query modified State", err)
 	}
 }
+
+func TestRound2MenuAndInstallWorkflowImprovements(t *testing.T) {
+	// 1. Verify validate-install accepts transport flags and shorthand presets.
+	a := &app{}
+	if err := a.add("validate-install", []string{"--protocol", "vless-ws-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--path", "/ws-custom"}); err != nil {
+		t.Fatalf("validate-install rejected vless-ws-tls preset: %v", err)
+	}
+	if err := a.add("validate-install", []string{"--protocol", "vmess-tls", "--transport", "grpc", "--service-name", "rpc1", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com"}); err != nil {
+		t.Fatalf("validate-install rejected vmess-tls + grpc: %v", err)
+	}
+
+	// 2. Verify nodeMenu option 10 exports directly and realityMenu option 3 edits TLS SNI.
+	wApp := wizardApp(t, "")
+	if err := wApp.command([]string{"init", "--protocol", "vless-ws-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "8443", "--quiet"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := wApp.store.Load()
+	if err != nil || len(st.Nodes) != 1 {
+		t.Fatal(st, err)
+	}
+	n := st.Nodes[0]
+
+	// Node menu option 10 -> select node 1 (default) -> format 1 (uri) -> out "" -> return 0
+	wApp.in.Reset(strings.NewReader("10\n1\n1\n\n0\n"))
+	exportedOut, err := wizardOutput(t, func() error { return wApp.nodeMenu() })
+	if err != nil {
+		t.Fatalf("nodeMenu quick export failed: %v", err)
+	}
+	if !strings.Contains(exportedOut, "vless://") || !strings.Contains(exportedOut, "type=ws") {
+		t.Fatalf("unexpected exported URI from nodeMenu: %s", exportedOut)
+	}
+
+	// realityMenu option 3 on TLS node edits SNI while preserving credentials and transport.
+	wApp.in.Reset(strings.NewReader("3\ncdn.example.com\n"))
+	if err := wApp.realityMenu(n); err != nil {
+		t.Fatalf("realityMenu TLS SNI edit failed: %v", err)
+	}
+	stAfter, err := wApp.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stAfter.Nodes[0].Certificate.ServerName != "cdn.example.com" || stAfter.Nodes[0].Users[0].UUID != n.Users[0].UUID || stAfter.Nodes[0].Transport.Type != "ws" {
+		t.Fatalf("TLS SNI edit corrupted node state: %+v", stAfter.Nodes[0])
+	}
+}

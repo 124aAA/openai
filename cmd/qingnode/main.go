@@ -19,7 +19,7 @@ import (
 	"qingnode/internal/ui"
 )
 
-var version = "0.3.1"
+var version = "0.4.0"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -196,7 +196,7 @@ func help() {
 result.json缺失或status非completed不能当通过；返回错误仍可能已经提交配置，禁止据此盲目重试。
 
  init         初始化节点；--auto 自动探测地址/目标/端口，重复执行保留原节点
- add          添加 reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic 节点
+ add          添加 reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless-tls / vmess-tls（及 vless-ws-tls 等组合）
  protocols    list查看分层能力；options以私有JSON预览/应用协议高级设置
  list / info  查看节点概要（凭据脱敏）
  edit         修改名称、地址、端口、证书或目标；--preview 只读查看影响

@@ -35,7 +35,7 @@ func validateSSAEAD(n Node) error {
 	if n.Shadowsocks == nil || !validSSAEADMethod(n.Shadowsocks.Method) || n.Shadowsocks.ServerKey != "" {
 		return errors.New("传统 Shadowsocks 需要已支持的 AEAD 方法，不能混入 SS2022 服务密钥")
 	}
-	if n.Reality != nil || n.Certificate != nil || n.CertificateID != "" || n.HY2 != nil || n.AnyTLS != nil || n.TUIC != nil {
+	if n.Reality != nil || n.Certificate != nil || n.CertificateID != "" || n.HY2 != nil || n.AnyTLS != nil || n.TUIC != nil || n.Transport != nil {
 		return errors.New("传统 Shadowsocks 不接受 TLS、REALITY 或其他协议参数")
 	}
 	passwords := map[string]bool{}

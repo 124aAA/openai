@@ -22,7 +22,7 @@ func validateHysteriaCertificate(n Node, checkExternalFiles bool) error {
 	if c == nil || !ValidHost(c.ServerName) {
 		return errors.New("Hysteria2 需要有效证书名称")
 	}
-	if n.Reality != nil || n.Shadowsocks != nil {
+	if n.Reality != nil || n.Shadowsocks != nil || n.Transport != nil {
 		return errors.New("Hysteria2 不接受其他协议参数")
 	}
 	for _, u := range n.Users {

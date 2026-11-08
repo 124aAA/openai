@@ -31,7 +31,7 @@ type ProtocolCapability struct {
 }
 
 func ProtocolRequiresCertificate(name string) bool {
-	return name == "hysteria2" || name == "anytls" || name == "trojan" || name == "tuic"
+	return name == "hysteria2" || name == "anytls" || name == "trojan" || name == "tuic" || name == "vless-tls" || name == "vmess-tls"
 }
 
 func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
@@ -61,6 +61,13 @@ func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
 		c.AdvancedOptions = []string{"idle_session_check_interval", "idle_session_timeout", "min_idle_session"}
 	case "trojan":
 		c.Credentials = "independent UTF-8 user password"
+		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
+	case "vless-tls":
+		c.Credentials = "UUID"
+		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
+	case "vmess-tls":
+		c.Credentials = "UUID (AEAD, alterId=0)"
+		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
 	case "hysteria2":
 		c.Credentials = "independent user password"
 		c.ServerBuildTags = []string{"with_quic"}
@@ -96,7 +103,7 @@ func ValidateProtocolCapabilities(st State, tags []string) error {
 }
 
 func ProtocolExportWarnings(n Node, format string) []string {
-	if n.Protocol == "trojan" && (format == "uri" || format == "base64" || format == "qr") && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
+	if (n.Protocol == "trojan" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls") && (format == "uri" || format == "base64" || format == "qr") && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
 		cert, key, err := certificateMaterial(*n.Certificate)
 		if err != nil {
 			return []string{"无法核对Trojan分享链接的证书兼容性"}
@@ -119,7 +126,7 @@ func ProtocolExportWarnings(n Node, format string) []string {
 }
 
 func ValidateProtocolClient(n Node, format, version string, tags []string) error {
-	if n.Protocol != "anytls" && n.Protocol != "trojan" && n.Protocol != "ss-aead" && n.Protocol != "tuic" {
+	if n.Protocol != "anytls" && n.Protocol != "trojan" && n.Protocol != "ss-aead" && n.Protocol != "tuic" && n.Protocol != "vless-tls" && n.Protocol != "vmess-tls" {
 		return nil
 	}
 	if (format == "sing-box" || format == "sing-box-outbounds") && version != "1.14.0" && version != "1.14.3" {

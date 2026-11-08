@@ -145,7 +145,7 @@ func exportUnchecked(n Node, u User, format string) ([]byte, error) {
 	}
 	if p, ok := Protocol(n.Protocol); !ok {
 		return nil, errors.New("不支持该协议")
-	} else if n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" {
+	} else if n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls" {
 		if err := p.Validate(n); err != nil {
 			return nil, err
 		}
@@ -159,6 +159,11 @@ func exportUnchecked(n Node, u User, format string) ([]byte, error) {
 	switch format {
 	case "uri":
 		return []byte(URI(n, u) + "\n"), nil
+	case "vmess-v2rayn":
+		if n.Protocol != "vmess-tls" {
+			return nil, errors.New("vmess-v2rayn 导出格式仅适用于 VMess 节点")
+		}
+		return []byte(VMessV2RayNURI(n, u) + "\n"), nil
 	case "base64":
 		return []byte(base64.StdEncoding.EncodeToString([]byte(URI(n, u)+"\n")) + "\n"), nil
 	case "qr":

@@ -27,8 +27,12 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	f := fs(cmd)
 	auto := f.Bool("auto", false, "无交互发现公网地址、验证 REALITY 目标并避开默认端口冲突")
 	name := f.String("name", "main", "节点名称")
-	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic")
+	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless-tls / vmess-tls（支持 vless-ws-tls 等组合简写）")
 	method := f.String("method", "aes-256-gcm", "仅传统ss-aead：aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305")
+	transport := f.String("transport", "", "传输方式：tcp（默认）/ ws / grpc / httpupgrade（仅 vless-tls / vmess-tls / trojan）")
+	transportPath := f.String("path", "", "WebSocket / HTTPUpgrade 路径（如 /ws）")
+	transportHost := f.String("transport-host", "", "WebSocket / HTTPUpgrade Host 头（可选）")
+	serviceName := f.String("service-name", "", "gRPC serviceName（如 grpc）")
 	host := f.String("server", "", "客户端连接的公网 IP 或域名")
 	listen := f.String("listen", "", "监听 IP，默认按公网地址选择通配地址")
 	port := portFlag(f, 443)
@@ -51,9 +55,16 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	if e := parse(f, args); e != nil {
 		return e
 	}
+	normProto, normTransport, normErr := node.NormalizeProtocolAndTransport(*protocol, *transport, *transportPath, *transportHost, *serviceName)
+	if normErr == nil {
+		*protocol = normProto
+	}
 	if cmd == "install" || cmd == "validate-install" {
 		if cmd == "install" && a.offline {
 			return errors.New("install 需要在线准备官方核心；离线生成请使用 init")
+		}
+		if normErr != nil {
+			return normErr
 		}
 		if _, ok := node.Protocol(*protocol); !ok {
 			return errors.New("不支持该协议")
@@ -67,25 +78,8 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 		if *randomPort && flagSet(f, "port") {
 			return errors.New("--port 与 --random-port 不能同时使用")
 		}
-		if *protocol == "ss-aead" {
-			if _, err := node.NewShadowsocksAEAD(*method); err != nil {
-				return err
-			}
-		}
-		if (*protocol == "ss2022" || *protocol == "ss-aead") && (*sni != "" || *target != "" || *cert != "" || *key != "" || *email != "" || *certificateID != "" || flagSet(f, "fingerprint")) {
-			return fmt.Errorf("%s 不使用 SNI、REALITY 或 TLS 参数", *protocol)
-		}
-		if *protocol == "reality" && (*cert != "" || *key != "" || *email != "" || *certificateID != "") {
-			return errors.New("REALITY 不使用证书参数")
-		}
-		if node.ProtocolRequiresCertificate(*protocol) && (*target != "" || flagSet(f, "fingerprint")) {
-			return errors.New("该TLS协议不使用REALITY目标或指纹")
-		}
-		if *certificateID != "" && (*sni != "" || *cert != "" || *key != "" || *email != "") {
-			return errors.New("--certificate-id不与SNI/PEM/ACME输入混用；证书资源已声明名称")
-		}
-		if *email != "" && (*cert != "" || *key != "") {
-			return errors.New("ACME 与 PEM 证书参数不能同时使用")
+		if err := validateAddProtocolFlags(*protocol, *method, *sni, *target, *cert, *key, *email, *certificateID, flagSet(f, "fingerprint")); err != nil {
+			return err
 		}
 		if (*cert == "") != (*key == "") {
 			return errors.New("PEM证书与私钥须成对提供")
@@ -151,11 +145,7 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 			}
 		}
 		if node.ProtocolRequiresCertificate(*protocol) && (*cert != "" || *key != "" || *email != "") {
-			c, err := loadCert(*sni, *cert, *key, *email)
-			if err != nil {
-				return err
-			}
-			if err := node.ValidateCertificateResource(node.CertificateResource{Certificate: *c}, time.Now(), true); err != nil {
+			if _, err := validateCertInput(*sni, *cert, *key, *email); err != nil {
 				return err
 			}
 		}
@@ -200,17 +190,16 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 					}
 				}
 				if node.ProtocolRequiresCertificate(*protocol) && (*cert != "" || *key != "" || *email != "") {
-					c, err := loadCert(*sni, *cert, *key, *email)
-					if err != nil {
-						return err
-					}
-					if err := node.ValidateCertificateResource(node.CertificateResource{Certificate: *c}, time.Now(), true); err != nil {
+					if _, err := validateCertInput(*sni, *cert, *key, *email); err != nil {
 						return err
 					}
 				}
 			}
 			fmt.Fprintln(os.Stderr, "已经初始化，保留所有节点和凭据；新增节点请用 add。")
 			return nil
+		}
+		if normErr != nil {
+			return normErr
 		}
 		var e error
 		if *auto {
@@ -250,11 +239,11 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 				*listen = "::"
 			}
 		}
-		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Host: *host, Listen: *listen, Port: *port, Enabled: true, Users: []node.User{node.NewUser(*uname, *protocol)}, EgressID: directEgress(*egress)}
+		if err := validateAddProtocolFlags(*protocol, *method, *sni, *target, *cert, *key, *email, *certificateID, flagSet(f, "fingerprint")); err != nil {
+			return err
+		}
+		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Transport: normTransport, Host: *host, Listen: *listen, Port: *port, Enabled: true, Users: []node.User{node.NewUser(*uname, *protocol)}, EgressID: directEgress(*egress)}
 		if *protocol == "reality" {
-			if *cert != "" || *key != "" || *email != "" || *certificateID != "" {
-				return errors.New("REALITY 不使用证书参数")
-			}
 			n.Reality, e = node.NewReality(*sni, *target)
 			if e == nil {
 				n.Reality.Fingerprint = *fingerprint
@@ -264,13 +253,7 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 				}
 			}
 		} else if node.ProtocolRequiresCertificate(*protocol) {
-			if *target != "" || flagSet(f, "fingerprint") {
-				return errors.New("该TLS协议不使用REALITY目标或指纹")
-			}
 			if *certificateID != "" {
-				if *sni != "" || *cert != "" || *key != "" || *email != "" {
-					return errors.New("--certificate-id不与SNI/PEM/ACME输入混用；证书资源已声明名称")
-				}
 				r, err := s.FindCertificate(*certificateID)
 				if err != nil || r.ID != *certificateID {
 					return errors.New("需要现有证书资源稳定ID")
@@ -281,17 +264,10 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 			} else {
 				n.Certificate, e = loadCert(*sni, *cert, *key, *email)
 			}
-		} else if *protocol == "ss2022" || *protocol == "ss-aead" {
-			if *sni != "" || *target != "" || *cert != "" || *key != "" || *email != "" || *certificateID != "" || flagSet(f, "fingerprint") {
-				return fmt.Errorf("%s 不使用 SNI、REALITY 或 TLS 参数", *protocol)
-			}
-			if *protocol == "ss-aead" {
-				n.Shadowsocks, e = node.NewShadowsocksAEAD(*method)
-			} else {
-				n.Shadowsocks = node.NewShadowsocks()
-			}
+		} else if *protocol == "ss-aead" {
+			n.Shadowsocks, e = node.NewShadowsocksAEAD(*method)
 		} else {
-			return errors.New("不支持该协议")
+			n.Shadowsocks = node.NewShadowsocks()
 		}
 		if e != nil {
 			return e
@@ -361,6 +337,44 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	}
 	return nil
 }
+func validateAddProtocolFlags(protocol, method, sni, target, cert, key, email, certificateID string, fingerprintSet bool) error {
+	if _, ok := node.Protocol(protocol); !ok {
+		return errors.New("不支持该协议")
+	}
+	if protocol == "ss-aead" {
+		if _, err := node.NewShadowsocksAEAD(method); err != nil {
+			return err
+		}
+	}
+	if (protocol == "ss2022" || protocol == "ss-aead") && (sni != "" || target != "" || cert != "" || key != "" || email != "" || certificateID != "" || fingerprintSet) {
+		return fmt.Errorf("%s 不使用 SNI、REALITY 或 TLS 参数", protocol)
+	}
+	if protocol == "reality" && (cert != "" || key != "" || email != "" || certificateID != "") {
+		return errors.New("REALITY 不使用证书参数")
+	}
+	if node.ProtocolRequiresCertificate(protocol) && (target != "" || fingerprintSet) {
+		return errors.New("该TLS协议不使用REALITY目标或指纹")
+	}
+	if certificateID != "" && (sni != "" || cert != "" || key != "" || email != "") {
+		return errors.New("--certificate-id不与SNI/PEM/ACME输入混用；证书资源已声明名称")
+	}
+	if email != "" && (cert != "" || key != "") {
+		return errors.New("ACME 与 PEM 证书参数不能同时使用")
+	}
+	return nil
+}
+
+func validateCertInput(sni, cert, key, email string) (*node.Certificate, error) {
+	c, err := loadCert(sni, cert, key, email)
+	if err != nil {
+		return nil, err
+	}
+	if err := node.ValidateCertificateResource(node.CertificateResource{Certificate: *c}, time.Now(), true); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 func loadCert(sni, cert, key, email string) (*node.Certificate, error) {
 	c := &node.Certificate{ServerName: sni}
 	if email != "" {
@@ -457,6 +471,9 @@ func (a *app) list(args []string) error {
 				status = "启用"
 			}
 			fmt.Fprintf(w, "\n%s  %s  %s\n  ID: %s\n  地址: %s  监听: %s/%s  凭据数: %d  出口: %s\n", n.Name, n.Protocol, status, n.ID, net.JoinHostPort(n.Host, strconv.Itoa(node.EffectiveConnectPort(n))), net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), strings.Join(node.Networks(n), "+"), len(n.Users), displayEgress(n.EgressID))
+			if node.EffectiveTransport(n) != "tcp" && n.Transport != nil {
+				fmt.Fprintf(w, "  传输: %s\n", node.ProtocolDisplaySummary(n))
+			}
 			for _, u := range n.Users {
 				fmt.Fprintf(w, "  凭据: %s (%s)，认证信息已隐藏\n", u.Name, u.ID)
 			}
@@ -480,6 +497,10 @@ func (a *app) edit(args []string) error {
 	key := f.String("key", "", "替换私钥")
 	email := f.String("acme-email", "", "改用 ACME HTTP-01")
 	method := f.String("method", "", "仅传统ss-aead：更换方法但保留用户密码；客户端须重新导入")
+	transport := f.String("transport", "", "切换传输方式：tcp / ws / grpc / httpupgrade（仅 vless-tls / vmess-tls / trojan）")
+	transportPath := f.String("path", "", "修改 WebSocket / HTTPUpgrade 路径")
+	transportHost := f.String("transport-host", "", "修改 WebSocket / HTTPUpgrade Host 头")
+	serviceName := f.String("service-name", "", "修改 gRPC serviceName")
 	preview := f.Bool("preview", false, "只读显示影响，不保存、不恢复事务、不启停服务")
 	asJSON := f.Bool("json", false, "仅--preview：输出版本1变更影响JSON")
 	egress := f.String("egress", "", "入口的出口/策略稳定ID；direct明确改回直连")
@@ -491,7 +512,9 @@ func (a *app) edit(args []string) error {
 	}
 	e := nodeEdit{ID: *id, Name: editString(*name), Server: editString(*host), Listen: editString(*listen),
 		Fingerprint: editString(*fingerprint), SNI: editString(*sni), Target: editString(*target),
-		Cert: editString(*cert), Key: editString(*key), ACMEEmail: editString(*email)}
+		Cert: editString(*cert), Key: editString(*key), ACMEEmail: editString(*email),
+		Transport: editString(*transport), Path: editString(*transportPath),
+		TransportHost: editString(*transportHost), ServiceName: editString(*serviceName)}
 	if flagSet(f, "method") {
 		if *method == "" {
 			return errors.New("方法不能为空")

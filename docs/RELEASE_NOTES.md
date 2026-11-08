@@ -1,3 +1,16 @@
+# QingNode 0.4.0 — 协议扩展与节点管理体验优化
+
+- **底层协议从 7 种扩充为 9 种，新增 11 个标准 TLS 与传输层组合**：新增 `vless-tls`（VLESS + 标准 TLS）和 `vmess-tls`（VMess AEAD + 标准 TLS），并统一复用 V2Ray 应用层传输模型（`internal/node/transport.go`）。`vless-tls` 与 `vmess-tls` 各自支持直连 TCP、`ws`（WebSocket）、`grpc`（gRPC）和 `httpupgrade`（HTTPUpgrade）共 8 个组合；`trojan` 在原有直连 TCP 基础上新增 `ws`、`grpc`、`httpupgrade` 3 个组合，合计新增 11 个组合。服务端 `sing-box` 入站、客户端 `sing-box` 1.14.0 JSON、Mihomo 1.19.30 YAML/provider、标准 URI、终端二维码与订阅快照共享同一套归一化参数（路径自动补 `/`、gRPC `service_name` 校验、WS/HTTPUpgrade `Host` 头对齐）。
+- **新增 VMess `v2rayN` 分享链接导出与连接方式引导**：除标准 `vmess://` URI 外，新增 `--format vmess-v2rayn`（菜单导出项 `7`），输出兼容 v2rayN / v2rayNG 的 Base64 JSON（`v: "2"`）。协议选择菜单整理为清晰的 `1..9` 编号，输入 `m` 可直接用 `w1..w3`、`g1..g3`、`u1..u3` 选择 WebSocket / gRPC / HTTPUpgrade 组合；新建成功后可直接按 `1` 导出链接、二维码或客户端配置。
+- **区分服务器监听端口与对外连接端口**：`--port` 固定表示本机 `sing-box` 监听端口，`--connect-port` 表示客户端实际连接的外部端口（省略时等于 `--port`），适配 NAT VPS 端口映射与 CDN/反代端口转发。二维码与分享链接适用于手机扫码及单节点导入（TUIC v5 仅支持完整客户端配置导出，AnyTLS 启用自定义空闲会话策略时需导出完整配置）；多节点或分流需求使用 `sing-box` / Mihomo 完整配置或只读订阅。
+- **代码架构精简与维护成本收敛**：收敛分散在 `internal/node` 与 `cmd/qingnode` 的 7 个微型辅助文件，统一主菜单状态栏、高频操作入口与节点参数编辑入口（在 `REALITY / 证书 / 传输` 子菜单中可直接修改 `tcp`/`ws`/`grpc`/`httpupgrade`、`path`、`Host` 与 `serviceName`）。State 保持 schema 9，向下兼容旧 1–8 内存只读加载与既有 7 种协议节点凭据。
+- **升级步骤（先备份、再升级、最后检查旧节点）**：已安装旧版本的用户，请先在菜单 `5 备份与更新 -> 1 创建加密备份`（或运行 `sudo qingnode backup --password-file /root/pass.txt --file /root/before-v040.qnbak`）保存备份，再选择 `4 更新 qingnode`（或运行 `sudo qingnode self-update --version v0.4.0`），升级后运行 `sudo qingnode status`、`sudo qingnode list` 与 `sudo qingnode doctor` 核对旧节点与服务状态。详细图文式步骤、菜单示例和命令见 [使用指南](GETTING_STARTED.md) 与 [协议选择](PROTOCOLS.md)。
+- **发布前验证记录（编译、配置检查、实际连通与未实测边界）**：
+  - **编译与静态检查**：通过 `go vet ./...` 静态分析，完成 `qingnode`（Linux amd64/arm64）与 `qingprobe`（Linux amd64/arm64、Windows amd64）跨架构静态编译，通过 43 项离线发行守卫测试（`scripts/test-release.py`）与 56 项安装器事务测试（`scripts/test-installer.py`）。
+  - **`sing-box` 配置检查与导出核验**：在 Linux 候选环境使用项目锁定的官方 `sing-box 1.14.0` 核心，对全部 7 种原有协议 + 11 个新增组合共 18 个节点联合生成的服务端配置执行 `sing-box check -c` 全部通过；对 11 个新增组合导出的 `sing-box 1.14.0` 客户端 JSON 逐项执行 `sing-box check -c` 全部通过，并核验 Mihomo `1.19.30` YAML、标准分享链接、二维码、Base64 文本及 `--format vmess-v2rayn` 导出与旧版本（`v0.2.8` / State 1–8）兼容读取。
+  - **Linux 实际连通与探测验证**：在 Linux 环境使用官方 `sing-box 1.14.0` 与 `mihomo 1.19.30` 完成 11 个新增传输组合（`vless-tls` / `vmess-tls` 的 TCP、`ws`、`grpc`、`httpupgrade` 及 `trojan` 的 `ws`、`grpc`、`httpupgrade`）及原有协议的本地回环代理真实连接验证（`LOOPBACK_PROXY_OK`）；此前在 Windows 环境受平台限制超时的 `internal/probe` 探测用例在 Linux 环境全部通过（62 项通过，含多跳 SOCKS5 链与用户态 WireGuard 连通测试），终端 PTY 窄屏工作流与 13 项机器接口验收全部通过。
+  - **未实测项说明**：物理手机 SSH 终端与手机/桌面客户端 GUI 实机操作、跨运营商公网链路与真实 CDN 边缘节点、生产环境公共 CA/DNS 服务商签发、原生 ARM64 物理硬件及跨内核重启自启在本次发布前未实测，不在发布说明中虚构公网或实机通过记录。
+
 # QingNode 0.3.1 — 简化节点管理和导出
 
 - 创建节点、导出、备份与更新、服务管理可从主菜单直接进入。证书、设备订阅和网络设置集中在高级设置。

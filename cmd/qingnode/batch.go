@@ -43,12 +43,17 @@ type nodeEdit struct {
 	EgressID            *string                    `json:"egress_id,omitempty"`
 	Tags                *[]string                  `json:"tags,omitempty"`
 	Method              *string                    `json:"method,omitempty"`
+	Transport           *string                    `json:"transport,omitempty"`
+	Path                *string                    `json:"path,omitempty"`
+	TransportHost       *string                    `json:"transport_host,omitempty"`
+	ServiceName         *string                    `json:"service_name,omitempty"`
 }
 
 func (e nodeEdit) empty() bool {
 	return e.Name == nil && e.Server == nil && e.Listen == nil && e.Port == nil && e.ConnectPort == nil && e.AdditionalEndpoints == nil &&
 		e.Fingerprint == nil && e.SNI == nil && e.Target == nil && e.Cert == nil &&
-		e.Key == nil && e.ACMEEmail == nil && e.Enabled == nil && e.EgressID == nil && e.Tags == nil && e.Method == nil
+		e.Key == nil && e.ACMEEmail == nil && e.Enabled == nil && e.EgressID == nil && e.Tags == nil && e.Method == nil &&
+		e.Transport == nil && e.Path == nil && e.TransportHost == nil && e.ServiceName == nil
 }
 
 func editString(s string) *string {
@@ -93,7 +98,7 @@ func decodeEditBatch(data []byte) (editBatch, error) {
 		if e.ID == "" || e.empty() {
 			return batch, fmt.Errorf("第 %d 项需要 id 和至少一个修改字段", i+1)
 		}
-		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method} {
+		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method, e.Transport, e.Path, e.TransportHost, e.ServiceName} {
 			if v != nil && *v == "" {
 				return batch, fmt.Errorf("第 %d 项不能用空字符串修改字段；保留旧值请省略字段", i+1)
 			}
@@ -253,6 +258,51 @@ func (e nodeEdit) apply(n *node.Node) error {
 		}
 		n.Shadowsocks = settings
 	}
+	if e.Transport != nil || e.Path != nil || e.TransportHost != nil || e.ServiceName != nil {
+		if !node.ProtocolSupportsTransport(n.Protocol) {
+			return fmt.Errorf("%s 不支持应用层传输（ws / grpc / httpupgrade）", n.Protocol)
+		}
+		var tr node.TransportOptions
+		if n.Transport != nil {
+			tr = *n.Transport
+		} else {
+			tr.Type = "tcp"
+		}
+		if e.Transport != nil {
+			nextType := strings.ToLower(strings.TrimSpace(*e.Transport))
+			if nextType == "none" {
+				nextType = "tcp"
+			}
+			if nextType != tr.Type {
+				tr.Type = nextType
+				switch nextType {
+				case "tcp":
+					tr.Path = ""
+					tr.Host = ""
+					tr.ServiceName = ""
+				case "ws", "httpupgrade":
+					tr.ServiceName = ""
+				case "grpc":
+					tr.Path = ""
+					tr.Host = ""
+				}
+			}
+		}
+		if e.Path != nil {
+			tr.Path = *e.Path
+		}
+		if e.TransportHost != nil {
+			tr.Host = *e.TransportHost
+		}
+		if e.ServiceName != nil {
+			tr.ServiceName = *e.ServiceName
+		}
+		_, normTr, err := node.NormalizeProtocolAndTransport(n.Protocol, tr.Type, tr.Path, tr.Host, tr.ServiceName)
+		if err != nil {
+			return err
+		}
+		n.Transport = normTr
+	}
 	switch n.Protocol {
 	case "reality":
 		if e.Cert != nil || e.Key != nil || e.ACMEEmail != nil {
@@ -274,9 +324,9 @@ func (e nodeEdit) apply(n *node.Node) error {
 		if e.SNI != nil || e.Target != nil {
 			return node.RealityTargetPolicy(n.Reality)
 		}
-	case "hysteria2", "anytls", "trojan", "tuic":
+	case "hysteria2", "anytls", "trojan", "tuic", "vless-tls", "vmess-tls":
 		if e.Target != nil {
-			return errors.New("Hysteria2 不使用 REALITY 目标")
+			return errors.New("TLS 协议不使用 REALITY 目标")
 		}
 		if e.SNI != nil {
 			n.Certificate.ServerName = *e.SNI
@@ -408,7 +458,7 @@ func (a *app) batch(args []string) error {
 		fmt.Fprintln(f.Output(), "用法：qingnode batch --file edits.json [--preview]")
 		f.PrintDefaults()
 		fmt.Fprintln(f.Output(), `JSON 示例：{"version":1,"edits":[{"id":"节点ID或旧名称","name":"新名称"}]}`)
-		fmt.Fprintln(f.Output(), "修改字段：name / server / listen / port（本地）/ connect_port（客户端）/ additional_endpoints / fingerprint / sni / target / cert / key / acme_email / enabled / egress_id（direct明确直连）。")
+		fmt.Fprintln(f.Output(), "修改字段：name / server / listen / port（本地）/ connect_port（客户端）/ additional_endpoints / fingerprint / sni / target / cert / key / acme_email / enabled / egress_id / transport / path / transport_host / service_name。")
 		fmt.Fprintln(f.Output(), "每项需要 id 和至少一个修改字段；省略字段保留旧值，cert/key 为本地 PEM 文件路径。")
 		fmt.Fprintln(f.Output(), "所有目标按修改前的状态定位；无效项、未知字段、重复节点、null 和空字符串整批拒绝。")
 		fmt.Fprintln(f.Output(), "批量编辑保留现有身份与凭据；随机端口和凭据轮换请用已有专用命令。")

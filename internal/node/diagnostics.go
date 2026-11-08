@@ -16,7 +16,7 @@ import (
 )
 
 var secretPEM = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
-var secretURI = regexp.MustCompile(`(?i)(?:vless|hysteria2|hy2|ss|socks5?|tuic|trojan|anytls)://[^\s"'<>]+`)
+var secretURI = regexp.MustCompile(`(?i)(?:vless|vmess|hysteria2|hy2|ss|socks5?|tuic|trojan|anytls)://[^\s"'<>]+`)
 var secretJSON = regexp.MustCompile(`(?i)("(?:private_key|pre_shared_key|preshared_key|password|username|uuid|key_pem|server_key|token|subscription_token|secret|api_secret|api_key|api_token|zone_token|access_key_id|access_key_secret|security_token|account_key|mac_key|authorization)"\s*:\s*)"(?:\\.|[^"\\])*"`)
 var secretUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 var secretIPCKey = regexp.MustCompile(`(?i)((?:private_key|preshared_key|pre_shared_key)\s*=\s*)[0-9a-f]{64}\b`)
@@ -137,6 +137,10 @@ func PublicIP(family string) (string, error) {
 	network := "tcp4"
 	if family == "6" {
 		host = "https://api6.ipify.org"
+		network := "tcp6"
+		_ = network
+	}
+	if family == "6" {
 		network = "tcp6"
 	}
 	d := net.Dialer{Timeout: 4 * time.Second}
