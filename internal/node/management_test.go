@@ -25,17 +25,23 @@ func (u *ufwFixture) run(_ time.Duration, name string, args ...string) ([]byte, 
 	if strings.Join(args, " ") == "status numbered" {
 		out := "Status: active\n"
 		for i, r := range u.rules {
-			out += fmt.Sprintf("[%d] %d/%s ALLOW IN Anywhere # %s\n", i+1, r.Port, r.Network, r.Tag)
+			out += fmt.Sprintf("[%d] %s/%s ALLOW IN Anywhere # %s\n", i+1, r.ufwPortSpec(), r.Network, r.Tag)
 		}
 		return []byte(out), nil
 	}
 	u.mutations++
 	if len(args) == 10 && args[0] == "allow" {
-		p, _ := strconv.Atoi(args[7])
+		var p, pEnd int
+		if s, e, ok := strings.Cut(args[7], ":"); ok {
+			p, _ = strconv.Atoi(s)
+			pEnd, _ = strconv.Atoi(e)
+		} else {
+			p, _ = strconv.Atoi(args[7])
+		}
 		if p == u.failAddPort {
 			return nil, errors.New("injected add failure")
 		}
-		u.rules = append(u.rules, FirewallRule{p, args[3], args[9]})
+		u.rules = append(u.rules, FirewallRule{Port: p, PortEnd: pEnd, Network: args[3], Tag: args[9]})
 		return nil, nil
 	}
 	if len(args) == 3 && args[0] == "--force" && args[1] == "delete" {
@@ -52,8 +58,8 @@ func TestFirewallPreservesExternalRulesAndSynchronizesOwn(t *testing.T) {
 	s := fixture(t)
 	s.Firewall = "ufw"
 	s.Nodes[0].Port = 23456
-	ssh := FirewallRule{22, "tcp", "SSH administrator"}
-	external := FirewallRule{23456, "tcp", "existing application"}
+	ssh := FirewallRule{Port: 22, Network: "tcp", Tag: "SSH administrator"}
+	external := FirewallRule{Port: 23456, Network: "tcp", Tag: "existing application"}
 	u := &ufwFixture{rules: []FirewallRule{ssh, external}}
 	f := Firewall{Execute: u.run, SSH: []int{22}}
 	if e := f.Sync(s, true); e != nil {
@@ -106,7 +112,7 @@ func (f *effectFixture) FinishEffects(_, next State) error {
 	return f.fw.Sync(next, true)
 }
 func TestFirewallFailureRollsBackConfigAndRules(t *testing.T) {
-	u := &ufwFixture{rules: []FirewallRule{{22, "tcp", "SSH"}}}
+	u := &ufwFixture{rules: []FirewallRule{{Port: 22, Network: "tcp", Tag: "SSH"}}}
 	fx := &effectFixture{fakeBackend: &fakeBackend{}, fw: Firewall{Execute: u.run, SSH: []int{22}}}
 	st := &Store{Root: t.TempDir(), Backend: fx, GID: -1}
 	s := fixture(t)

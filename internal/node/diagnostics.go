@@ -16,8 +16,8 @@ import (
 )
 
 var secretPEM = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
-var secretURI = regexp.MustCompile(`(?i)(?:vless|vmess|hysteria2|hy2|ss|socks5?|tuic|trojan|anytls)://[^\s"'<>]+`)
-var secretJSON = regexp.MustCompile(`(?i)("(?:private_key|pre_shared_key|preshared_key|password|username|uuid|key_pem|server_key|token|subscription_token|secret|api_secret|api_key|api_token|zone_token|access_key_id|access_key_secret|security_token|account_key|mac_key|authorization)"\s*:\s*)"(?:\\.|[^"\\])*"`)
+var secretURI = regexp.MustCompile(`(?i)(?:(?:vless|vmess|hysteria2|hy2|ss|socks5?|tuic|trojan|anytls)://[^\s"'<>]+|https?://[^\s"'<>/@]+:[^\s"'<>/@]+@[^\s"'<>]+)`)
+var secretJSON = regexp.MustCompile(`(?i)("(?:private_key|pre_shared_key|preshared_key|password|obfs[-_]?password|username|uuid|key_pem|server_key|token|subscription_token|secret|api_secret|api_key|api_token|zone_token|access_key_id|access_key_secret|security_token|account_key|mac_key|authorization)"\s*:\s*)"(?:\\.|[^"\\])*"`)
 var secretUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 var secretIPCKey = regexp.MustCompile(`(?i)((?:private_key|preshared_key|pre_shared_key)\s*=\s*)[0-9a-f]{64}\b`)
 var secretSubscriptionPath = regexp.MustCompile(`(?i)(/s/)[a-f0-9]{64}(/|\b)`)
@@ -26,7 +26,7 @@ var secretBearer = regexp.MustCompile(`(?im)(authorization[ \t]*:[ \t]*bearer[ \
 // Match credential labels at line starts, retaining the label for diagnostics.
 // Horizontal whitespace and the value must not consume the next error line;
 // the entire value is secret, including both halves of an SS2022 password.
-var secretText = regexp.MustCompile(`(?im)^([ \t]*(?:(?:reality[ \t]+)?private[ _-]?key|(?:pre[ _-]?shared|preshared)[ _-]?key|server[ _-]?key|key_pem|password|username|uuid|(?:subscription[ _-]?)?token|api[ _-]?(?:key|token)|订阅令牌|DNS[ \t]*API[ \t]*凭据|服务密钥|密码|私钥)[ \t]*[:：=][ \t]*)[^\r\n]+`)
+var secretText = regexp.MustCompile(`(?im)^([ \t]*(?:(?:reality[ \t]+)?private[ _-]?key|(?:pre[ _-]?shared|preshared)[ _-]?key|server[ _-]?key|key_pem|(?:obfs[ _-]?)?password|username|uuid|(?:subscription[ _-]?)?token|api[ _-]?(?:key|token)|订阅令牌|DNS[ \t]*API[ \t]*凭据|服务密钥|混淆密码|密码|私钥)[ \t]*[:：=][ \t]*)[^\r\n]+`)
 
 func Redact(text string, states ...State) string {
 	text = secretPEM.ReplaceAllString(text, "[私钥已隐藏]")
@@ -49,6 +49,9 @@ func Redact(text string, states ...State) string {
 			if e.Socks != nil {
 				secrets = append(secrets, e.Socks.Username, e.Socks.Password)
 			}
+			if e.HTTP != nil {
+				secrets = append(secrets, e.HTTP.Username, e.HTTP.Password)
+			}
 			if e.Reality != nil {
 				secrets = append(secrets, e.Reality.UUID)
 			}
@@ -58,6 +61,24 @@ func Redact(text string, states ...State) string {
 			}
 			if e.HY2 != nil {
 				secrets = append(secrets, e.HY2.Password)
+				if e.HY2.Performance != nil && e.HY2.Performance.Obfs != nil {
+					secrets = append(secrets, e.HY2.Performance.Obfs.Password)
+				}
+			}
+			if e.Trojan != nil {
+				secrets = append(secrets, e.Trojan.Password)
+			}
+			if e.VLESS != nil {
+				secrets = append(secrets, e.VLESS.UUID)
+			}
+			if e.VMess != nil {
+				secrets = append(secrets, e.VMess.UUID)
+			}
+			if e.AnyTLS != nil {
+				secrets = append(secrets, e.AnyTLS.Password)
+			}
+			if e.TUIC != nil {
+				secrets = append(secrets, e.TUIC.UUID, e.TUIC.Password)
 			}
 			if e.WireGuard != nil {
 				keys := []string{e.WireGuard.PrivateKey}
@@ -89,6 +110,9 @@ func Redact(text string, states ...State) string {
 					}
 				}
 			}
+			if n.HY2 != nil && n.HY2.Obfs != nil && n.HY2.Obfs.Password != "" {
+				text = strings.ReplaceAll(text, n.HY2.Obfs.Password, "[凭据已隐藏]")
+			}
 			if n.Shadowsocks != nil && n.Shadowsocks.ServerKey != "" {
 				text = strings.ReplaceAll(text, n.Shadowsocks.ServerKey, "[服务密钥已隐藏]")
 			}
@@ -106,6 +130,11 @@ func Redact(text string, states ...State) string {
 				if secret != "" {
 					text = strings.ReplaceAll(text, secret, "[证书凭据已隐藏]")
 				}
+			}
+		}
+		for _, device := range s.Devices {
+			if device.Controller != nil && device.Controller.Secret != "" {
+				text = strings.ReplaceAll(text, device.Controller.Secret, "[API凭据已隐藏]")
 			}
 		}
 	}

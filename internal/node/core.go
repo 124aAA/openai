@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +23,38 @@ import (
 	"qingnode/internal/platform"
 )
 
-var pinned = map[string]string{
-	"amd64": "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63",
-	"arm64": "04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088",
+var pinnedCores = map[string]map[string]string{
+	"1.14.0": {
+		"amd64": "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63",
+		"arm64": "04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088",
+	},
+	"1.14.3": {
+		"amd64": "e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee",
+		"arm64": "29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e",
+	},
+}
+
+var pinned = pinnedCores[DefaultCore]
+
+// PinnedCoreArchiveSHA256 returns the verified official linux archive SHA-256
+// for a pinned sing-box version and architecture, or "" when unpinned.
+func PinnedCoreArchiveSHA256(version, arch string) string {
+	if byArch, ok := pinnedCores[strings.TrimPrefix(strings.TrimSpace(version), "v")]; ok {
+		return byArch[arch]
+	}
+	return ""
+}
+
+// PinnedCoreVersions returns the ordered list of sing-box versions with
+// built-in verified archive digests for the given architecture.
+func PinnedCoreVersions(arch string) []string {
+	var out []string
+	for _, v := range []string{"1.14.0", "1.14.3"} {
+		if PinnedCoreArchiveSHA256(v, arch) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func CorePath(root, version string) string { return filepath.Join(root, "cores", version, "sing-box") }
@@ -96,15 +126,66 @@ func verifyCoreTags(output string) error {
 	}
 	return nil
 }
+// ValidateGitHubMirror enforces an explicit HTTPS-only download prefix without
+// credentials, query parameters, fragments, control characters, or traversal.
+func ValidateGitHubMirror(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > 512 || strings.ContainsAny(raw, " \t\r\n\x00") {
+		return "", errors.New("--github-mirror 必须为不含空白或控制字符的 HTTPS URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("--github-mirror 仅允许无认证/查询参数的 https:// 前缀")
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == ".." || seg == "." {
+			return "", errors.New("--github-mirror 路径不能包含 .. 或 .")
+		}
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+// RewriteGitHubDownloadURL replaces the https://github.com origin with a
+// validated HTTPS mirror prefix while preserving all mandatory SHA-256 checks.
+func RewriteGitHubDownloadURL(rawURL, mirror string) (string, error) {
+	clean, err := ValidateGitHubMirror(mirror)
+	if err != nil {
+		return "", err
+	}
+	if clean == "" {
+		return rawURL, nil
+	}
+	const origin = "https://github.com"
+	if !strings.HasPrefix(rawURL, origin+"/") {
+		return "", errors.New("仅允许重写官方 GitHub 下载地址")
+	}
+	return clean + strings.TrimPrefix(rawURL, origin), nil
+}
+
 func InstallCore(root, v, sum, archive string) error {
+	return InstallCoreWithMirror(root, v, sum, archive, "")
+}
+
+var coreDownloadTransport http.RoundTripper
+
+func InstallCoreWithMirror(root, v, sum, archive, mirror string) error {
+	cleanMirror, e := ValidateGitHubMirror(mirror)
+	if e != nil {
+		return e
+	}
+	if archive != "" && cleanMirror != "" {
+		return errors.New("离线 --archive 与 --github-mirror 不能同时指定")
+	}
 	if !SupportedVersion(v) {
 		return errors.New("仅支持 1.14.x 正式版本；跨版本须先更新适配器")
 	}
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
 		return errors.New("首版仅支持 amd64/arm64")
 	}
-	if sum == "" && v == DefaultCore {
-		sum = pinned[runtime.GOARCH]
+	if sum == "" {
+		sum = PinnedCoreArchiveSHA256(v, runtime.GOARCH)
 	}
 	d, e := hex.DecodeString(sum)
 	if e != nil || len(d) != 32 {
@@ -130,15 +211,19 @@ func InstallCore(root, v, sum, archive string) error {
 	if archive != "" {
 		src, e = os.Open(archive)
 	} else {
-		url := fmt.Sprintf("https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-linux-%s.tar.gz", v, v, runtime.GOARCH)
-		client := &http.Client{Timeout: 3 * time.Minute, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		rawURL := fmt.Sprintf("https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-linux-%s.tar.gz", v, v, runtime.GOARCH)
+		dlURL, mirrorErr := RewriteGitHubDownloadURL(rawURL, cleanMirror)
+		if mirrorErr != nil {
+			return mirrorErr
+		}
+		client := &http.Client{Transport: coreDownloadTransport, Timeout: 3 * time.Minute, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			if r.URL.Scheme != "https" || len(via) > 8 {
 				return errors.New("拒绝不安全下载跳转")
 			}
 			return nil
 		}}
 		var resp *http.Response
-		resp, e = client.Get(url)
+		resp, e = client.Get(dlURL)
 		if e == nil {
 			if resp.StatusCode != 200 {
 				resp.Body.Close()
@@ -496,16 +581,51 @@ func (b SystemBackend) Activate(s State) error {
 	}
 	deadline := time.Now().Add(45 * time.Second)
 	success := 0
+	lastPID := 0
+	wait := 80 * time.Millisecond
+	proc := b.ProcRoot
+	if proc == "" {
+		proc = "/proc"
+	}
 	for time.Now().Before(deadline) {
-		if b.Active() && socketsReadyWithUnavailableFamilies(s, b.Sockets(), unavailable) {
-			success++
+		active := b.Active()
+		pid := 0
+		var sockets []Socket
+		if active {
+			pid = b.PID()
+			sockets = ReadSockets(proc, pid)
+		}
+		if active && socketsReadyWithUnavailableFamilies(s, sockets, unavailable) {
+			if pid > 0 && lastPID > 0 && pid != lastPID {
+				// MainPID changed between ticks; restart the consecutive confirmation window.
+				success = 1
+			} else {
+				success++
+			}
+			lastPID = pid
 			if success >= 3 {
 				return nil
 			}
+			wait = 80 * time.Millisecond
 		} else {
 			success = 0
+			lastPID = 0
 		}
-		time.Sleep(time.Second)
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			break
+		}
+		sleep := wait
+		if sleep > rem {
+			sleep = rem
+		}
+		time.Sleep(sleep)
+		if success == 0 && wait < 500*time.Millisecond {
+			wait = wait * 3 / 2
+			if wait > 500*time.Millisecond {
+				wait = 500 * time.Millisecond
+			}
+		}
 	}
 	return errors.New("服务未通过持续运行检查")
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -233,3 +234,79 @@ func TestCertificateCLIStatusIsReadOnlyAndContainsNoCertificateSecrets(t *testin
 		t.Fatal("certificate status changed State or runtime")
 	}
 }
+
+func TestCertificateCLIStatusAndOverviewObserveOnDiskACMECertificate(t *testing.T) {
+	a, _, st := hy2CLIState(t)
+	certID := st.Nodes[0].CertificateID
+	r, err := st.FindCertificate(certID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(109),
+		Subject:      pkix.Name{CommonName: r.Certificate.ServerName},
+		Issuer:       pkix.Name{CommonName: "QingNode Test Issuer"},
+		DNSNames:     []string{r.Certificate.ServerName},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(60 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &ecKey.PublicKey, ecKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKey, err := x509.MarshalPKCS8PrivateKey(ecKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: rawKey}))
+	acmeDir := node.CertificateACMEDirectory(a.store.Root, *r)
+	domainDir := filepath.Join(acmeDir, "certificates", "acme-v02.api.letsencrypt.org-directory", r.Certificate.ServerName)
+	if err := os.MkdirAll(domainDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, r.Certificate.ServerName+".crt"), []byte(certPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, r.Certificate.ServerName+".key"), []byte(keyPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(domainDir, r.Certificate.ServerName+".json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := wizardOutput(t, func() error { return a.command([]string{"certificate", "status", "--id", certID}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Certificates []struct {
+			DiskValid     bool                   `json:"disk_certificate_valid"`
+			PrimarySource string                 `json:"primary_source"`
+			Summary       string                 `json:"observation_summary"`
+			Status        node.CertificateStatus `json:"status"`
+		} `json:"certificates"`
+	}
+	if err := json.Unmarshal([]byte(output), &report); err != nil || len(report.Certificates) != 1 {
+		t.Fatalf("failed to parse certificate status output: %v\n%s", err, output)
+	}
+	got := report.Certificates[0]
+	if !got.DiskValid || got.PrimarySource != "x509-disk" || got.Status.Status != "available" || got.Status.KeyMatched == nil || !*got.Status.KeyMatched || got.Status.Subject == "" || got.Status.Issuer == "" {
+		t.Fatalf("unexpected CLI certificate status: %+v", got)
+	}
+
+	var ov bytes.Buffer
+	if err := a.overview(&ov); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ov.String(), "ACME 已落盘有效") {
+		t.Fatalf("overview did not reflect issued on-disk ACME certificate:\n%s", ov.String())
+	}
+}
+

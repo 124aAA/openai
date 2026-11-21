@@ -71,6 +71,7 @@ func (a *app) operation(cmd string, args []string) error {
 			return errors.New("离线模式不操作服务")
 		}
 		if cmd == "stop" {
+			a.flushTrafficBeforeStop(*s)
 			return a.store.Backend.Stop()
 		}
 		if e := a.store.Backend.Check(*s, filepath.Join(a.store.Root, "current", "server.json")); e != nil {
@@ -83,6 +84,9 @@ func (a *app) operation(cmd string, args []string) error {
 			if e := fx.PrepareEffects(node.NewState(), *s); e != nil {
 				return e
 			}
+		}
+		if a.store.Backend.Active() {
+			a.flushTrafficBeforeStop(*s)
 		}
 		err := a.store.Backend.Activate(*s)
 		if err != nil {
@@ -161,6 +165,8 @@ func (a *app) uninstall(args []string) error {
 			if e = r.RecordAccount(filepath.Join(backupDir, ".qingnode-account")); e != nil {
 				return e
 			}
+		} else {
+			a.flushTrafficBeforeStop(st)
 		}
 		if e = r.Remove(*purge); e != nil {
 			return e

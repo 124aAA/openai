@@ -38,6 +38,9 @@ func validateSSAEAD(n Node) error {
 	if n.Reality != nil || n.Certificate != nil || n.CertificateID != "" || n.HY2 != nil || n.AnyTLS != nil || n.TUIC != nil || n.Transport != nil {
 		return errors.New("传统 Shadowsocks 不接受 TLS、REALITY 或其他协议参数")
 	}
+	if err := validateNodeMultiplex(n); err != nil {
+		return err
+	}
 	passwords := map[string]bool{}
 	for _, u := range n.Users {
 		if safeTLSCredential(u) != nil || passwords[u.Password] {
@@ -51,7 +54,11 @@ func validateSSAEAD(n Node) error {
 func ssAEADInbound(n Node, _ string) M {
 	// Traditional AEAD multi-user listeners take independent user passwords.
 	// A top-level server password belongs to the separate SS2022 adapter.
-	return M{"type": "shadowsocks", "method": n.Shadowsocks.Method, "users": tlsPasswordUsers(n)}
+	out := M{"type": "shadowsocks", "method": n.Shadowsocks.Method, "users": tlsPasswordUsers(n)}
+	if mux := multiplexInbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
+	return out
 }
 
 func ssAEADURI(n Node, u User) string {
@@ -62,9 +69,15 @@ func ssAEADURI(n Node, u User) string {
 }
 
 func ssAEADOutbound(n Node, u User) M {
-	return M{"type": "shadowsocks", "method": n.Shadowsocks.Method, "password": u.Password}
+	out := M{"type": "shadowsocks", "method": n.Shadowsocks.Method, "password": u.Password}
+	if mux := multiplexOutbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
+	return out
 }
 
 func ssAEADMihomo(n Node, u User) M {
-	return M{"type": "ss", "cipher": n.Shadowsocks.Method, "password": u.Password, "udp": true}
+	out := M{"type": "ss", "cipher": n.Shadowsocks.Method, "password": u.Password, "udp": true}
+	applyMultiplexMihomo(out, n.Multiplex)
+	return out
 }

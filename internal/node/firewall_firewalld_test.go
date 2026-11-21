@@ -218,7 +218,7 @@ func TestStateSchema8MigrationKeepsNewProtocolAndRejectsFirewalld(t *testing.T) 
 	s.Nodes = nil
 	b, _ := json.Marshal(s)
 	got, e := DecodeState(b)
-	if e != nil || got.Schema != 9 {
+	if e != nil || got.Schema != Schema {
 		t.Fatal(got.Schema, e)
 	}
 	s.Firewall = "firewalld"
@@ -229,7 +229,7 @@ func TestStateSchema8MigrationKeepsNewProtocolAndRejectsFirewalld(t *testing.T) 
 	s.Schema = 9
 	b, _ = json.Marshal(s)
 	got, e = DecodeState(b)
-	if e != nil || got.Firewall != "firewalld" {
+	if e != nil || got.Firewall != "firewalld" || got.Schema != Schema {
 		t.Fatal(got, e)
 	}
 	if !bytes.Contains(b, []byte(`"schema":9`)) {

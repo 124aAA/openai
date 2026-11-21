@@ -362,7 +362,33 @@ func (a *app) doctorWithReport(s node.State, loadErr error, report *diagnosticRe
 	} else if report != nil && !a.offline {
 		report.add(s, "core-config", "local", "核心配置与端口预检", "unknown", "派生配置缺失，未调用核心进行校验", "qingnode apply")
 	}
-	check("certificates", "local", "启用节点证书有效期", node.ValidateCertificateDates(s), false, "使用 edit --cert/--key 导入续期证书，或先 disable 对应节点")
+	certErr := node.ValidateCertificateDates(s)
+	if certErr == nil && loadErr == nil && a.store.Root != "" {
+		if canon, err := node.CanonicalCertificates(s); err == nil {
+			checked := map[string]bool{}
+			now := time.Now().UTC()
+			for _, n := range canon.Nodes {
+				if !n.Enabled || n.CertificateID == "" || checked[n.CertificateID] {
+					continue
+				}
+				checked[n.CertificateID] = true
+				r, err := canon.FindCertificate(n.CertificateID)
+				if err != nil || r.Certificate.Mode != "acme" {
+					continue
+				}
+				st, inspectErr := node.InspectCertificateResource(*r, a.store.Root, now)
+				if inspectErr != nil {
+					certErr = fmt.Errorf("证书 %s：%w", r.Name, inspectErr)
+					break
+				}
+				if st.Status == "failed" {
+					certErr = fmt.Errorf("证书 %s：%s", r.Name, st.Reason)
+					break
+				}
+			}
+		}
+	}
+	check("certificates", "local", "启用节点证书有效期", certErr, false, "使用 certificate status 查看落盘X.509证书详情，或使用 edit --cert/--key 导入续期证书")
 	for _, journal := range []string{"transaction.json", "uninstall.json"} {
 		_, err := os.Lstat(filepath.Join(a.store.Root, journal))
 		if err == nil {

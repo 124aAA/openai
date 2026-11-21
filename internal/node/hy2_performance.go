@@ -4,9 +4,19 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
+
+const maxHY2HopPortSpan = 20001
+
+type HY2Obfs struct {
+	Type     string `json:"type"`
+	Password string `json:"password"`
+}
 
 // ValidateHY2ClientCertificate applies the client's actual QUIC handshake
 // restriction. Ed25519 remains a valid server certificate and recovery asset;
@@ -46,6 +56,10 @@ type HY2Performance struct {
 	ClientMode            string        `json:"client_mode,omitempty"`
 	Server                *HY2Transport `json:"server,omitempty"`
 	Client                *HY2Transport `json:"client,omitempty"`
+	Obfs                  *HY2Obfs      `json:"obfs,omitempty"`
+	HopPorts              string        `json:"hop_ports,omitempty"`
+	HopInterval           string        `json:"hop_interval,omitempty"`
+	HopMode               string        `json:"hop_mode,omitempty"`
 }
 
 type HY2Transport struct {
@@ -67,9 +81,90 @@ type HY2QUIC struct {
 	DisablePathMTUDiscovery *bool  `json:"disable_path_mtu_discovery,omitempty"`
 }
 
+func ValidHY2ObfsPassword(pw string) bool {
+	if len(pw) < 4 || len(pw) > 256 || strings.TrimSpace(pw) == "" || !utf8.ValidString(pw) {
+		return false
+	}
+	for _, r := range pw {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func ParseHY2HopPorts(raw string) (int, int, error) {
+	startStr, endStr, ok := strings.Cut(raw, "-")
+	if !ok || startStr == "" || endStr == "" || strings.Contains(endStr, "-") {
+		return 0, 0, errors.New("Hysteria2 端口跳跃格式须为 起端口-止端口（如 20000-30000）")
+	}
+	for _, part := range []string{startStr, endStr} {
+		if len(part) > 5 || part[0] == '0' {
+			return 0, 0, errors.New("Hysteria2 端口跳跃起止端口须为 1024–65535 的十进制整数")
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return 0, 0, errors.New("Hysteria2 端口跳跃起止端口须为 1024–65535 的十进制整数")
+			}
+		}
+	}
+	start, err1 := strconv.Atoi(startStr)
+	end, err2 := strconv.Atoi(endStr)
+	if err1 != nil || err2 != nil || start < 1024 || end > 65535 || start >= end {
+		return 0, 0, errors.New("Hysteria2 端口跳跃范围须满足 1024 <= 起端口 < 止端口 <= 65535")
+	}
+	if end-start+1 > maxHY2HopPortSpan {
+		return 0, 0, fmt.Errorf("Hysteria2 端口跳跃跨度最多 %d 个端口", maxHY2HopPortSpan)
+	}
+	return start, end, nil
+}
+
+func ParseHY2HopInterval(raw string) (time.Duration, error) {
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 5*time.Second || d > 10*time.Minute || d%time.Second != 0 {
+		return 0, errors.New("Hysteria2 端口跳跃间隔须为 5s–10m 的整秒时长（如 30s）")
+	}
+	return d, nil
+}
+
+func hy2HasPerformanceTuning(p *HY2Performance) bool {
+	if p == nil {
+		return false
+	}
+	return p.ServerUpMbps != nil || p.ServerDownMbps != nil ||
+		p.ClientUpMbps != nil || p.ClientDownMbps != nil ||
+		p.IgnoreClientBandwidth != nil || p.ClientMode != "" ||
+		p.Server != nil || p.Client != nil
+}
+
 func validateHY2Performance(p *HY2Performance) error {
 	if p == nil {
 		return nil
+	}
+	if p.Obfs != nil {
+		if p.Obfs.Type != "salamander" {
+			return errors.New("Hysteria2 混淆类型仅支持 salamander")
+		}
+		if !ValidHY2ObfsPassword(p.Obfs.Password) {
+			return errors.New("Hysteria2 salamander 混淆密码须为 4–256 字节有效 UTF-8 且不含控制字符")
+		}
+	}
+	if p.HopPorts == "" {
+		if p.HopInterval != "" || p.HopMode != "" {
+			return errors.New("未设置 Hysteria2 跳跃端口范围（hop_ports）时不能设置 hop_interval 或 hop_mode")
+		}
+	} else {
+		if _, _, err := ParseHY2HopPorts(p.HopPorts); err != nil {
+			return err
+		}
+		if p.HopInterval != "" {
+			if _, err := ParseHY2HopInterval(p.HopInterval); err != nil {
+				return err
+			}
+		}
+		if p.HopMode != "" && p.HopMode != "external" && p.HopMode != "nftables" {
+			return errors.New("Hysteria2 端口跳跃模式（hop_mode）仅支持 external（外部映射/仅客户端声明）或 nftables（本机受管转发）")
+		}
 	}
 	for _, v := range []*int{p.ServerUpMbps, p.ServerDownMbps, p.ClientUpMbps, p.ClientDownMbps} {
 		if v != nil && (*v < 1 || *v > 1000000) {
@@ -223,6 +318,70 @@ func hy2Transport(out M, t *HY2Transport) {
 	}
 }
 
+func applyHY2ClientOutbound(out M, p *HY2Performance) {
+	if p == nil {
+		return
+	}
+	if p.ClientUpMbps != nil {
+		out["up_mbps"] = *p.ClientUpMbps
+	}
+	if p.ClientDownMbps != nil {
+		out["down_mbps"] = *p.ClientDownMbps
+	}
+	if p.Obfs != nil {
+		out["obfs"] = M{"type": p.Obfs.Type, "password": p.Obfs.Password}
+	}
+	if p.HopPorts != "" {
+		if start, end, err := ParseHY2HopPorts(p.HopPorts); err == nil {
+			delete(out, "server_port")
+			out["server_ports"] = []string{fmt.Sprintf("%d:%d", start, end)}
+		}
+		if p.HopInterval != "" {
+			out["hop_interval"] = p.HopInterval
+		}
+	}
+	hy2Transport(out, p.Client)
+}
+
+func applyHY2Mihomo(out M, p *HY2Performance) {
+	if p == nil {
+		return
+	}
+	if p.ClientUpMbps != nil {
+		out["up"] = fmt.Sprintf("%d Mbps", *p.ClientUpMbps)
+	}
+	if p.ClientDownMbps != nil {
+		out["down"] = fmt.Sprintf("%d Mbps", *p.ClientDownMbps)
+	}
+	if p.Obfs != nil {
+		out["obfs"] = p.Obfs.Type
+		out["obfs-password"] = p.Obfs.Password
+	}
+	if p.HopPorts != "" {
+		out["ports"] = p.HopPorts
+		if p.HopInterval != "" {
+			if d, err := ParseHY2HopInterval(p.HopInterval); err == nil {
+				out["hop-interval"] = int(d / time.Second)
+			}
+		}
+	}
+	if t := p.Client; t != nil {
+		if t.BBRProfile != "" {
+			out["bbr-profile"] = t.BBRProfile
+		}
+		if q := t.QUIC; q != nil {
+			if q.StreamReceiveWindow != nil {
+				out["initial-stream-receive-window"] = *q.StreamReceiveWindow
+				out["max-stream-receive-window"] = *q.StreamReceiveWindow
+			}
+			if q.ConnectionReceiveWindow != nil {
+				out["initial-connection-receive-window"] = *q.ConnectionReceiveWindow
+				out["max-connection-receive-window"] = *q.ConnectionReceiveWindow
+			}
+		}
+	}
+}
+
 // HY2ExportWarnings describes concrete lost or overridden semantics. It is also
 // used by info/URI callers, which do not have an error return in the old API.
 func HY2ExportWarnings(n Node, format string) []string {
@@ -237,6 +396,9 @@ func HY2ExportWarnings(n Node, format string) []string {
 	if format == "uri" || format == "qr" || format == "base64" {
 		if p.ClientUpMbps != nil || p.ClientMode != "" || hy2TransportConfigured(p.Client) {
 			warnings = append(warnings, "分享链接不能完整表示客户端Hysteria2性能选择；请导出sing-box配置")
+		}
+		if p.HopInterval != "" {
+			warnings = append(warnings, "分享链接不能完整表示Hysteria2端口跳跃间隔（hop_interval）；请导出sing-box或Mihomo配置")
 		}
 		return warnings
 	}
@@ -286,7 +448,14 @@ type ExportResult struct {
 }
 
 func ExportWithCapabilities(n Node, u User, format, clientVersion string, tags []string, allowLossy bool) (ExportResult, error) {
+	return ExportWithClientOptions(n, u, format, clientVersion, tags, allowLossy, ClientOptions{})
+}
+
+func ExportWithClientOptions(n Node, u User, format, clientVersion string, tags []string, allowLossy bool, opts ClientOptions) (ExportResult, error) {
 	r := ExportResult{Warnings: HY2ExportWarnings(n, format)}
+	if err := ValidateClientOptions(opts); err != nil {
+		return r, err
+	}
 	if err := ValidateProtocolClient(n, format, clientVersion, tags); err != nil {
 		return r, err
 	}
@@ -300,12 +469,17 @@ func ExportWithCapabilities(n Node, u User, format, clientVersion string, tags [
 		if err := validateHY2Performance(n.HY2); err != nil {
 			return r, err
 		}
+		hasPerf := hy2HasPerformanceTuning(n.HY2)
 		if format == "sing-box" {
-			if err := ValidateHY2Capabilities(n, clientVersion, tags); err != nil {
+			v := clientVersion
+			if !hasPerf && v == "" {
+				v = DefaultCore
+			}
+			if err := ValidateHY2Capabilities(n, v, tags); err != nil {
 				return r, err
 			}
 		}
-		if (format == "mihomo" || format == "provider") && clientVersion != "1.19.30" {
+		if (format == "mihomo" || format == "provider") && hasPerf && clientVersion != "1.19.30" {
 			return r, errors.New("Hysteria2性能导出仅核验Mihomo 1.19.30；不会按其他版本猜测兼容")
 		}
 		if format != "sing-box" && len(r.Warnings) > 0 && !allowLossy {
@@ -315,6 +489,6 @@ func ExportWithCapabilities(n Node, u User, format, clientVersion string, tags [
 	// Export performs the same loss gate. Only this explicit, warning-bearing
 	// entry may select the unchecked serializer for a user-approved downgrade.
 	var err error
-	r.Data, err = exportUnchecked(n, u, format)
+	r.Data, err = exportUncheckedWithOptions(n, u, format, opts)
 	return r, err
 }

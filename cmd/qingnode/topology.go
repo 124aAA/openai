@@ -183,21 +183,43 @@ func (a *app) egress(args []string) error {
 	machine := f.Bool("json", false, "仅list/show：版本1出口声明，不含远程凭据或连通性承诺")
 	id := f.String("id", "", "出口稳定ID或已有名称；add省略则生成ID")
 	name := f.String("name", "", "出口名称")
-	protocol := f.String("protocol", "", "socks5 / reality / ss2022 / hysteria2；WireGuard用配对或严格批量导入")
+	protocol := f.String("protocol", "", "socks5 / http / reality / ss2022 / ss-aead / hysteria2 / trojan / vless-tls / vmess-tls / anytls / tuic；WireGuard用配对或严格批量导入")
 	server := f.String("server", "", "远程出口连接IP或域名")
 	port := namedPortFlag(f, "port", 0, "远程出口端口（十进制1–65535）")
 	via := f.String("via", "", "通过另一真实出口连接；direct明确清除上游")
-	udp := f.Bool("udp", false, "明确声明远程出口支持UDP；SOCKS5默认false，其他协议默认true")
-	username := f.String("username", "", "远程SOCKS5用户名")
+	udp := f.Bool("udp", false, "明确声明远程出口支持UDP；socks5与http默认false，其他协议默认true")
+	username := f.String("username", "", "远程SOCKS5/HTTP代理用户名")
 	password := f.String("password", "", "远程出口密码或SS2022组合密钥；会保存于私有State")
-	clearAuth := f.Bool("clear-auth", false, "显式清除SOCKS5认证；不适用于其他协议")
-	uuid := f.String("uuid", "", "远程REALITY用户UUID")
+	clearAuth := f.Bool("clear-auth", false, "显式清除SOCKS5/HTTP代理认证；不适用于其他协议")
+	tlsEnabled := f.Bool("tls", false, "远程HTTP代理开启HTTPS(TLS)连接")
+	uuid := f.String("uuid", "", "远程REALITY/VLESS/VMess/TUIC用户UUID")
+	security := f.String("security", "", "远程VMess+TLS加密方式：auto（默认）/ aes-128-gcm / chacha20-poly1305")
+	packetEncoding := f.String("packet-encoding", "", "远程VLESS/VMess UDP包编码：xudp / packetaddr（clear清除）")
 	sni := f.String("sni", "", "远程TLS名称，独立于连接地址")
 	publicKey := f.String("public-key", "", "远程REALITY公钥")
 	shortID := f.String("short-id", "", "远程REALITY short ID")
 	fingerprint := f.String("fingerprint", "", "远程REALITY指纹；新出口默认chrome")
-	method := f.String("method", "", "远程SS2022方法；默认2022-blake3-aes-256-gcm")
-	ca := f.String("ca", "", "远程HY2的PEM CA文件；省略保留系统信任或已保存CA")
+	method := f.String("method", "", "远程SS2022或传统ss-aead加密方法")
+	ca := f.String("ca", "", "远程TLS/HY2的PEM信任证书文件；clear清除已固定证书")
+	obfsPassword := f.String("obfs-password", "", "远程HY2 salamander混淆密码（clear清除）")
+	hopPorts := f.String("hop-ports", "", "远程HY2端口跳跃区间（如20000-30000，clear清除）")
+	hopInterval := f.String("hop-interval", "", "远程HY2端口跳跃间隔（如30s，clear清除）")
+	congestion := f.String("congestion-control", "", "远程TUIC拥塞控制：bbr / cubic / new_reno（clear恢复默认）")
+	udpRelayMode := f.String("udp-relay-mode", "", "远程TUIC UDP模式：native / quic（clear恢复默认）")
+	heartbeat := f.String("heartbeat", "", "远程TUIC心跳间隔（如10s，clear恢复默认）")
+	idleCheck := f.String("idle-session-check-interval", "", "远程AnyTLS空闲检查间隔（如30s，clear恢复默认）")
+	idleTimeout := f.String("idle-session-timeout", "", "远程AnyTLS空闲超时（如30s，clear恢复默认）")
+	minIdle := f.Int("min-idle-session", 0, "远程AnyTLS最小保活空闲会话数（0–64）")
+	transport := f.String("transport", "", "远程出口传输层：tcp / ws / grpc / httpupgrade / http(h2)")
+	transportPath := f.String("path", "", "远程WebSocket/HTTPUpgrade/HTTP2路径")
+	transportHost := f.String("transport-host", "", "远程WebSocket/HTTPUpgrade/HTTP2 Host头")
+	serviceName := f.String("service-name", "", "远程gRPC serviceName")
+	wsMaxEarlyData := f.Int("ws-max-early-data", 0, "远程WebSocket Early Data最大字节数（0关闭）")
+	wsEarlyDataHeader := f.String("ws-early-data-header", "", "远程WebSocket Early Data头名称（default恢复默认）")
+	multiplex := f.String("multiplex", "", "远程TCP出口多路复用：h2mux / smux / yamux / off")
+	muxMaxConnections := f.Int("mux-max-connections", 0, "远程多路复用最大连接数（0–64）")
+	muxMinStreams := f.Int("mux-min-streams", 0, "远程多路复用单连接最小流数（0–256）")
+	muxPadding := f.Bool("mux-padding", false, "远程多路复用填充（padding）")
 	preview := f.Bool("preview", false, "只读预览；不验证远程应用层连接")
 	yes := f.Bool("yes", false, "确认删除未被引用的出口")
 	if err := parse(f, args[1:]); err != nil {
@@ -268,7 +290,7 @@ func (a *app) egress(args []string) error {
 		*server = h
 	}
 	var certPEM string
-	if flagSet(f, "ca") {
+	if flagSet(f, "ca") && strings.ToLower(strings.TrimSpace(*ca)) != "clear" {
 		b, err := readLimited(*ca, 1<<20)
 		if err != nil {
 			return errors.New("无法读取远程HY2 CA文件")
@@ -289,11 +311,14 @@ func (a *app) egress(args []string) error {
 			candidate.Egresses = append(candidate.Egresses[:i], candidate.Egresses[i+1:]...)
 		} else {
 			var e node.Egress
+			impliedTransport := ""
 			if action == "add" {
 				if *protocol == "" || *server == "" || !flagSet(f, "port") {
 					return errors.New("add需要 --protocol、--server、--port及该协议的远程凭据")
 				}
-				e = node.Egress{ID: *id, Name: *name, Protocol: *protocol, Server: *server, Port: *port, UDP: *protocol != "socks5"}
+				resolvedProto, impTr := resolveEgressProtocolAlias(*protocol)
+				impliedTransport = impTr
+				e = node.Egress{ID: *id, Name: *name, Protocol: resolvedProto, Server: *server, Port: *port, UDP: resolvedProto != "socks5" && resolvedProto != "http"}
 				if e.ID == "" {
 					e.ID = node.Token(8)
 				}
@@ -315,6 +340,8 @@ func (a *app) egress(args []string) error {
 				}
 			}
 			allowed := []string{"id", "name", "protocol", "server", "port", "via", "udp", "preview"}
+			transportFlags := []string{"transport", "path", "transport-host", "service-name", "ws-max-early-data", "ws-early-data-header"}
+			muxFlags := []string{"multiplex", "mux-max-connections", "mux-min-streams", "mux-padding"}
 			switch e.Protocol {
 			case "socks5":
 				allowed = append(allowed, "username", "password", "clear-auth")
@@ -333,8 +360,38 @@ func (a *app) egress(args []string) error {
 				if flagSet(f, "password") {
 					e.Socks.Password = *password
 				}
+			case "http":
+				allowed = append(allowed, "username", "password", "clear-auth", "tls", "sni", "ca")
+				if e.HTTP == nil {
+					e.HTTP = &node.RemoteHTTP{}
+				}
+				if *clearAuth {
+					if flagSet(f, "username") || flagSet(f, "password") {
+						return errors.New("--clear-auth不能与新认证参数同用")
+					}
+					e.HTTP.Username, e.HTTP.Password = "", ""
+				}
+				if flagSet(f, "username") {
+					e.HTTP.Username = *username
+				}
+				if flagSet(f, "password") {
+					e.HTTP.Password = *password
+				}
+				if flagSet(f, "tls") {
+					e.HTTP.TLS = *tlsEnabled
+					if !*tlsEnabled && !flagSet(f, "sni") && !flagSet(f, "ca") {
+						e.HTTP.ServerName = ""
+						e.HTTP.CertificatePEM = ""
+					}
+				}
+				if flagSet(f, "sni") {
+					e.HTTP.ServerName = *sni
+				}
+				if flagSet(f, "ca") {
+					e.HTTP.CertificatePEM = certPEM
+				}
 			case "reality":
-				allowed = append(allowed, "uuid", "sni", "public-key", "short-id", "fingerprint")
+				allowed = append(allowed, "uuid", "sni", "public-key", "short-id", "fingerprint", "transport", "service-name")
 				if e.Reality == nil {
 					e.Reality = &node.RemoteReality{Fingerprint: "chrome"}
 				}
@@ -345,6 +402,7 @@ func (a *app) egress(args []string) error {
 				}
 			case "ss2022":
 				allowed = append(allowed, "method", "password")
+				allowed = append(allowed, muxFlags...)
 				if e.Shadowsocks == nil {
 					e.Shadowsocks = &node.RemoteSS{Method: node.SS2022Method}
 				}
@@ -354,8 +412,20 @@ func (a *app) egress(args []string) error {
 				if flagSet(f, "password") {
 					e.Shadowsocks.Password = *password
 				}
+			case "ss-aead":
+				allowed = append(allowed, "method", "password")
+				allowed = append(allowed, muxFlags...)
+				if e.Shadowsocks == nil {
+					e.Shadowsocks = &node.RemoteSS{Method: node.DefaultSSAEADMethod}
+				}
+				if flagSet(f, "method") {
+					e.Shadowsocks.Method = *method
+				}
+				if flagSet(f, "password") {
+					e.Shadowsocks.Password = *password
+				}
 			case "hysteria2":
-				allowed = append(allowed, "sni", "password", "ca")
+				allowed = append(allowed, "sni", "password", "ca", "obfs-password", "hop-ports", "hop-interval")
 				if e.HY2 == nil {
 					e.HY2 = &node.RemoteHY2{}
 				}
@@ -368,10 +438,192 @@ func (a *app) egress(args []string) error {
 				if flagSet(f, "ca") {
 					e.HY2.CertificatePEM = certPEM
 				}
+				if flagSet(f, "obfs-password") || flagSet(f, "hop-ports") || flagSet(f, "hop-interval") {
+					var perf node.HY2Performance
+					if e.HY2.Performance != nil {
+						perf = *e.HY2.Performance
+					}
+					if flagSet(f, "obfs-password") {
+						if strings.EqualFold(strings.TrimSpace(*obfsPassword), "clear") {
+							perf.Obfs = nil
+						} else {
+							perf.Obfs = &node.HY2Obfs{Type: "salamander", Password: *obfsPassword}
+						}
+					}
+					if flagSet(f, "hop-ports") {
+						hp := strings.TrimSpace(*hopPorts)
+						if strings.EqualFold(hp, "clear") {
+							perf.HopPorts = ""
+						} else {
+							perf.HopPorts = hp
+						}
+					}
+					if flagSet(f, "hop-interval") {
+						hi := strings.TrimSpace(*hopInterval)
+						if strings.EqualFold(hi, "clear") {
+							perf.HopInterval = ""
+						} else {
+							perf.HopInterval = hi
+						}
+					}
+					if b, _ := json.Marshal(perf); string(b) == "{}" {
+						e.HY2.Performance = nil
+					} else {
+						e.HY2.Performance = &perf
+					}
+				}
+			case "trojan":
+				allowed = append(allowed, "sni", "password", "ca")
+				allowed = append(allowed, transportFlags...)
+				allowed = append(allowed, muxFlags...)
+				if e.Trojan == nil {
+					e.Trojan = &node.RemoteTrojan{}
+				}
+				if flagSet(f, "sni") {
+					e.Trojan.ServerName = *sni
+				}
+				if flagSet(f, "password") {
+					e.Trojan.Password = *password
+				}
+				if flagSet(f, "ca") {
+					e.Trojan.CertificatePEM = certPEM
+				}
+			case "vless-tls":
+				allowed = append(allowed, "uuid", "sni", "ca", "packet-encoding")
+				allowed = append(allowed, transportFlags...)
+				allowed = append(allowed, muxFlags...)
+				if e.VLESS == nil {
+					e.VLESS = &node.RemoteVLESS{}
+				}
+				if flagSet(f, "uuid") {
+					e.VLESS.UUID = *uuid
+				}
+				if flagSet(f, "sni") {
+					e.VLESS.ServerName = *sni
+				}
+				if flagSet(f, "ca") {
+					e.VLESS.CertificatePEM = certPEM
+				}
+				if flagSet(f, "packet-encoding") {
+					pe := strings.TrimSpace(*packetEncoding)
+					if strings.EqualFold(pe, "clear") {
+						e.VLESS.PacketEncoding = ""
+					} else {
+						e.VLESS.PacketEncoding = pe
+					}
+				}
+			case "vmess-tls":
+				allowed = append(allowed, "uuid", "security", "sni", "ca", "packet-encoding")
+				allowed = append(allowed, transportFlags...)
+				allowed = append(allowed, muxFlags...)
+				if e.VMess == nil {
+					e.VMess = &node.RemoteVMess{Security: "auto"}
+				}
+				if flagSet(f, "uuid") {
+					e.VMess.UUID = *uuid
+				}
+				if flagSet(f, "security") {
+					e.VMess.Security = strings.TrimSpace(*security)
+				}
+				if flagSet(f, "sni") {
+					e.VMess.ServerName = *sni
+				}
+				if flagSet(f, "ca") {
+					e.VMess.CertificatePEM = certPEM
+				}
+				if flagSet(f, "packet-encoding") {
+					pe := strings.TrimSpace(*packetEncoding)
+					if strings.EqualFold(pe, "clear") {
+						e.VMess.PacketEncoding = ""
+					} else {
+						e.VMess.PacketEncoding = pe
+					}
+				}
+			case "anytls":
+				allowed = append(allowed, "sni", "password", "ca", "idle-session-check-interval", "idle-session-timeout", "min-idle-session")
+				if e.AnyTLS == nil {
+					e.AnyTLS = &node.RemoteAnyTLS{}
+				}
+				if flagSet(f, "sni") {
+					e.AnyTLS.ServerName = *sni
+				}
+				if flagSet(f, "password") {
+					e.AnyTLS.Password = *password
+				}
+				if flagSet(f, "ca") {
+					e.AnyTLS.CertificatePEM = certPEM
+				}
+				if flagSet(f, "idle-session-check-interval") {
+					v := strings.TrimSpace(*idleCheck)
+					if strings.EqualFold(v, "clear") {
+						e.AnyTLS.IdleSessionCheckInterval = ""
+					} else {
+						e.AnyTLS.IdleSessionCheckInterval = v
+					}
+				}
+				if flagSet(f, "idle-session-timeout") {
+					v := strings.TrimSpace(*idleTimeout)
+					if strings.EqualFold(v, "clear") {
+						e.AnyTLS.IdleSessionTimeout = ""
+					} else {
+						e.AnyTLS.IdleSessionTimeout = v
+					}
+				}
+				if flagSet(f, "min-idle-session") {
+					v := *minIdle
+					e.AnyTLS.MinIdleSession = &v
+				}
+			case "tuic":
+				allowed = append(allowed, "uuid", "password", "sni", "ca", "congestion-control", "udp-relay-mode", "heartbeat")
+				if e.TUIC == nil {
+					e.TUIC = &node.RemoteTUIC{}
+				}
+				if flagSet(f, "uuid") {
+					e.TUIC.UUID = *uuid
+				}
+				if flagSet(f, "password") {
+					e.TUIC.Password = *password
+				}
+				if flagSet(f, "sni") {
+					e.TUIC.ServerName = *sni
+				}
+				if flagSet(f, "ca") {
+					e.TUIC.CertificatePEM = certPEM
+				}
+				if flagSet(f, "congestion-control") {
+					v := strings.TrimSpace(*congestion)
+					if strings.EqualFold(v, "clear") {
+						e.TUIC.CongestionControl = ""
+					} else {
+						e.TUIC.CongestionControl = v
+					}
+				}
+				if flagSet(f, "udp-relay-mode") {
+					v := strings.TrimSpace(*udpRelayMode)
+					if strings.EqualFold(v, "clear") {
+						e.TUIC.UDPRelayMode = ""
+					} else {
+						e.TUIC.UDPRelayMode = v
+					}
+				}
+				if flagSet(f, "heartbeat") {
+					v := strings.TrimSpace(*heartbeat)
+					if strings.EqualFold(v, "clear") {
+						e.TUIC.Heartbeat = ""
+					} else {
+						e.TUIC.Heartbeat = v
+					}
+				}
 			default:
 				return errors.New("此协议请使用wireguard配对或topology严格批量导入")
 			}
 			if err := rejectTopologyFlags(f, allowed...); err != nil {
+				return err
+			}
+			if err := applyEgressTransportCLI(&e, impliedTransport, flagSet(f, "transport"), *transport, flagSet(f, "path"), *transportPath, flagSet(f, "transport-host"), *transportHost, flagSet(f, "service-name"), *serviceName, flagSet(f, "ws-max-early-data"), *wsMaxEarlyData, flagSet(f, "ws-early-data-header"), *wsEarlyDataHeader); err != nil {
+				return err
+			}
+			if err := applyEgressMultiplexCLI(&e, flagSet(f, "multiplex"), *multiplex, flagSet(f, "mux-max-connections"), *muxMaxConnections, flagSet(f, "mux-min-streams"), *muxMinStreams, flagSet(f, "mux-padding"), *muxPadding); err != nil {
 				return err
 			}
 			if flagSet(f, "name") {
@@ -401,6 +653,151 @@ func (a *app) egress(args []string) error {
 		*s = candidate
 		return nil
 	})
+}
+
+func resolveEgressProtocolAlias(raw string) (string, string) {
+	p := strings.ToLower(strings.TrimSpace(raw))
+	switch p {
+	case "socks5", "http", "ss2022", "ss-aead", "hysteria2", "anytls", "tuic", "wireguard":
+		return p, ""
+	case "https":
+		return "http", ""
+	case "reality-grpc":
+		return "reality", "grpc"
+	}
+	normProto, normTr, err := node.NormalizeProtocolAndTransport(p, "", "", "", "")
+	if err == nil && (normProto == "reality" || node.ProtocolSupportsTransport(normProto)) {
+		if normTr != nil {
+			return normProto, normTr.Type
+		}
+		return normProto, ""
+	}
+	return p, ""
+}
+
+func applyEgressTransportCLI(e *node.Egress, impliedTr string, trSet bool, trVal string, pathSet bool, pathVal string, hostSet bool, hostVal string, svcSet bool, svcVal string, wsMaxSet bool, wsMaxVal int, wsHdrSet bool, wsHdrVal string) error {
+	if impliedTr == "" && !trSet && !pathSet && !hostSet && !svcSet && !wsMaxSet && !wsHdrSet {
+		return nil
+	}
+	var tr node.TransportOptions
+	if e.Transport != nil {
+		tr = *e.Transport
+	} else {
+		tr.Type = "tcp"
+	}
+	nextType := tr.Type
+	if impliedTr != "" {
+		nextType = impliedTr
+	}
+	if trSet {
+		rawTr := strings.ToLower(strings.TrimSpace(trVal))
+		switch rawTr {
+		case "none", "clear":
+			rawTr = "tcp"
+		case "websocket":
+			rawTr = "ws"
+		case "h2":
+			rawTr = "http"
+		}
+		if impliedTr != "" && rawTr != impliedTr {
+			return fmt.Errorf("协议缩写与 --transport %s 冲突", trVal)
+		}
+		nextType = rawTr
+	}
+	if nextType != tr.Type {
+		tr.Type = nextType
+		switch nextType {
+		case "tcp":
+			tr = node.TransportOptions{Type: "tcp"}
+		case "ws":
+			tr.ServiceName = ""
+		case "httpupgrade", "http":
+			tr.ServiceName = ""
+			tr.MaxEarlyData = 0
+			tr.EarlyDataHeaderName = ""
+		case "grpc":
+			tr.Path = ""
+			tr.Host = ""
+			tr.MaxEarlyData = 0
+			tr.EarlyDataHeaderName = ""
+		}
+	}
+	if pathSet {
+		tr.Path = pathVal
+	}
+	if hostSet {
+		tr.Host = hostVal
+	}
+	if svcSet {
+		tr.ServiceName = svcVal
+	}
+	_, normTr, err := node.NormalizeProtocolAndTransport(e.Protocol, tr.Type, tr.Path, tr.Host, tr.ServiceName)
+	if err != nil {
+		return err
+	}
+	if normTr != nil && normTr.Type == "ws" {
+		normTr.MaxEarlyData = tr.MaxEarlyData
+		normTr.EarlyDataHeaderName = tr.EarlyDataHeaderName
+	}
+	normTr, err = applyWSEarlyDataFlags(normTr, wsMaxSet, wsMaxVal, wsHdrSet, wsHdrVal)
+	if err != nil {
+		return err
+	}
+	e.Transport = normTr
+	return nil
+}
+
+func applyEgressMultiplexCLI(e *node.Egress, muxSet bool, muxProto string, maxConnSet bool, maxConn int, minStrSet bool, minStr int, padSet bool, pad bool) error {
+	if !muxSet && !maxConnSet && !minStrSet && !padSet {
+		return nil
+	}
+	var mux node.MultiplexOptions
+	if e.Multiplex != nil {
+		mux = *e.Multiplex
+	}
+	turningOff := false
+	if muxSet {
+		mp := strings.ToLower(strings.TrimSpace(muxProto))
+		switch mp {
+		case "off", "none", "false", "clear":
+			turningOff = true
+		case "on", "true":
+			mux.Enabled = true
+			if mux.Protocol == "" {
+				mux.Protocol = "h2mux"
+			}
+		default:
+			mux.Enabled = true
+			mux.Protocol = mp
+		}
+	}
+	if turningOff {
+		if maxConnSet || minStrSet || (padSet && pad) {
+			return errors.New("关闭多路复用时不能同时指定连接数、流数或 padding")
+		}
+		e.Multiplex = nil
+		return nil
+	}
+	if !mux.Enabled {
+		mux.Enabled = true
+		if mux.Protocol == "" {
+			mux.Protocol = "h2mux"
+		}
+	}
+	if maxConnSet {
+		mux.MaxConnections = maxConn
+	}
+	if minStrSet {
+		mux.MinStreams = minStr
+	}
+	if padSet {
+		mux.Padding = pad
+	}
+	if err := node.ValidateMultiplexOptions(&mux); err != nil {
+		return err
+	}
+	e.Multiplex = &mux
+	return nil
 }
 
 func (a *app) route(args []string) error {

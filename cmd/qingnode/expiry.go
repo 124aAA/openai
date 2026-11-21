@@ -155,3 +155,201 @@ func (a *app) expirationAt(args []string, now time.Time) error {
 		return errors.New("未知expiration操作；支持list/set/remove/apply")
 	}
 }
+
+func (a *app) loadUsageLookup() (node.TrafficUsageLookup, bool, error) {
+	if a == nil || a.store == nil {
+		return nil, false, nil
+	}
+	st := a.monitorStore()
+	ledger, err := st.LoadTrafficLedger()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "不存在") {
+			return nil, false, nil
+		}
+		if _, statErr := os.Lstat(st.Root); errors.Is(statErr, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	lookup := func(nodeID, userID string, resetDay int, now time.Time) (int64, int64, bool) {
+		p, ok := ledger.UsageFor(nodeID, userID, resetDay, now)
+		return p.Upload, p.Download, ok
+	}
+	return lookup, ledger.GapDetected, nil
+}
+
+func printQuotaPlan(p node.QuotaPlan) {
+	fmt.Printf("流量配额检查时间=%s\t缺口标记=%t\t软告警=%d\t达硬上限=%d\t可执行=%d\t被阻止=%d\n",
+		p.EvaluatedAt, p.GapDetected, p.Warnings, p.Due, p.Ready, p.Blocked)
+	for _, d := range p.Items {
+		scope := "用户凭据"
+		if d.NodeID == "" && d.DeviceID != "" {
+			scope = "设备汇总"
+		} else if d.DeviceID != "" {
+			scope = "设备指定绑定"
+		}
+		status := map[string]string{
+			"ok":       "正常",
+			"warning":  "已触发软告警",
+			"due":      "达上限待停用",
+			"disabled": "已执行停用",
+			"blocked":  "共享凭据阻止",
+		}[d.Status]
+		fmt.Printf("%s\t范围=%s\t周期=%s(reset_day=%d)\t节点=%s\t凭据=%s\t设备=%s\t已用=%d(上行=%d,下行=%d)\t软阈值=%d\t硬上限=%d\t状态=%s\t已停用=%s\t影响设备=%s\t停节点=%t\n",
+			d.ID, scope, d.Period, d.ResetDay, d.NodeID, d.UserID, d.DeviceID,
+			d.UsedBytes, d.UploadBytes, d.DownloadBytes, d.WarnBytes, d.HardBytes,
+			status, d.DisabledAt, strings.Join(d.AffectedDeviceIDs, ","), d.StopsNode)
+		if d.Reason != "" {
+			fmt.Println(d.Reason)
+		}
+	}
+	fmt.Println("流量数据来自持久采样账本，存在观测缺口时如实标记gap_detected，不作精确计费承诺；查询不会隐式停用凭据。")
+}
+
+func (a *app) quota(args []string) error {
+	return a.quotaAt(args, time.Now().UTC())
+}
+
+func (a *app) quotaAt(args []string, now time.Time) error {
+	if len(args) == 0 {
+		return errors.New("用法：quota list|set|remove|apply；set须明确(--node NODE_ID --user USER_ID)或--device DEVICE_ID，并设置--warn-bytes或--hard-bytes；写入需--yes或只读--preview")
+	}
+	action := args[0]
+	f := fs("quota " + action)
+	machine := f.Bool("json", false, "仅list：版本1流量配额评估计划；查询永不隐式停用")
+	id := f.String("id", "", "配额计划稳定ID；set省略时新建，remove必须填写")
+	nodeID := f.String("node", "", "精确节点稳定ID")
+	userID := f.String("user", "", "精确凭据稳定ID")
+	deviceID := f.String("device", "", "精确设备稳定ID；可单独对设备设配额，或限定凭据绑定")
+	warnBytes := f.Int64("warn-bytes", 0, "可选软告警字节阈值（0为不设）")
+	hardBytes := f.Int64("hard-bytes", 0, "可选硬配额上限字节数（0为仅告警不停用）")
+	resetDay := f.Int("reset-day", 0, "按月重置UTC日（1–31），0表示累计不重置")
+	preview := f.Bool("preview", false, "只读预览配额设置或达限停用影响")
+	yes := f.Bool("yes", false, "确认保存、移除或应用达限配额停用")
+	if err := parse(f, args[1:]); err != nil {
+		return err
+	}
+	if flagSet(f, "json") && action != "list" {
+		return errors.New("--json仅用于quota list")
+	}
+	switch action {
+	case "list":
+		if err := rejectTopologyFlags(f, "json"); err != nil {
+			return err
+		}
+		return a.inspectState(func(st *node.State) error {
+			lookup, gap, err := a.loadUsageLookup()
+			if err != nil {
+				return err
+			}
+			p, err := node.PlanTrafficQuotas(*st, lookup, gap, now)
+			if err == nil && *machine {
+				return queryJSON("qingnode-traffic-quota-plan", p)
+			}
+			if err == nil {
+				printQuotaPlan(p)
+			}
+			return err
+		})
+	case "set":
+		if err := rejectTopologyFlags(f, "id", "node", "user", "device", "warn-bytes", "hard-bytes", "reset-day", "preview", "yes"); err != nil {
+			return err
+		}
+		if !*yes && !*preview {
+			return errors.New("保存流量配额需要--yes，或先用--preview查看；只有显式quota apply或monitor run --apply-quota才会停用凭据")
+		}
+		if *id == "" {
+			*id = node.Token(8)
+		}
+		q := node.TrafficQuota{
+			ID:        *id,
+			NodeID:    *nodeID,
+			UserID:    *userID,
+			DeviceID:  *deviceID,
+			WarnBytes: *warnBytes,
+			HardBytes: *hardBytes,
+			ResetDay:  *resetDay,
+		}
+		if err := a.changeTopology(*preview, func(st *node.State) error {
+			if err := node.SetTrafficQuota(st, q); err != nil {
+				return err
+			}
+			lookup, gap, _ := a.loadUsageLookup()
+			p, err := node.PlanTrafficQuotas(*st, lookup, gap, now)
+			if err == nil {
+				printQuotaPlan(p)
+			}
+			return err
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("流量配额ID：%s；仅保存配额不会自行停用服务。\n", *id)
+		return nil
+	case "remove":
+		if err := rejectTopologyFlags(f, "id", "preview", "yes"); err != nil {
+			return err
+		}
+		if !*yes && !*preview {
+			return errors.New("移除流量配额需要--yes；不会自动恢复已删除凭据或已停用设备")
+		}
+		if err := a.changeTopology(*preview, func(st *node.State) error { return node.RemoveTrafficQuota(st, *id) }); err != nil {
+			return err
+		}
+		fmt.Println("已处理流量配额移除请求；不会自动恢复已删除凭据、设备绑定或节点监听。")
+		return nil
+	case "apply":
+		if err := rejectTopologyFlags(f, "preview", "yes"); err != nil {
+			return err
+		}
+		if !*yes && !*preview {
+			return errors.New("停用全部达硬上限代理凭据需要--yes；请先用--preview查看影响")
+		}
+		change := func(st *node.State) error {
+			lookup, gap, err := a.loadUsageLookup()
+			if err != nil {
+				return err
+			}
+			candidate, p, err := node.ApplyDueTrafficQuotas(*st, lookup, gap, now)
+			printQuotaPlan(p)
+			if err != nil {
+				return err
+			}
+			*st = candidate
+			return nil
+		}
+		if *preview {
+			return a.changeTopology(true, change)
+		}
+		return a.locked(func(st *node.State) error {
+			lookup, gap, err := a.loadUsageLookup()
+			if err != nil {
+				return err
+			}
+			candidate, p, err := node.ApplyDueTrafficQuotas(*st, lookup, gap, now)
+			printQuotaPlan(p)
+			if err != nil {
+				return err
+			}
+			if p.Ready == 0 {
+				fmt.Println("没有达硬上限的可执行流量配额；未提交配置。")
+				return nil
+			}
+			impact, err := a.store.Preview(candidate)
+			if err != nil {
+				return err
+			}
+			printChangeImpact(topologySafeImpact(impact, *st, candidate))
+			if err = a.store.Apply(candidate); err != nil {
+				return fmt.Errorf("流量配额停用应用失败，请检查代理事务状态：%w", err)
+			}
+			if a.offline {
+				fmt.Fprintln(os.Stderr, "已保存离线配额停用结果；未启动服务。")
+			} else {
+				fmt.Fprintln(os.Stderr, "流量配额停用配置已应用；共享核心运行配置变化会重启核心并断开既有连接。")
+			}
+			return nil
+		})
+	default:
+		return errors.New("未知quota操作；支持list/set/remove/apply")
+	}
+}

@@ -11,8 +11,9 @@ ROTATION=/etc/logrotate.d/qingnode
 OWNER='QingNode managed directory v1'
 BUNDLE=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_REPO=124aAA/openai
-REPO='' VERSION=v0.4.0 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
+REPO='' VERSION=v0.5.0 PORT=443 CONNECT_PORT='' CONNECT_PORT_SET=0 CORE_ARCHIVE='' GITHUB_MIRROR='' DEBUG=0 REINSTALL=0 HAS_ARGS=$#
 VERSION_EXPLICIT=0
+QN_SUPPORT_TIER=baseline
 INIT_ARGS=()
 QN_RECOVERING=0
 WIZARD_PROTOCOL=''
@@ -21,13 +22,14 @@ ACCOUNT_RECORD=/var/backups/qingnode/.qingnode-account
 step() { printf '[%s/8] %s\n' "$1" "$2"; }
 while (($#)); do
   case "$1" in
-    --repo|--version|--server|--sni|--port|--connect-port|--core-archive|--name|--protocol|--listen|--target|--fingerprint|--cert|--key|--acme-email|--user|--certificate-id|--method|--transport|--path|--transport-host|--service-name)
+    --repo|--version|--github-mirror|--server|--sni|--port|--connect-port|--core-archive|--name|--protocol|--listen|--target|--fingerprint|--cert|--key|--acme-email|--user|--certificate-id|--method|--transport|--path|--transport-host|--service-name)
       (($# >= 2)) || { echo '参数缺少值' >&2; exit 2; }
       case "$1" in
         --repo) REPO=$2;; --version) VERSION=$2; VERSION_EXPLICIT=1;;
+        --github-mirror) GITHUB_MIRROR=$2;;
         --port) PORT=$2;; --connect-port) CONNECT_PORT=$2; CONNECT_PORT_SET=1;; --core-archive) CORE_ARCHIVE=$2;;
       esac
-      case "$1" in --repo|--version|--core-archive) ;; *) INIT_ARGS+=("$1" "$2");; esac
+      case "$1" in --repo|--version|--github-mirror|--core-archive) ;; *) INIT_ARGS+=("$1" "$2");; esac
       shift 2;;
     --auto|--random-port) INIT_ARGS+=("$1"); shift;;
     --debug) DEBUG=1; shift;;
@@ -42,12 +44,21 @@ while (($#)); do
       echo 'NAT：--listen 本地IP --port 本地端口 --connect-port 外部端口；仅声明，不修改云NAT。'
       echo '在线安装：sudo bash install.sh（自动从 124aAA/openai 下载已校验发行包）'
       echo '默认在线入口选择已公开的最新正式发行；完整本地包不联网选择版本。'
-      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.4.0 [初始化参数]'
+      echo '指定版本：sudo bash install.sh --repo 124aAA/openai --version v0.5.0 [--github-mirror https://...] [初始化参数]'
       echo '可加 --core-archive 官方 sing-box 1.14.0 的本架构 tar.gz，使用内置摘要校验。'
       exit 0;;
     *) echo "未知参数：$1" >&2; exit 2;;
   esac
 done
+if [[ -n $GITHUB_MIRROR ]]; then
+  if [[ ${#GITHUB_MIRROR} -gt 512 || ! $GITHUB_MIRROR =~ ^https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$ || $GITHUB_MIRROR =~ /\.\.(/|$) || $GITHUB_MIRROR =~ /\.(/|$) ]]; then
+    echo '--github-mirror 仅允许无认证/查询参数的 https:// 前缀。' >&2; exit 2
+  fi
+  GITHUB_MIRROR=${GITHUB_MIRROR%/}
+  if [[ -n $CORE_ARCHIVE ]]; then
+    echo '离线 --core-archive 与 --github-mirror 不能同时指定。' >&2; exit 2
+  fi
+fi
 if ((CONNECT_PORT_SET)); then
   if [[ ! $CONNECT_PORT =~ ^[0-9]+$ || ${#CONNECT_PORT} -gt 5 ]] || ((10#$CONNECT_PORT < 1 || 10#$CONNECT_PORT > 65535)); then
     echo '外部连接端口无效。' >&2; exit 2
@@ -70,7 +81,7 @@ if ((${#INIT_ARGS[@]}==0)) && [[ ! -e $ROOT/current ]]; then
       6|ss-aead) INIT_ARGS=(--auto --protocol ss-aead); break;;
       7|tuic) WIZARD_PROTOCOL=tuic; break;;
       8|vless-tls) WIZARD_PROTOCOL=vless-tls; break;;
-      9|10|vmess-tls) WIZARD_PROTOCOL=vmess-tls; break;;
+      9|vmess-tls) WIZARD_PROTOCOL=vmess-tls; break;;
       w1|vless-ws-tls) WIZARD_PROTOCOL=vless-ws-tls; break;;
       w2|vless-grpc-tls) WIZARD_PROTOCOL=vless-grpc-tls; break;;
       w3|vless-httpupgrade-tls) WIZARD_PROTOCOL=vless-httpupgrade-tls; break;;
@@ -97,9 +108,14 @@ QN_OS_INFO=$(
 )
 read -r QN_OS_ID QN_OS_VERSION_ID <<< "$QN_OS_INFO"
 case "$QN_OS_ID:$QN_OS_VERSION_ID" in
-  debian:12|debian:13|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;;
+  debian:12|debian:12.*|debian:13|debian:13.*|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;;
+  debian:11|debian:11.*) QN_SUPPORT_TIER=compatible-family;;
   rocky:9|rocky:9.*) QN_PACKAGE_MANAGER=dnf;;
+  rocky:10|rocky:10.*|almalinux:9|almalinux:9.*|almalinux:10|almalinux:10.*|ol:9|ol:9.*|centos:9|centos:9.*)
+    QN_PACKAGE_MANAGER=dnf; QN_SUPPORT_TIER=compatible-family;;
   alpine:3.24|alpine:3.24.*) QN_INIT=openrc; QN_PACKAGE_MANAGER=apk; UNIT=/etc/init.d/qingnode; UNIT_MODE=755;;
+  alpine:3.20|alpine:3.20.*|alpine:3.21|alpine:3.21.*|alpine:3.22|alpine:3.22.*|alpine:3.23|alpine:3.23.*)
+    QN_INIT=openrc; QN_PACKAGE_MANAGER=apk; UNIT=/etc/init.d/qingnode; UNIT_MODE=755; QN_SUPPORT_TIER=compatible-family;;
   *) echo "未适配的系统：$QN_OS_ID $QN_OS_VERSION_ID；目标与实际验收分列在平台矩阵。" >&2; exit 1;;
 esac
 # A command installed in a container is not proof that its init controls PID 1.
@@ -579,13 +595,14 @@ if [[ -n $REPO ]]; then
   done
   [[ $REPO =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+$ && ${REPO##*/} != . && ${REPO##*/} != .. ]] || { echo '仓库名无效，格式应为 owner/repo。' >&2; exit 1; }
   [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '管理器版本号无效，格式应为 v数字.数字.数字。' >&2; exit 1; }
+  gh_origin=${GITHUB_MIRROR:-https://github.com}
   if ((VERSION_EXPLICIT)); then
-    base="https://github.com/$REPO/releases/download/$VERSION"
+    base="$gh_origin/$REPO/releases/download/$VERSION"
   else
     # Only a public formal Release becomes latest. Read its completed checksum
     # set once, then pin all remaining requests to the selected tag. This also
     # covers a new main installer arriving before its new assets are published.
-    base="https://github.com/$REPO/releases/latest/download"
+    base="$gh_origin/$REPO/releases/latest/download"
   fi
   download_release "$base/SHA256SUMS" "$TEMP_DIR/release-sums" 60 1048576 '发行摘要清单'
   if ((VERSION_EXPLICIT==0)); then
@@ -602,7 +619,7 @@ if [[ -n $REPO ]]; then
   else
     asset="qingnode-${VERSION#v}-linux-$ARCH.tar.gz"
   fi
-  base="https://github.com/$REPO/releases/download/$VERSION"
+  base="$gh_origin/$REPO/releases/download/$VERSION"
   printf '[INFO] 下载已公开 QingNode %s（%s，%s）；后续请求固定此版本。\n' "$VERSION" "$ARCH" "$REPO"
   expected=$(awk -v f="$asset" '$2==f {print $1}' "$TEMP_DIR/release-sums")
   [[ $expected =~ ^[a-fA-F0-9]{64}$ ]] || { echo '缺少唯一的发行包摘要。' >&2; exit 1; }
@@ -610,7 +627,7 @@ if [[ -n $REPO ]]; then
   actual=$(sha256sum "$TEMP_DIR/$asset"); actual=${actual%% *}
   [[ $actual == "${expected,,}" ]] || { echo '发行包摘要不匹配。' >&2; exit 1; }
   tar -tzf "$TEMP_DIR/$asset" > "$TEMP_DIR/members"
-  if grep -Ev '^(qingnode|install[.]sh|SHA256SUMS|README[.]md|LICENSE|THIRD_PARTY[.]md|docs/?|docs/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|FAQ|DEVELOPMENT|CAPABILITIES|BATCH_01|NETWORK_TESTS|BATCH_02|NETWORK_PERFORMANCE|BATCH_03|ENDPOINTS|BATCH04|TOPOLOGY|BATCH05|SUBSCRIPTIONS|BATCH06|CERTIFICATES|MIGRATION|BATCH07|MONITORING|BATCH08|PROTOCOLS|BATCH09|PLATFORMS|BATCH10|WORKFLOWS|BATCH11)[.]md)$' "$TEMP_DIR/members" >/dev/null; then echo '发行包包含未知路径。' >&2; exit 1; fi
+  if grep -Ev '^(qingnode|install[.]sh|SHA256SUMS|README[.]md|LICENSE|THIRD_PARTY[.]md|docs/?|docs/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|GUIDE|FAQ|DEVELOPMENT|CAPABILITIES|BATCH_01|NETWORK_TESTS|BATCH_02|NETWORK_PERFORMANCE|BATCH_03|ENDPOINTS|BATCH04|TOPOLOGY|BATCH05|SUBSCRIPTIONS|BATCH06|CERTIFICATES|MIGRATION|BATCH07|MONITORING|BATCH08|PROTOCOLS|BATCH09|PLATFORMS|BATCH10|WORKFLOWS|BATCH11)[.]md)$' "$TEMP_DIR/members" >/dev/null; then echo '发行包包含未知路径。' >&2; exit 1; fi
   tar -tvzf "$TEMP_DIR/$asset" | awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" {bad=1} END {exit bad}' || { echo '发行包包含不允许的链接或特殊文件。' >&2; exit 1; }
   mkdir "$TEMP_DIR/bundle"
   tar --no-same-owner --no-same-permissions -xzf "$TEMP_DIR/$asset" -C "$TEMP_DIR/bundle"
@@ -618,7 +635,7 @@ if [[ -n $REPO ]]; then
 fi
 [[ -f $BUNDLE/qingnode && ! -L $BUNDLE/qingnode && -f $BUNDLE/SHA256SUMS ]] || { echo '请在本架构发行包中运行安装器，或指定已发布的 --repo 与 --version。' >&2; exit 1; }
 awk 'NF!=2 || length($1)!=64 || $1 !~ /^[a-fA-F0-9]+$/ {bad=1}
-  $2 !~ /^(qingnode|install[.]sh|README[.]md|LICENSE|THIRD_PARTY[.]md|docs\/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|FAQ|DEVELOPMENT|CAPABILITIES|BATCH_01|NETWORK_TESTS|BATCH_02|NETWORK_PERFORMANCE|BATCH_03|ENDPOINTS|BATCH04|TOPOLOGY|BATCH05|SUBSCRIPTIONS|BATCH06|CERTIFICATES|MIGRATION|BATCH07|MONITORING|BATCH08|PROTOCOLS|BATCH09|PLATFORMS|BATCH10|WORKFLOWS|BATCH11)[.]md)$/ {bad=1}
+  $2 !~ /^(qingnode|install[.]sh|README[.]md|LICENSE|THIRD_PARTY[.]md|docs\/(ARCHITECTURE|TEST_REPORT|RELEASE_NOTES|AUDIT_STAGE2|GETTING_STARTED|GUIDE|FAQ|DEVELOPMENT|CAPABILITIES|BATCH_01|NETWORK_TESTS|BATCH_02|NETWORK_PERFORMANCE|BATCH_03|ENDPOINTS|BATCH04|TOPOLOGY|BATCH05|SUBSCRIPTIONS|BATCH06|CERTIFICATES|MIGRATION|BATCH07|MONITORING|BATCH08|PROTOCOLS|BATCH09|PLATFORMS|BATCH10|WORKFLOWS|BATCH11)[.]md)$/ {bad=1}
   {if (seen[$2]++) bad=1} END {exit bad || !seen["qingnode"] || !seen["install.sh"]}' "$BUNDLE/SHA256SUMS" || { echo '摘要清单无效或缺少必要文件。' >&2; exit 1; }
 while read -r _ member; do [[ -f $BUNDLE/$member && ! -L $BUNDLE/$member ]] || { echo '发行包成员必须是普通文件。' >&2; exit 1; }; done < "$BUNDLE/SHA256SUMS"
 [[ ! -L $BUNDLE/docs ]] || { echo '发行包文档目录不允许链接。' >&2; exit 1; }
@@ -737,8 +754,21 @@ if [[ -f $UNIT ]]; then cp -p "$UNIT" "$TEMP_DIR/old-unit"; old_unit=1; fi
 if [[ -f $LIB/install.sh ]]; then cp -p "$LIB/install.sh" "$TEMP_DIR/old-installer"; fi
 if [[ $QN_INIT == openrc && -f $ROTATION ]]; then cp -p "$ROTATION" "$TEMP_DIR/old-rotation"; old_rotation=1; fi
 printf '[INFO] %s %s / %s / %s；实现目标与实机证据分别见平台矩阵。\n' "$QN_OS_ID" "$QN_OS_VERSION_ID" "$ARCH" "$QN_INIT"
+if [[ $QN_SUPPORT_TIER == compatible-family ]]; then
+  printf '[INFO] 当前发行版（%s %s）属于同体系兼容支持，非 CI 固定镜像实测基线。\n' "$QN_OS_ID" "$QN_OS_VERSION_ID"
+fi
 if command -v sing-box >/dev/null; then echo '[INFO] 检测到已有 sing-box；本项目使用自己的目录，不接管其他安装。'; fi
-if ! getent ahosts github.com >"$TEMP_DIR/dns"; then echo '[WARN] GitHub DNS 查询失败；在线下载可能失败，可使用完整本地包和 --core-archive。' >&2; fi
+qn_dns_host=github.com
+if [[ -n $GITHUB_MIRROR ]]; then
+  qn_dns_host=${GITHUB_MIRROR#https://}
+  qn_dns_host=${qn_dns_host%%/*}
+  if [[ $qn_dns_host == \[*\]* ]]; then
+    qn_dns_host=${qn_dns_host#\[}; qn_dns_host=${qn_dns_host%%\]*}
+  else
+    qn_dns_host=${qn_dns_host%:*}
+  fi
+fi
+if ! getent ahosts "$qn_dns_host" >"$TEMP_DIR/dns"; then echo '[WARN] 下载源 DNS 查询失败；在线下载可能失败，可使用完整本地包和 --core-archive。' >&2; fi
 ss -H -lntup >>"$LOG" 2>&1 || true
 if [[ $QN_INIT == systemd ]]; then "$BUNDLE/qingnode" service unit > "$TEMP_DIR/qingnode.service"
 else "$BUNDLE/qingnode" service unit --manager openrc > "$TEMP_DIR/qingnode.service"; fi
@@ -806,14 +836,20 @@ qn_manager_permissions
 logged qn_service reload
 exec 8>&-
 step 6 "安装或校验官方 sing-box"
+qn_core_args=(core install)
+if [[ -n $CORE_ARCHIVE ]]; then
+  qn_core_args+=(--archive "$CORE_ARCHIVE")
+elif [[ -n $GITHUB_MIRROR ]]; then
+  qn_core_args+=(--github-mirror "$GITHUB_MIRROR")
+fi
 if [[ -e $ROOT/current ]]; then
-  if [[ -n $CORE_ARCHIVE ]]; then logged "$BIN" core install --archive "$CORE_ARCHIVE"; else logged "$BIN" core install; fi
+  logged "$BIN" "${qn_core_args[@]}"
   step 7 "校验已有配置并保持运行状态"
   logged "$BIN" check
   if ((old_active)); then logged "$BIN" restart; fi
   echo '管理程序已更新，原节点及运行/停止状态已保留。'
 else
-  if [[ -n $CORE_ARCHIVE ]]; then logged "$BIN" core install --archive "$CORE_ARCHIVE"; else logged "$BIN" core install; fi
+  logged "$BIN" "${qn_core_args[@]}"
   step 7 "创建首个节点并校验配置"
   if [[ -n $WIZARD_PROTOCOL ]]; then
     # Interactive errors remain on the terminal. A process-substitution tee

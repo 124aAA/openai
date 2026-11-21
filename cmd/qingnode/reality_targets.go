@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"qingnode/internal/node"
@@ -22,10 +23,39 @@ type realityResult struct {
 	err     error
 }
 
-// The pool is small and fixed. Each candidate gets three fresh connections;
+func parseRealityCandidates(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range parts {
+		h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(item), "."))
+		if h == "" {
+			continue
+		}
+		if !node.ValidHost(h) || net.ParseIP(h) != nil {
+			return nil, fmt.Errorf("无效候选域名 %q：须为非 IP 的有效域名", item)
+		}
+		if err := node.RealityTargetPolicy(&node.Reality{ServerName: h, Target: net.JoinHostPort(h, "443")}); err != nil {
+			return nil, fmt.Errorf("候选域名 %s 不符合 REALITY 目标策略：%w", h, err)
+		}
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	if len(out) < 1 || len(out) > 16 {
+		return nil, errors.New("--candidates 须提供 1–16 个有效域名（逗号分隔）")
+	}
+	return out, nil
+}
+
+// The pool is small and bounded. Each candidate gets three fresh connections;
 // any failed sample excludes it rather than making a flaky target look fast.
 func rankRealityTargets(probe func(*node.Reality) (time.Duration, error)) []realityResult {
-	pool := realityCandidates()
+	return rankRealityTargetPool(realityCandidates(), probe)
+}
+
+func rankRealityTargetPool(pool []string, probe func(*node.Reality) (time.Duration, error)) []realityResult {
 	done := make(chan realityResult, len(pool))
 	for _, name := range pool {
 		go func(name string) {
@@ -70,23 +100,35 @@ func printRealityTargets(w io.Writer, results []realityResult, top int) {
 			fmt.Fprintf(w, "  排除 %s：%s\n", r.name, node.Redact(r.err.Error()))
 		} else if shown < top {
 			shown++
-			fmt.Fprintf(w, "  %d. %s  %.1f ms  TLS1.3 / h2 / 证书通过\n", shown, r.name, float64(r.latency)/float64(time.Millisecond))
+			fmt.Fprintf(w, "  %d. %s  %.1f ms  TLS1.3 / X25519 / h2 / 证书通过\n", shown, r.name, float64(r.latency)/float64(time.Millisecond))
 		}
 	}
-	fmt.Fprintln(w, "已排除已知 Cloudflare 目标；其它共享 CDN 风险仍需评估。此排名不代表客户端延迟或下载速度。")
+	fmt.Fprintln(w, "已排除已知 Cloudflare 及共享多租户 CDN/PaaS 目标；其它共享边缘风险仍需评估。此排名不代表客户端延迟或下载速度。")
 }
 
 func realityTargets(args []string) error {
 	f := fs("reality-targets")
-	top := f.Int("top", 3, "展示前几个合格候选（1–6）")
+	top := f.Int("top", 3, "展示前几个合格候选")
+	candidates := f.String("candidates", "", "自定义逗号分隔候选域名列表（1–16个，替代内置池）")
 	if e := parse(f, args); e != nil {
 		return e
 	}
-	if *top < 1 || *top > len(realityCandidates()) {
-		return errors.New("--top 须为 1–6")
+	pool := realityCandidates()
+	if flagSet(f, "candidates") {
+		var err error
+		pool, err = parseRealityCandidates(*candidates)
+		if err != nil {
+			return err
+		}
+		if !flagSet(f, "top") && *top > len(pool) {
+			*top = len(pool)
+		}
+	}
+	if *top < 1 || *top > len(pool) {
+		return fmt.Errorf("--top 须为 1–%d", len(pool))
 	}
 	fmt.Fprintln(os.Stderr, "正在探测 REALITY 候选，请稍候（不修改现有节点）…")
-	results := rankRealityTargets(node.ProbeReality)
+	results := rankRealityTargetPool(pool, node.ProbeReality)
 	printRealityTargets(os.Stdout, results, *top)
 	if results[0].err != nil {
 		return errors.New("没有合格目标；检查出站网络，或使用经验证的自有目标")

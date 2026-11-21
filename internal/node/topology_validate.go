@@ -4,7 +4,6 @@ import (
 	"crypto/ecdh"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -48,9 +47,24 @@ func validRealityPublicKey(s string) bool {
 	_, err = ecdh.X25519().NewPublicKey(b)
 	return err == nil && s != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }
+func validateRemoteCertPEM(pem, label string) error {
+	if len(pem) > 256<<10 || (pem != "" && (!x509.NewCertPool().AppendCertsFromPEM([]byte(pem)) || strings.Contains(pem, "PRIVATE KEY"))) {
+		return fmt.Errorf("远程%s信任证书PEM无效或混入私钥", label)
+	}
+	return nil
+}
+
+func validNonZeroUUID(u string) bool {
+	return uuidRE.MatchString(u) && u != "00000000-0000-0000-0000-000000000000"
+}
+
 func validateRemoteEgress(e Egress, core string) error {
 	count := 0
-	for _, present := range []bool{e.Socks != nil, e.Reality != nil, e.Shadowsocks != nil, e.HY2 != nil, e.WireGuard != nil} {
+	for _, present := range []bool{
+		e.Socks != nil, e.HTTP != nil, e.Reality != nil, e.Shadowsocks != nil,
+		e.HY2 != nil, e.Trojan != nil, e.VLESS != nil, e.VMess != nil,
+		e.AnyTLS != nil, e.TUIC != nil, e.WireGuard != nil,
+	} {
 		if present {
 			count++
 		}
@@ -58,71 +72,37 @@ func validateRemoteEgress(e Egress, core string) error {
 	if count != 1 {
 		return errors.New("远程出口必须且只能包含一种协议设置")
 	}
-	if e.Protocol != "wireguard" && (!ValidHost(e.Server) || e.Port < 1 || e.Port > 65535) {
+	spec, ok := egressProtocol(e.Protocol)
+	if !ok {
+		return errors.New("远程出口仅支持socks5、http、reality、ss2022、ss-aead、hysteria2、trojan、vless-tls、vmess-tls、anytls、tuic或wireguard")
+	}
+	if !spec.IsEndpoint && (!ValidHost(e.Server) || e.Port < 1 || e.Port > 65535) {
 		return errors.New("远程出口需要有效连接地址和1–65535端口")
 	}
-	switch e.Protocol {
-	case "socks5":
-		p := e.Socks
-		if p == nil || !safeRemoteText(p.Username, 255, false) || !safeRemoteText(p.Password, 255, false) || (p.Username == "") != (p.Password == "") {
-			return errors.New("SOCKS5用户名与密码须同时提供，长度最多255字节且不能包含控制字符")
-		}
-	case "reality":
-		p := e.Reality
-		if p == nil || !uuidRE.MatchString(p.UUID) || !ValidHost(p.ServerName) || net.ParseIP(p.ServerName) != nil || !validRealityPublicKey(p.PublicKey) {
-			return errors.New("远程REALITY的UUID、SNI或公钥无效")
-		}
-		b, err := hex.DecodeString(p.ShortID)
-		if err != nil || len(b) < 1 || len(b) > 8 {
-			return errors.New("远程REALITY short ID需要1–8字节十六进制")
-		}
-		switch p.Fingerprint {
-		case "", "chrome", "firefox", "safari", "ios", "edge":
-		default:
-			return errors.New("远程REALITY指纹不受支持")
-		}
-	case "ss2022":
-		p := e.Shadowsocks
-		if p == nil || p.Method != SS2022Method {
-			return errors.New("远程SS2022仅支持2022-blake3-aes-256-gcm")
-		}
-		keys := strings.Split(p.Password, ":")
-		if len(keys) < 1 || len(keys) > 8 {
-			return errors.New("远程SS2022密钥链长度无效")
-		}
-		for _, key := range keys {
-			if !validSSKey(key) {
-				return errors.New("远程SS2022密码须由32字节Base64密钥组成")
+	if e.Protocol == "reality" {
+		if e.Transport != nil {
+			if e.Transport.Type != "" && e.Transport.Type != "tcp" && e.Transport.Type != "grpc" {
+				return errors.New("远程REALITY仅支持默认TCP(Vision)或gRPC传输层")
 			}
-		}
-	case "hysteria2":
-		p := e.HY2
-		if p == nil || !safeRemoteText(p.Password, 512, true) || !ValidHost(p.ServerName) {
-			return errors.New("远程Hysteria2需要有效独立密码和TLS名称")
-		}
-		if len(p.CertificatePEM) > 256<<10 || (p.CertificatePEM != "" && (!x509.NewCertPool().AppendCertsFromPEM([]byte(p.CertificatePEM)) || strings.Contains(p.CertificatePEM, "PRIVATE KEY"))) {
-			return errors.New("远程Hysteria2信任证书PEM无效或混入私钥")
-		}
-		if p.Performance != nil {
-			v := p.Performance
-			if v.ServerUpMbps != nil || v.ServerDownMbps != nil || v.IgnoreClientBandwidth != nil || v.Server != nil {
-				return errors.New("远程HY2只接受客户端性能选择，不能修改远端服务上限")
-			}
-			if err := ValidateHY2Capabilities(Node{Protocol: "hysteria2", HY2: v}, core, nil); err != nil {
+			if err := validateTransportOptions(e.Transport); err != nil {
 				return err
 			}
 		}
-	case "wireguard":
-		if e.WireGuard == nil || e.Server != "" || e.Port != 0 {
-			return errors.New("WireGuard地址和端口须在独立peer中填写")
-		}
-		if err := validateWireGuard(*e.WireGuard, e.Detour); err != nil {
+	} else if spec.SupportsTransport {
+		if err := validateTransportOptions(e.Transport); err != nil {
 			return err
 		}
-	default:
-		return errors.New("远程出口仅支持socks5、reality、ss2022、hysteria2或wireguard")
+	} else if e.Transport != nil {
+		return fmt.Errorf("远程 %s 不支持传输层参数", e.Protocol)
 	}
-	return nil
+	if spec.SupportsMultiplex {
+		if err := validateMultiplexOptions(e.Multiplex); err != nil {
+			return err
+		}
+	} else if e.Multiplex != nil {
+		return fmt.Errorf("远程 %s 不支持 sing-mux 多路复用", e.Protocol)
+	}
+	return spec.Validate(e, core)
 }
 func validateWireGuard(w WireGuardEndpoint, detour string) error {
 	if !validWGKey(w.PrivateKey) || len(w.Address) < 1 || len(w.Address) > 16 || len(w.Peers) < 1 || len(w.Peers) > 16 {
@@ -338,7 +318,7 @@ func ValidateTopology(st State) error {
 			if !ok {
 				return errors.New("detour必须引用现有远程出口，不能引用策略或direct")
 			}
-			if (e.Protocol == "hysteria2" || e.Protocol == "wireguard" || ((e.Protocol == "ss2022" || e.Protocol == "socks5") && e.UDP)) && !up.UDP {
+			if spec, ok := egressProtocol(e.Protocol); ok && spec.RequiresUpstreamUDP != nil && spec.RequiresUpstreamUDP(e) && !up.UDP {
 				return errors.New("该协议的上游连接需要UDP，但detour只声明TCP能力")
 			}
 			if err := visit(e.Detour); err != nil {
@@ -456,7 +436,8 @@ func topologyRouteScope(st State, id string) (hostDial, hostDNS bool, err error)
 	}
 	for _, e := range st.Egresses {
 		if e.ID == id {
-			return false, e.Protocol == "wireguard", nil
+			spec, ok := egressProtocol(e.Protocol)
+			return false, ok && spec.IsEndpoint, nil
 		}
 	}
 	return false, false, errors.New("拓扑拨号出口不存在")
@@ -492,11 +473,8 @@ func topologyHasNetwork(networks []string, network string) bool {
 // not necessarily at the TCP server port. SS2022 uses the same fixed server
 // port for its separately declared TCP and UDP transport.
 func egressServerNetworks(e Egress) []string {
-	if e.Protocol == "hysteria2" || e.Protocol == "wireguard" {
-		return []string{"udp"}
-	}
-	if e.Protocol == "ss2022" && e.UDP {
-		return []string{"tcp", "udp"}
+	if spec, ok := egressProtocol(e.Protocol); ok && spec.ServerNetworks != nil {
+		return spec.ServerNetworks(e)
 	}
 	return []string{"tcp"}
 }
@@ -619,16 +597,11 @@ func ValidateEgressCapabilities(st State, tags []string) error {
 		seen[t] = true
 	}
 	for _, e := range st.Egresses {
-		var needed []string
-		switch e.Protocol {
-		case "hysteria2":
-			needed = []string{"with_quic"}
-		case "reality":
-			needed = []string{"with_utls"}
-		case "wireguard":
-			needed = []string{"with_wireguard", "with_gvisor"}
+		spec, ok := egressProtocol(e.Protocol)
+		if !ok {
+			continue
 		}
-		for _, t := range needed {
+		for _, t := range spec.BuildTags {
 			if !seen[t] {
 				return fmt.Errorf("出口 %s 所选核心缺少已验证的 %s 构建能力", e.Name, t)
 			}

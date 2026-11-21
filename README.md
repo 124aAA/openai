@@ -19,11 +19,11 @@ bash -c 'set -e; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL --retry 3 htt
 
 | 安装条件 | 要求 |
 | --- | --- |
-| 系统 | Debian 12/13、Ubuntu 22.04/24.04/26.04、Rocky 9、Alpine 3.24；实际验收范围见[平台说明](docs/PLATFORMS.md) |
+| 系统 | 基线 Debian 12/13、Ubuntu 22.04/24.04/26.04、Rocky 9、Alpine 3.24；同源兼容 AlmaLinux 9/10、Rocky 10、Oracle Linux 9、CentOS Stream 9、Debian 11、Alpine 3.20..3.23，详见[平台说明](docs/PLATFORMS.md) |
 | 服务管理 | 实际运行的 systemd 或 OpenRC；普通容器里只有管理命令不够 |
 | 架构 | x86_64 / amd64 或 aarch64 / arm64 |
-| 下载 | 在线安装需预先具备 Bash、curl、tar、gzip、sha256sum、awk、grep 及可用 HTTPS；只有 wget 不足以完成后续发行包下载 |
-| 网络 | 客户端连接地址正确，节点端口空闲，主机防火墙与云安全组放行所需 TCP / UDP |
+| 下载 | 在线安装需预先具备 Bash、curl、tar、gzip、sha256sum、awk、grep 及可用 HTTPS（受限网络可加 `--github-mirror https://...`，仍强制校验 SHA-256）；只有 wget 不足以完成后续发行包下载 |
+| 网络 | 客户端连接地址正确，节点端口空闲，主机防火墙（可选受管 `ufw` / `firewalld` / `nftables`）与云安全组放行所需 TCP / UDP |
 
 安装器补装缺少的运行依赖，不升级整个系统，不接管其他 sing-box 安装。NAT VPS 还需自行配置服务商的外部端口映射。只有 IPv4 的 VPS 也可以使用。
 
@@ -46,25 +46,25 @@ sudo qingnode
 | 1 | 创建节点 | 直接选择协议或输入 `m` 选择传输组合；`h` 帮我选，`n` 设置 NAT，`?` 查看详细能力 |
 | 2 | 节点管理 | 查看、添加、修改地址/端口/传输参数、启停、删除、凭据管理与直接导出 |
 | 3 | 导出链接、二维码或配置 | 直接选择节点，导出链接、二维码或客户端配置 |
-| 4 | 状态与诊断 | 运行状态、监听端口、自检、测速与监控结果 |
+| 4 | 状态与诊断 | 运行状态、监听端口、自检、测速、监控与流量账本 |
 | 5 | 备份与更新 | 加密备份、恢复、更新管理器/核心、回退与卸载 |
-| 6 | 高级设置 | 端点、中转、出口、DNS、网络、证书、设备与订阅 |
+| 6 | 高级设置 | 端点、中转、远程出口、DNS、网络、证书、设备与订阅交互向导 |
 | 7 | 服务管理 | 启动、停止、重启、自启与日志 |
 | 8 / 9 | 刷新 / 检查更新 | 8 只读本机；9 联网查询，不自动升级 |
 | 0 | 退出 | 结束菜单 |
 
-创建时通常只需填写名称、客户端连接地址、证书域名（`--sni`，TLS 协议）和端口。端口可用默认 `auto`；REALITY 握手目标也可用 `auto` 自动筛选。协议从原来的 7 种扩展为 **9 种底层协议**（新增 `VLESS + TLS`、`VMess + TLS`），`VLESS + TLS` 与 `VMess + TLS` 各支持直连（`tcp`）、WebSocket（`ws`）、gRPC（`grpc`）、HTTPUpgrade（`httpupgrade`），`Trojan` 新增 `ws`、`grpc`、`httpupgrade` 三种传输，共 **11 个新组合**。`--port` 填服务器本机监听端口；仅在 NAT 端口映射且外部端口不同时才需填写 `--connect-port`（或菜单先选 `n`）。UUID、密码和密钥由程序生成并保存，普通修改不会重新生成它们。
+创建时通常只需填写名称、客户端连接地址、证书域名（`--sni`，TLS 协议）和端口。端口可用默认 `auto`；REALITY 握手目标也可用 `auto` 自动筛选。提供 **9 种底层协议**（`reality`、`ss2022`、`hysteria2`、`anytls`、`trojan`、`ss-aead`、`tuic`、`vless-tls`、`vmess-tls`），其中 `VLESS + TLS`、`VMess + TLS` 与 `Trojan` 支持 `tcp`、`ws`（含 Early Data）、`grpc`、`httpupgrade` 与 `http`（`h2`），`REALITY` 支持 Vision 与 `grpc`，5 种 TCP 协议支持可选 `multiplex`（`h2mux`/`smux`/`yamux`）。`--port` 填服务器本机监听端口；仅在 NAT 端口映射且外部端口不同时才需填写 `--connect-port`（或菜单先选 `n`）。UUID、密码和密钥由程序生成并保存，普通修改不会重新生成它们。
 
 协议默认只显示简要条件；详细限制按需查看：
 
 | 协议 | 主要条件 |
 | --- | --- |
-| REALITY / Vision | 无需自己的域名或证书；客户端支持，服务器可访问适用握手目标 |
-| VLESS + TLS / VMess + TLS | 标准 TLS 证书；支持直连 TCP、WebSocket（`ws`）、gRPC（`grpc`）、HTTPUpgrade（`httpupgrade`）；VMess 支持标准 URI 与 `v2rayN`（`vmess-v2rayn`）导出 |
-| Shadowsocks 2022 | 无需证书；客户端支持 SS2022 多用户密码格式 |
+| REALITY（Vision / gRPC） | 无需自己的域名或证书；客户端支持，服务器可访问适用握手目标，支持多 `short_id` 轮换 |
+| VLESS + TLS / VMess + TLS | 标准 TLS 证书；支持 `tcp`、`ws`、`grpc`、`httpupgrade`、`http`（`h2`）及可选 `multiplex`；VMess 支持标准 URI 与 `v2rayN`（`vmess-v2rayn`）导出 |
+| Shadowsocks 2022 | 无需证书；支持 3 种 AEAD-2022 加密方法与多用户独立密钥 |
 | 传统 SS AEAD | 客户端支持相同的现代 AEAD 加密方法 |
-| Hysteria2 / TUIC | 可信 TLS 证书、UDP 入口和匹配客户端；TUIC 没有通用分享 URI，需导出完整配置 |
-| AnyTLS / Trojan | TLS 证书及匹配客户端；Trojan 支持直连 TCP 及 `ws`/`grpc`/`httpupgrade` 传输组合 |
+| Hysteria2 / TUIC | 可信 TLS 证书、UDP 入口和匹配客户端；HY2 支持可选 `salamander` 混淆与端口跳跃，TUIC 支持标准 NEP-408 `tuic://` 链接与完整配置导出 |
+| AnyTLS / Trojan | TLS 证书及匹配客户端；Trojan 支持 `tcp`、`ws`、`grpc`、`httpupgrade`、`http`（`h2`）传输组合 |
 
 列表输入 `0` 返回；表单按提示输入 `:cancel` 取消，提交前不会创建半个节点。删除、恢复、轮换密钥和卸载仍需明确确认。完整菜单示例见[上手指南](docs/GETTING_STARTED.md)，协议细节见[协议说明](docs/PROTOCOLS.md)，NAT 与 IPv6 见[连接端点](docs/ENDPOINTS.md)。
 
@@ -88,7 +88,7 @@ sudo qingnode export --id NODE_ID --user USER_ID --format mihomo --client-versio
 
 把文件安全传到设备并从客户端的本地配置入口导入。分享链接、二维码和配置都含认证信息，不能公开；已有输出文件会被拒绝覆盖。普通 `info` 默认隐藏凭据，确需查看时显式使用 `--show-secrets`。
 
-适用范围区分：标准 URI 与二维码适合常规单节点导入；`tuic`、配置了连接池参数的 `anytls`、非默认速率的 `hysteria2` 及静态 Ed25519 证书节点请使用完整 `sing-box` JSON 或 `mihomo` YAML 配置；`provider` 片段不是可独立运行的完整客户端配置。设备多节点配置和在线订阅是可选能力，在 `6 高级设置 → 设备与订阅` 中管理，详见[导出与订阅](docs/SUBSCRIPTIONS.md)。
+适用范围区分：标准 URI 与二维码适合常规单节点导入（含基础 `tuic://`）；配置了 `client_heartbeat` 的 `tuic`、连接池参数的 `anytls`、开启 `multiplex` 的节点、非默认速率的 `hysteria2` 及静态 Ed25519 证书节点请使用完整 `sing-box` JSON 或 `mihomo` YAML 配置；`provider` 片段不是可独立运行的完整客户端配置。设备多节点配置（含 `cn-direct`/`global-secure-dns` 分流与 `TUN`）和统一自适应在线订阅 `/s/<TOKEN>` 在 `6 高级设置 → 设备与订阅` 中管理，详见[导出与订阅](docs/SUBSCRIPTIONS.md)。
 
 ## 连不上时怎么查
 
@@ -115,7 +115,7 @@ sudo qingnode firewall status # 本机防火墙和所需端口
 | 检查可用版本，不安装 | `sudo qingnode check-updates` |
 | 更新已适配的 sing-box 核心 | `sudo qingnode update` |
 | 用已校验的完整包更新管理器 | `sudo qingnode self-update --bundle /root/qingnode-release` |
-| 在线更新管理器到明确版本 | `sudo qingnode self-update --version 实际发行标签` |
+| 在线更新管理器到明确版本 | `sudo qingnode self-update --version v0.5.0` |
 | 加密备份配置 | `sudo qingnode backup` |
 | 预览备份恢复 | `sudo qingnode restore --file /root/config.qnbak --preview` |
 | 确认恢复备份 | `sudo qingnode restore --file /root/config.qnbak --yes` |

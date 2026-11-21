@@ -38,7 +38,7 @@ func coreListenerRequirements(config []byte) ([]coreListener, error) {
 		}
 		var networks []string
 		switch inbound.Type {
-		case "mixed", "socks", "http", "vless", "anytls", "trojan":
+		case "mixed", "socks", "http", "vless", "vmess", "anytls", "trojan":
 			networks = []string{"tcp"}
 		case "hysteria2", "tuic":
 			networks = []string{"udp"}

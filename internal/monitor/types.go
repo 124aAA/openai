@@ -85,13 +85,16 @@ type RecoveryPolicy struct {
 // Secrets are deliberately excluded from ordinary JSON. Only SaveConfig and
 // LoadConfig serialize these fields, in the private monitor configuration.
 type NotificationConfig struct {
-	Enabled   bool   `json:"enabled"`
-	Kind      string `json:"kind"` // webhook or telegram
-	Endpoint  string `json:"-"`
-	Token     string `json:"-"`
-	ChatID    string `json:"-"`
-	TimeoutMS int    `json:"timeout_ms"`
-	Retries   int    `json:"retries"`
+	Enabled         bool   `json:"enabled"`
+	Kind            string `json:"kind"` // webhook, telegram, bark, discord, feishu, dingtalk
+	Endpoint        string `json:"-"`
+	Token           string `json:"-"`
+	Secret          string `json:"-"`
+	ChatID          string `json:"-"`
+	MessageThreadID int64  `json:"message_thread_id,omitempty"`
+	HostLabel       string `json:"host_label,omitempty"`
+	TimeoutMS       int    `json:"timeout_ms"`
+	Retries         int    `json:"retries"`
 }
 
 type Config struct {
@@ -168,12 +171,20 @@ type JobStatus struct {
 }
 
 type Event struct {
-	At           time.Time `json:"at"`
-	JobID        string    `json:"job_id"`
-	From         Status    `json:"from"`
-	To           Status    `json:"to"`
-	Kind         string    `json:"kind"`         // status-change or recovery
-	Notification string    `json:"notification"` // disabled, delivered, failed, cancelled
+	At             time.Time `json:"at"`
+	JobID          string    `json:"job_id"`
+	From           Status    `json:"from"`
+	To             Status    `json:"to"`
+	Kind           string    `json:"kind"`         // status-change, recovery, cert-expiring, quota-warning, quota-disabled
+	Notification   string    `json:"notification"` // disabled, delivered, failed, cancelled
+	Host           string    `json:"host,omitempty"`
+	TargetName     string    `json:"target_name,omitempty"`
+	TargetID       string    `json:"target_id,omitempty"`
+	Signals        []string  `json:"signals,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	RecoveryResult string    `json:"recovery_result,omitempty"`
+	CertDaysLeft   *int      `json:"cert_days_left,omitempty"`
+	DedupeKey      string    `json:"-"`
 }
 
 type Snapshot struct {
@@ -188,8 +199,11 @@ type Snapshot struct {
 type Store struct{ Root string }
 
 type Engine struct {
-	Store    *Store
-	Notifier *Notifier
+	Store          *Store
+	Notifier       *Notifier
+	TargetResolver func(Job) (targetName, targetID string, certDaysLeft *int)
+	ExtraEvents    func(now time.Time, cfg Config) []Event
+	Redactor       func(string) string
 }
 
 // CounterDelta deliberately preserves missing and reset counters as unknown.

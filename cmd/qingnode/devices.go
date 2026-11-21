@@ -77,8 +77,12 @@ func (a *app) device(args []string) error {
 	yes := f.Bool("yes", false, "确认移除或停用设备")
 	disableCredentials := f.Bool("disable-credentials", false, "停用该设备实际绑定的独立凭据；共享凭据会拒绝整批")
 	strategy := f.String("strategy", "manual", "manual/auto/fallback；sing-box不支持有序fallback")
-	allowDegradedAuto := f.Bool("allow-degraded-auto", false, "仅auto：明确接受Mihomo 1.19.30首成员容差缺陷；默认拒绝该客户端完整auto配置")
-	routing := f.String("routing", "global", "global或basic（仅明确的局域网网段直连）")
+	allowDegradedAuto := f.Bool("allow-degraded-auto", false, "仅auto：明确接受Mihomo首成员容差缺陷；默认拒绝该客户端完整auto配置")
+	routing := f.String("routing", "global", "客户端分流预设：global、basic、cn-direct 或 global-secure-dns")
+	defaultSubFormat := f.String("default-subscription-format", "", "统一订阅链接未识别客户端时的默认格式")
+	tun := f.Bool("tun", false, "为客户端完整配置开启可选 TUN 入站模式")
+	enableController := f.Bool("enable-controller", false, "为客户端完整配置生成仅绑定 127.0.0.1 的本地控制端口与随机密钥")
+	controllerPort := f.Int("controller-port", 9090, "客户端本地控制端口（须配合 --enable-controller，默认 9090）")
 	testURL := f.String("test-url", "", "auto/fallback使用自己的HTTPS健康目标，不验证UDP")
 	interval := f.Int("interval", 300, "自动测试间隔秒，60–3600")
 	tolerance := f.Int("tolerance", 50, "自动选择容差毫秒")
@@ -122,7 +126,13 @@ func (a *app) device(args []string) error {
 				if e != nil {
 					return e
 				}
-				b, e := json.MarshalIndent(p, "", "  ")
+				redactedProfile := *p
+				if redactedProfile.Controller != nil && redactedProfile.Controller.Secret != "" {
+					ctrlCopy := *redactedProfile.Controller
+					ctrlCopy.Secret = "[API凭据已隐藏]"
+					redactedProfile.Controller = &ctrlCopy
+				}
+				b, e := json.MarshalIndent(redactedProfile, "", "  ")
 				if e != nil {
 					return e
 				}
@@ -134,10 +144,32 @@ func (a *app) device(args []string) error {
 			return nil
 		})
 	case "create":
-		if err := rejectTopologyFlags(f, "name", "binding", "strategy", "allow-degraded-auto", "routing", "test-url", "interval", "tolerance", "timeout", "tags", "preview", "subscription-formats"); err != nil {
+		if err := rejectTopologyFlags(f, "name", "binding", "strategy", "allow-degraded-auto", "routing", "default-subscription-format", "tun", "enable-controller", "controller-port", "test-url", "interval", "tolerance", "timeout", "tags", "preview", "subscription-formats"); err != nil {
 			return err
 		}
-		p := node.DeviceProfile{ID: node.Token(8), Name: *name, Strategy: *strategy, AllowDegradedAuto: *allowDegradedAuto, Routing: *routing, TestURL: *testURL, IntervalSeconds: *interval, ToleranceMS: *tolerance, TimeoutMS: *timeout}
+		if flagSet(f, "controller-port") && !*enableController {
+			return errors.New("指定 --controller-port 时须同时开启 --enable-controller")
+		}
+		p := node.DeviceProfile{
+			ID:                        node.Token(8),
+			Name:                      *name,
+			Strategy:                  *strategy,
+			AllowDegradedAuto:         *allowDegradedAuto,
+			Routing:                   *routing,
+			DefaultSubscriptionFormat: *defaultSubFormat,
+			TUN:                       *tun,
+			TestURL:                   *testURL,
+			IntervalSeconds:           *interval,
+			ToleranceMS:               *tolerance,
+			TimeoutMS:                 *timeout,
+		}
+		if *enableController {
+			p.Controller = &node.ClientController{
+				Enabled: true,
+				Port:    *controllerPort,
+				Secret:  node.Token(16),
+			}
+		}
 		if *subscriptionFormats != "" {
 			p.SubscriptionFormats = strings.Split(*subscriptionFormats, ",")
 		}
@@ -275,7 +307,7 @@ func (a *app) device(args []string) error {
 	}
 }
 
-func (a *app) exportDevice(deviceID, profileFile, format, clientVersion, out string, allowLossy bool) error {
+func (a *app) exportDevice(deviceID, profileFile, format, clientVersion, out string, allowLossy bool, override func(*node.DeviceProfile)) error {
 	if out == "" {
 		return errors.New("批量设备导出包含私密凭据，请用--out保存新私有文件")
 	}
@@ -313,6 +345,9 @@ func (a *app) exportDevice(deviceID, profileFile, format, clientVersion, out str
 			return errors.New("临时批量导出仅接受一份设备Profile")
 		}
 		p = b.Profiles[0]
+	}
+	if override != nil {
+		override(&p)
 	}
 	result, e := node.ExportDeviceProfile(st, p, format, clientVersion, allowLossy)
 	if e != nil {

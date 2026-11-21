@@ -30,6 +30,9 @@ func validateTLSUUIDNode(n Node, checkExternalFiles bool) error {
 	if err := validateTransport(n); err != nil {
 		return err
 	}
+	if err := validateNodeMultiplex(n); err != nil {
+		return err
+	}
 	uuids := map[string]bool{}
 	for _, u := range n.Users {
 		identity := strings.ToLower(u.UUID)
@@ -49,6 +52,9 @@ func vlessTLSInbound(n Node, root string) M {
 	out := M{"type": "vless", "users": u, "tls": tlsInboundWithTransport(n, root)}
 	if tr := transportInbound(n); tr != nil {
 		out["transport"] = tr
+	}
+	if mux := multiplexInbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
 	}
 	return out
 }
@@ -81,6 +87,9 @@ func vlessTLSOutbound(n Node, u User) M {
 	if tr := transportOutbound(n); tr != nil {
 		out["transport"] = tr
 	}
+	if mux := multiplexOutbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
 	return out
 }
 
@@ -96,5 +105,6 @@ func vlessTLSMihomo(n Node, u User) M {
 		"network":          "tcp",
 	}
 	applyTransportMihomo(out, n)
+	applyMultiplexMihomo(out, n.Multiplex)
 	return out
 }

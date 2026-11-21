@@ -1,19 +1,19 @@
 # 协议选择、能力与完整配置
 
-当前源码（`0.4.0`）将底层协议从原有的 7 种扩展为 **9 种**（在原有 `reality`、`ss2022`、`hysteria2`、`anytls`、`trojan`、`ss-aead`、`tuic` 基础上新增 `vless-tls` 与 `vmess-tls`），并在 `vless-tls`、`vmess-tls` 上各支持直连（`tcp`）、WebSocket（`ws`）、gRPC（`grpc`）、HTTPUpgrade（`httpupgrade`）4 种连接方式，在 `trojan` 上新增 `ws`、`grpc`、`httpupgrade` 3 种连接方式，合计 **11 个新协议与传输组合**。实际安装版本用 `qingnode version` 核对，正式发行与验证来源见 [TEST_REPORT.md](TEST_REPORT.md)。第09批的准确提交、测试及保留失败作为历史记录保留在 [BATCH09.md](BATCH09.md)。默认官方核心为 1.14.0，候选 1.14.3 不会自动替换。
+当前源码（`0.5.0`）支持 **9 种底层入站协议**（`reality`、`vless-tls`、`vmess-tls`、`ss2022`、`hysteria2`、`anytls`、`trojan`、`ss-aead`、`tuic`），并在 `vless-tls`、`vmess-tls`、`trojan` 上支持 `tcp`、`ws`（含可选 `0-RTT` Early Data）、`grpc`、`httpupgrade`、`http`（原生 HTTP/2 `h2`）传输，在 `reality` 上支持 Vision（`tcp`）与 `grpc`（`reality-grpc`）传输，同时提供可选 TCP 多路复用（`multiplex`：`h2mux`/`smux`/`yamux`）、`SS2022` 三加密方法、Hysteria2 `salamander` 混淆与端口跳跃，以及与入站协议对齐的远程 `Egress` 出站能力。实际安装版本用 `qingnode version` 核对，正式发行与验证来源见 [TEST_REPORT.md](TEST_REPORT.md)。第09批的准确提交、测试及保留失败作为历史记录保留在 [BATCH09.md](BATCH09.md)。默认官方核心为 1.14.0，候选 1.14.3 不会自动替换。
 
 ## 先按需要选，再在自己的链路测试
 
 | 协议 / 组合 | 当前监听 / 可承载业务 | 使用条件与场景 |
 | --- | --- | --- |
-| REALITY / XTLS Vision | TCP / TCP、UDP | 已有 REALITY 客户端与合适握手目标；身份为 UUID，目标选择不代表公网更快 |
-| VLESS + TLS（含 `ws`/`grpc`/`httpupgrade`） | TCP / TCP、UDP（XUDP） | 需要有效 TLS 证书与 UUID；可选择原生 TCP 或 WebSocket、gRPC、HTTPUpgrade 传输 |
-| VMess + TLS（含 `ws`/`grpc`/`httpupgrade`） | TCP / TCP、UDP（XUDP） | 现代 AEAD（`alterId=0`、`security=auto`）、TLS 证书与 UUID；支持标准 URI 与 `vmess-v2rayn` 导出 |
-| SS2022 | TCP、UDP / TCP、UDP | 客户端支持2022方法；独立服务密钥和用户密钥，不能当作传统 SS 密码 |
-| Hysteria2 | UDP / TCP、UDP | 有可达 UDP 和有效证书；性能策略独立，详见 [NETWORK_PERFORMANCE.md](NETWORK_PERFORMANCE.md) |
-| AnyTLS | TCP / TCP、UDP，UDP在TCP连接内传送 | 需要 TLS、独立用户密码与连接复用；客户端须明确支持 AnyTLS |
-| Trojan（含 `ws`/`grpc`/`httpupgrade`） | TCP / TCP、UDP，UDP在TCP连接内传送 | 需要 TLS 与独立用户密码；默认原生 TCP TLS，也可显式开启 `ws`、`grpc` 或 `httpupgrade` |
-| 传统SS AEAD（`ss-aead`） | TCP、UDP / TCP、UDP | 三种明确方法、同方法同监听的独立用户密码；适合已有传统AEAD客户端，不能当SS2022密钥格式 |
+| REALITY（Vision `tcp` / `grpc`） | TCP / TCP、UDP | 已有 REALITY 客户端与合适目标（需支持 TLS 1.3 + `X25519`/`X25519MLKEM768` 且非多租户 CDN）；支持多 `short_id` 平滑轮换与 10 种 uTLS 指纹 |
+| VLESS + TLS（`tcp`/`ws`/`grpc`/`httpupgrade`/`http`） | TCP / TCP、UDP（XUDP） | 需要有效 TLS 证书与 UUID；可选原生 TCP、WS（含 Early Data）、gRPC、HTTPUpgrade、HTTP/2（`h2`）及 TCP `multiplex` |
+| VMess + TLS（`tcp`/`ws`/`grpc`/`httpupgrade`/`http`） | TCP / TCP、UDP（XUDP） | 现代 AEAD（`alterId=0`、`security=auto`）、TLS 证书与 UUID；支持标准 URI、`vmess-v2rayn` 及可选 TCP `multiplex` |
+| SS2022 | TCP、UDP / TCP、UDP | 支持 `2022-blake3-aes-256-gcm`（默认 32B）、`2022-blake3-aes-128-gcm`（16B）、`2022-blake3-chacha20-poly1305`（32B）；可选 TCP `multiplex` |
+| Hysteria2 | UDP / TCP、UDP | 有可达 UDP 和有效证书；支持可选 `salamander` 混淆、端口跳跃与独立性能策略，详见 [NETWORK_PERFORMANCE.md](NETWORK_PERFORMANCE.md) |
+| AnyTLS | TCP / TCP、UDP，UDP在TCP连接内传送 | 需要 TLS、独立用户密码与协议内建连接复用；客户端须明确支持 AnyTLS |
+| Trojan（`tcp`/`ws`/`grpc`/`httpupgrade`/`http`） | TCP / TCP、UDP，UDP在TCP连接内传送 | 需要 TLS 与独立用户密码；可选原生 TCP、`ws`、`grpc`、`httpupgrade`、`http`（`h2`）及 TCP `multiplex` |
+| 传统SS AEAD（`ss-aead`） | TCP、UDP / TCP、UDP | 三种明确方法、同方法同监听的独立用户密码；适合已有传统AEAD客户端，可选 TCP `multiplex` |
 | TUIC | UDP / TCP、UDP | QUIC核心构建能力、TLS证书、独立UUID+密码；客户端须支持TUIC，0-RTT保持关闭 |
 
 没有通用速度排名。监听使用的网络与隧道内承载的业务不同；AnyTLS/Trojan/VLESS/VMess 能承载 UDP 不代表需要额外开放公开 UDP 监听，也不证明某条公网 UDP 路径已成功。使用 [NETWORK_TESTS.md](NETWORK_TESTS.md) 的有界测试比较自己的链路，不把 HTTPS 成功当 UDP 成功。
@@ -24,14 +24,18 @@
 qingnode protocols list
 qingnode add --protocol vless-tls --name VLESS-TLS-01 --server 节点地址 --port 443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
-qingnode add --protocol vless-ws-tls --path /ws --name VLESS-WS-01 --server 节点地址 --port 443 \
+qingnode add --protocol vless-ws-tls --path /ws --ws-max-early-data 2048 --name VLESS-WS-01 --server 节点地址 --port 443 \
+  --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
+qingnode add --protocol vless-h2-tls --path /h2 --transport-host 证书域名 --name VLESS-H2-01 --server 节点地址 --port 443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
 qingnode add --protocol vless-grpc-tls --service-name grpc --name VLESS-gRPC-01 --server 节点地址 --port 443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
 qingnode add --protocol vless-httpupgrade-tls --path /upgrade --name VLESS-HU-01 --server 节点地址 --port 443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
-qingnode add --protocol vmess-ws-tls --path /ws --name VMess-WS-01 --server 节点地址 --port 443 \
-  --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
+qingnode add --protocol reality-grpc --service-name grpc --short-ids 01ab,02cd --fingerprint qq \
+  --name REALITY-gRPC-01 --server 节点地址 --port 443 --sni 握手域名
+qingnode add --protocol ss2022 --method 2022-blake3-aes-128-gcm --multiplex h2mux \
+  --name SS2022-128-01 --server 节点地址 --port 8389
 qingnode add --protocol trojan-ws-tls --path /ws --name Trojan-WS-01 --server 节点地址 --port 8443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
 qingnode add --protocol anytls --name AnyTLS-01 --server 节点地址 --port 443 \
@@ -41,13 +45,20 @@ qingnode add --protocol tuic --name TUIC-01 --server 节点地址 --port 8443 \
   --sni 证书域名 --cert /私有目录/fullchain.pem --key /私有目录/key.pem
 ```
 
-### 应用层传输参数（`TransportOptions`）
+### 应用层传输参数（`TransportOptions`）与 TCP 多路复用（`MultiplexOptions`）
 
-WebSocket、gRPC 和 HTTPUpgrade 属于应用层传输方式（`Node.Transport`），不是独立底层协议：
-- 支持协议：`vless-tls`、`vmess-tls`、`trojan`。
-- 可选传输：`tcp`（默认，不写冗余字段）、`ws`（默认路径 `/ws`，可选 `--transport-host`）、`grpc`（默认 `--service-name grpc`，服务端与客户端自动设置 ALPN `h2`）、`httpupgrade`（默认路径 `/upgrade`，服务端与客户端自动设置 ALPN `http/1.1`）。
-- 既可使用 `--protocol vless-tls --transport ws --path /ws` 显式指定，也可直接使用组合简写（`vless-ws-tls`、`vless-grpc-tls`、`vless-httpupgrade-tls`、`vmess-ws-tls`、`vmess-grpc-tls`、`vmess-httpupgrade-tls`、`trojan-ws-tls`、`trojan-grpc-tls`、`trojan-httpupgrade-tls`）。
-- 已有节点可通过 `qingnode edit --id <ID> --transport ws --path /ws` 或菜单 `2 节点管理 → 9 REALITY/证书/传输 → 8 修改传输参数` 在线切换，保持原有 UUID/密码不变。
+WebSocket、gRPC、HTTPUpgrade 和 HTTP/2 属于应用层传输方式（`Node.Transport` / `Egress.Transport`），不是独立底层协议：
+- **TLS 协议传输（`vless-tls`、`vmess-tls`、`trojan`）**：可选 `tcp`（默认，不写冗余字段）、`ws`（默认路径 `/ws`，可选 `--transport-host`）、`grpc`（默认 `--service-name grpc`，自动设置 ALPN `h2`）、`httpupgrade`（默认路径 `/upgrade`，自动设置 ALPN `http/1.1`）、`http`（`sing-box` 原生 `"type": "http"`，`Mihomo` 映射为 `network: h2` 与 `h2-opts`，默认路径 `/`，自动设置 ALPN `h2`，支持逗号分隔多域名 `--transport-host`）。
+- **WebSocket Early Data（`0-RTT`）**：在 `ws` 传输下可选 `--ws-max-early-data 2048`（范围 `1..65536`）与 `--ws-early-data-header Sec-WebSocket-Protocol`（默认 `"Sec-WebSocket-Protocol"`），同步映射至 `sing-box` 服务端/客户端、`Mihomo` `ws-opts`、标准 URI（`?ed=2048&eh=...`）及 `vmess-v2rayn`（`path?ed=2048`）。
+- **REALITY 增强（`reality` / `reality-grpc`）**：
+  - 支持原生 Vision（`tcp`）与 `grpc`（`--protocol reality-grpc` 或 `--protocol reality --transport grpc --service-name grpc`；开启 `grpc` 时自动省略仅限 TCP 的 `xtls-rprx-vision` 流控）。
+  - 支持多 `short_id`（`--short-ids` 最多 16 个 1–8 字节小写十六进制 ID，含主 `short_id`）及 `qingnode rotate --id <ID> --short-id [--keep-old-short-id]` 平滑轮换；未设额外 ID 时服务端配置字节保持与单 `short_id` 完全一致。
+  - 客户端 uTLS 指纹支持 `chrome`、`firefox`、`safari`、`ios`、`edge`、`random`、`randomized`、`qq`、`android`、`360`。
+  - `qingnode reality-targets [--candidates host1,host2]` 会校验 TLS 1.3、`X25519` / `X25519MLKEM768` 密钥交换曲线、`h2` ALPN，并自动排除 Cloudflare、Fastly、CloudFront、Vercel、Netlify、GitHub Pages、Heroku、Render、Fly、Railway、Azure App/Static Apps 等多租户共享 CDN/PaaS 域名或 CNAME。
+- **SS2022 多加密方法**：`ss2022` 入站与远程 `Egress` 支持 `2022-blake3-aes-256-gcm`（默认，32 字节 Base64 密钥）、`2022-blake3-aes-128-gcm`（16 字节 Base64 密钥）和 `2022-blake3-chacha20-poly1305`（32 字节 Base64 密钥）；`rotate --server-key` 会按当前方法校验 Base64 解码后的精确密钥字节长度。
+- **TCP 多路复用（`MultiplexOptions`）**：兼容协议为 `ss2022`、`ss-aead`、`trojan`、`vmess-tls`、`vless-tls`（通过 `--multiplex h2mux|smux|yamux` 开启，可选 `--mux-max-connections`、`--mux-min-streams`、`--mux-padding`；`--multiplex off` 关闭），同步生成 `sing-box` 服务端/客户端 `multiplex` 与 `Mihomo` 出站 `smux`。与 `reality`/Vision、`hysteria2`/`tuic`（原生 QUIC 多流）及 `anytls`（协议内建复用）严格互斥。由于标准单节点分享 URI 无法表达 `multiplex` 协商要求，开启后默认拒绝 `uri`/`qr`/`base64` 有损导出（除非显式带 `--allow-lossy`）。
+- **关于 `xhttp` / `splithttp` 的明确说明**：Xray 专属的 `xhttp` / `splithttp` **不属于官方 `sing-box 1.14` 原生传输**，QingNode 严禁伪造上游不存在的字段；需要 HTTP 语义传输或反代穿透时，推荐使用 `httpupgrade` 或 `http(h2)` / `grpc` 替代。
+- 既可使用 `--protocol vless-tls --transport http --path /h2` 显式指定，也可直接使用组合简写（`vless-ws-tls`、`vless-grpc-tls`、`vless-httpupgrade-tls`、`vless-h2-tls`、`vmess-ws-tls`、`vmess-grpc-tls`、`vmess-httpupgrade-tls`、`vmess-h2-tls`、`trojan-ws-tls`、`trojan-grpc-tls`、`trojan-httpupgrade-tls`、`trojan-h2-tls`、`reality-grpc`）。已有节点可通过 `qingnode edit` 在线切换传输或多路复用参数，保持原有 UUID/密码不变。
 
 ### 候选协议评估与暂缓说明
 
@@ -57,11 +68,11 @@ WebSocket、gRPC 和 HTTPUpgrade 属于应用层传输方式（`Node.Transport`�
 
 TLS协议还可使用既有 PEM、用户文件引用、稳定证书资源与核心 ACME 接口，操作和条件见 [CERTIFICATES.md](CERTIFICATES.md)。凭据首次生成后保存，普通改名、端点修改和重新导出不轮换。新密码为16–512字节有效UTF-8，不含控制字符；AnyTLS/Trojan/传统SS不混UUID，TUIC明确同时需要UUID和密码。服务端按稳定 UserID 记录认证名称，显示名不是身份。
 
-能力输出将 `listener_networks`（本机监听）、`business_networks`（承载业务）、服务端/客户端构建标签、证书、凭据、各导出格式和高级字段分开。`core_binary_verified:false` 表示这只是接口登记；不会声称当前磁盘二进制或公网已经通过。新协议客户端字段只核对 sing-box1.14.0/1.14.3、Mihomo1.19.30，其他版本需另验。
+能力输出将 `listener_networks`（本机监听）、`business_networks`（承载业务）、服务端/客户端构建标签、证书、凭据、各导出格式和高级字段分开。`core_binary_verified:false` 表示这只是接口登记；不会声称当前磁盘二进制或公网已经通过。客户端导出按语义化兼容版本线校验：`sing-box` 完整配置放行正式 `1.14.x` 版本线（受控测试已核验官方 `1.14.0` / `1.14.3`），`Mihomo` / `provider` 放行正式 `>= 1.19.0` 版本线（受控测试已核验官方 `1.19.30`），预发布版本及未适配的 `1.15.x` 仍明确拒绝。
 
-新协议用命令行导出单节点完整配置时，sing-box 显式加 `--client-version 1.14.0` 或 `1.14.3`，Mihomo/provider 加 `--client-version 1.19.30`；目标是客户端版本，不从服务器核心版本推断。交互导出菜单会选用已核验的 sing-box 1.14.0 或 Mihomo 1.19.30 并显示选择，`info` 的 sing-box 命令也包含版本参数。实际二进制构建标签仍需单独核对，版本字符串不能代替构建标签。
+新协议用命令行导出单节点完整配置时，`sing-box` 显式传 `--client-version 1.14.x`（如 `1.14.0` 或 `1.14.3`），`Mihomo` / `provider` 显式传 `--client-version 1.19.x`（如 `1.19.30`）；目标是客户端版本，不从服务器核心版本推断。交互导出菜单默认填入已核验基准版本（`1.14.0` / `1.19.30`），并支持客户端分流预设（`--routing global|basic|cn-direct|global-secure-dns`）、可选 `--tun` 入站以及仅绑定 `127.0.0.1` 的本地控制端口（`--enable-controller`）。实际二进制构建标签仍需单独核对，版本字符串不能代替构建标签。
 
-`protocols list` 的 `server` 表示可作为Node入站；`client_outbound` 表示可生成sing-box客户端出站，全部协议均为true；`server_egress` 表示可保存为服务器远程Egress，仅REALITY、SS2022、Hysteria2为true。原有 `outbound` 字段为了兼容旧读取端仍等于 `client_outbound`，不得据此推断服务器Egress能力。SOCKS5和用户态WireGuard也属于服务器远程Egress，单独登记在拓扑模型中。已有入口仍可显式绑定已支持的出口路径，具体限制见[TOPOLOGY.md](TOPOLOGY.md)。
+`protocols list` 的 `server` 表示可作为Node入站；`client_outbound` 表示可生成sing-box客户端出站；`server_egress` 表示可保存为服务器远程Egress，当前 9 种代理协议（`reality`、`ss2022`、`ss-aead`、`hysteria2`、`trojan`、`vless-tls`、`vmess-tls`、`anytls`、`tuic`）均为 `true`。原有 `outbound` 字段为了兼容旧读取端仍等于 `client_outbound`。此外，`socks5`、`http`（标准 HTTP/HTTPS CONNECT 代理，仅限 TCP）和用户态 `wireguard` 也属于服务器远程 Egress，单独登记在拓扑模型中，具体限制见 [TOPOLOGY.md](TOPOLOGY.md)。
 
 能力登记 `advanced_options` 使用官方核心字段名；私有State及 `protocols options` 使用下表左列。尤其 `min_idle_session` 是核心字段，私有输入应写 `idle_session_min_keep`，不能直接照抄能力列表作为State字段。
 
@@ -118,15 +129,17 @@ TUIC需要 `with_quic`，使用核心ACME还需要相应证书构建能力。UUI
 
 AnyTLS基础URI按官方格式保存密码、显式连接端口、SNI和安全TLS选择。显式空闲设置无法由标准链接表达，因此URI、二维码、Base64分享默认拒绝，改用完整sing-box JSON或Mihomo YAML/provider；不静默丢字段，也不返回空链接冒充成功。
 
-Trojan、VLESS+TLS 与 VMess+TLS 的 URI 均统一编码显式连接端口（`EffectiveConnectPort`）、SNI、ALPN 及传输层参数（`type=tcp|ws|grpc|httpupgrade`、`path`、`host`、`serviceName`）。`vmess-tls` 同时提供符合 RFC 3986 的 URL 形式 `vmess://` 以及兼容 V2RayN 的 Base64 JSON v2 形式（`--format vmess-v2rayn`）。Mihomo 1.19.30 导入 Trojan/VLESS/VMess URI 会默认采用 Chrome 指纹；该固定组合不接受 Ed25519 证书，因此对此类静态证书拒绝分享格式，建议完整原生 TLS 配置或 ECDSA/RSA 证书。原生 TCP TLS 的完整 JSON/YAML 不继承 Hysteria2 QUIC/Chrome 限制；这不等于所有客户端 UI 都已验证。ACME 实际签发、信任链、导入和传输分别检查。
+Trojan、VLESS+TLS 与 VMess+TLS 的 URI 均统一编码显式连接端口（`EffectiveConnectPort`）、SNI、ALPN 及传输层参数（`type=tcp|ws|grpc|httpupgrade|http`、`path`、`host`、`serviceName`、WS Early Data `ed`/`eh`）。`reality-grpc` 在 `vless://` URI 中编码 `type=grpc&serviceName=...` 并省略 `flow`。开启 TCP `multiplex` 的节点因标准 URI 无法承载多路复用协商参数，默认拒绝 `uri`/`qr`/`base64` 导出（除非显式 `--allow-lossy`）。`vmess-tls` 同时提供符合 RFC 3986 的 URL 形式 `vmess://` 以及兼容 V2RayN 的 Base64 JSON v2 形式（`--format vmess-v2rayn`），且多节点设备 `DeviceProfile` 在导出 `base64` 订阅格式时对 `vmess-tls` 自动采用客户端广泛兼容的 v2rayN Base64 JSON `vmess://` 链接（携带稳定唯一节点名 `ps`）。Mihomo 导入 Trojan/VLESS/VMess URI 会默认采用 Chrome 指纹；该组合不接受 Ed25519 证书，因此对此类静态证书拒绝分享格式，建议完整原生 TLS 配置或 ECDSA/RSA 证书。
 
-TUIC当前不提供未经核验的通用URI，URI、二维码、Base64集合明确拒绝，使用完整JSON/YAML/provider。设备含TUIC或AnyTLS高级设置时，应明确选择 `"subscription_formats":["sing-box","mihomo","provider"]`，排除默认URI格式；不能为了发布成功而静默丢设置或省掉节点。下载令牌不等于代理凭据，禁用/撤销沿独立授权处理。
+TUIC 支持按标准 **NEP-408** 规范导出 `tuic://` 分享链接、二维码及 `base64` 订阅条目（形如 `tuic://<UUID>:<URL编码密码>@<host>:<port>?alpn=h3&sni=<SNI>&congestion_control=<cc>&udp_relay_mode=<mode>#<name>`）：
+- **无损导出边界**：`auth_timeout`、`server_heartbeat`、`server_congestion_control` 属于纯服务端运行参数，不影响客户端拨号，可正常生成 NEP-408 `tuic://` 链接；`client_congestion_control` 与 `udp_relay_mode` 会原样编码到查询参数中。
+- **有损保护**：若节点显式配置了客户端专属 `client_heartbeat`（NEP-408 标准查询参数无法表达客户端心跳间隔），默认拒绝 `uri`/`qr`/`base64` 导出并提示改用完整 `sing-box` / `mihomo` 配置（除非用户显式传入 `--allow-lossy` 接受忽略客户端心跳）。
 
 所有客户端连接地址统一来自 `Host/ConnectPort`；`Listen/Port`只用于本地监听。IPv6、NAT额外入口沿 [ENDPOINTS.md](ENDPOINTS.md) 处理，不改证书名称。设备导出、订阅下载权限和代理凭据停用仍是独立范围，见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)、[MONITORING.md](MONITORING.md)。
 
 ## 版本、恢复与固定来源
 
-State保持 schema 9（支持 schema 1–8 在内存迁移兼容并保留原件）。旧 `<8` 格式不接受新增协议或新增传输/协议选项，即使值为 null 或使用大小写、Unicode 别名；合法旧字段仍可读取。详见 [MIGRATION.md](MIGRATION.md)。
+当前 State 为 **schema 10**（支持旧 `schema 1–9` 在内存无损只读迁移兼容并保留原件，既有节点派生配置不变）。旧 `<8` 格式不接受新增协议或新增传输/协议选项，旧 `<10` 格式同样严格拒绝夹带 `schema 10` 新增字段或枚举值（包括新增远程 `Egress` 协议、HY2 `obfs`/端口跳跃、`http` 传输、WS Early Data、TCP `multiplex`、`SS2022` 新增加密方法、REALITY 多 `short_id` / `grpc` / 扩展指纹、设备订阅默认格式、`TUN`、本地控制器与新分流预设），即使值为 `null` 或使用大小写、Unicode 别名；合法旧字段仍可正常读取。详见 [MIGRATION.md](MIGRATION.md)。
 
 字段核对使用官方固定源码，只取接口事实，未复制或链接GPL实现：sing-box [1.14.0 AnyTLS](https://github.com/SagerNet/sing-box/blob/0b8995879f29a9b98ee027bc17b75e101445b238/option/anytls.go)、[1.14.3 AnyTLS](https://github.com/SagerNet/sing-box/blob/7054cac5124465ffdb145870d7c01885566711b1/option/anytls.go)、[1.14.3 Trojan](https://github.com/SagerNet/sing-box/blob/7054cac5124465ffdb145870d7c01885566711b1/option/trojan.go)，Mihomo [1.19.30 AnyTLS](https://github.com/MetaCubeX/mihomo/blob/ac017cdd246ce8bd547653d927e7bf77d7ee73d5/adapter/outbound/anytls.go)、[分享链接转换](https://github.com/MetaCubeX/mihomo/blob/ac017cdd246ce8bd547653d927e7bf77d7ee73d5/common/convert/converter.go)，AnyTLS原作者[基础URI规范](https://github.com/anytls/anytls-go/blob/fd6167acd6d73b9fa3e607659951847fbc9e6c50/docs/uri_scheme.md)。上游许可和二进制来源沿 [THIRD_PARTY.md](../THIRD_PARTY.md)；源文件检查不代替真实核心测试。
 

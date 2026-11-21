@@ -30,7 +30,118 @@ type CertificateJournalObservation struct {
 	Limitation      string     `json:"limitation,omitempty"`
 }
 
-var certificateEventLine = regexp.MustCompile(`^(?:[+-][0-9]{4} [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?(?:INFO|ERROR)[ \t]*(?:\[[0-9]{4,12}\][ \t]*)?(certificate-provider/acme\[certificate-[a-f0-9]{16}\]|inbound/hysteria2\[[a-f0-9]{16}\]): (obtain|renew): (obtaining certificate|renewing certificate|certificate obtained successfully|certificate renewed successfully|could not get certificate from issuer): (\{[^\r\n]*\})$`)
+// CertificateObservation combines authoritative on-disk X.509 file inspection
+// (cross-init systemd/OpenRC, unaffected by warn log level or rotation) with
+// auxiliary systemd journal CA event diagnostics.
+type CertificateObservation struct {
+	Certificate        CertificateStatus              `json:"certificate"`
+	DiskValid          bool                           `json:"disk_certificate_valid"`
+	PrimarySource      string                         `json:"primary_source"`
+	CAJournal          *CertificateJournalObservation `json:"ca_journal,omitempty"`
+	RecentCAEventState string                         `json:"recent_ca_event_state"`
+	Summary            string                         `json:"summary"`
+}
+
+func inboundTagForProtocol(protocol string) string {
+	if p, ok := Protocol(protocol); ok && p.InboundType != "" {
+		return p.InboundType
+	}
+	return protocol
+}
+
+func ObserveCertificate(st State, r CertificateResource, root string, observer interface {
+	InspectCertificateJournal(State, CertificateResource, time.Time) (CertificateJournalObservation, error)
+}, includeJournal bool, now time.Time) (CertificateObservation, error, error) {
+	status, statusErr := InspectCertificateResource(r, root, now)
+	var journal *CertificateJournalObservation
+	var journalErr error
+	if r.Certificate.Mode == "acme" && includeJournal && observer != nil {
+		obs, err := observer.InspectCertificateJournal(st, r, now)
+		journal = &obs
+		journalErr = err
+	}
+	return SummarizeCertificateObservation(status, statusErr, journal, journalErr), statusErr, journalErr
+}
+
+func SummarizeCertificateObservation(status CertificateStatus, statusErr error, journal *CertificateJournalObservation, journalErr error) CertificateObservation {
+	diskValid := statusErr == nil && (status.Status == "available" || status.Status == "expiring") && status.KeyMatched != nil && *status.KeyMatched
+	primarySource := "configuration-only"
+	if status.Evidence != "configuration-only" {
+		primarySource = "x509-disk"
+	}
+	out := CertificateObservation{
+		Certificate:   status,
+		DiskValid:     diskValid,
+		PrimarySource: primarySource,
+		CAJournal:     journal,
+	}
+	if status.Mode != "acme" {
+		out.RecentCAEventState = "not_applicable"
+		if diskValid {
+			days := 0
+			if status.DaysRemaining != nil {
+				days = *status.DaysRemaining
+			}
+			out.Summary = fmt.Sprintf("磁盘证书有效（密钥匹配，剩余%d天）", days)
+		} else {
+			reason := status.Reason
+			if reason == "" && statusErr != nil {
+				reason = statusErr.Error()
+			}
+			out.Summary = "磁盘证书不可用：" + reason
+		}
+		return out
+	}
+	caState := "not_queried"
+	if journal != nil {
+		switch {
+		case journalErr != nil || strings.HasPrefix(journal.Evidence, "unavailable"):
+			caState = "unavailable"
+		case journal.Issuing != nil && *journal.Issuing:
+			caState = "issuing"
+		case journal.LastFailure != nil && (journal.LastSuccess == nil || !journal.LastFailure.Before(*journal.LastSuccess)):
+			caState = "failure"
+		case journal.LastSuccess != nil:
+			caState = "success"
+		default:
+			caState = "none_observed"
+		}
+	}
+	out.RecentCAEventState = caState
+	days := 0
+	if status.DaysRemaining != nil {
+		days = *status.DaysRemaining
+	}
+	switch {
+	case diskValid && caState == "failure":
+		out.Summary = fmt.Sprintf("磁盘证书有效（密钥匹配，剩余%d天）；最近一次CA日志事件记录续期/签发失败（%s），当前服务仍使用有效磁盘证书，请在到期前排查", days, journal.FailureCategory)
+	case diskValid && caState == "success":
+		out.Summary = fmt.Sprintf("磁盘证书有效（密钥匹配，剩余%d天）；最近一次CA日志事件为签发/续期成功", days)
+	case diskValid && caState == "issuing":
+		out.Summary = fmt.Sprintf("磁盘证书有效（密钥匹配，剩余%d天）；最近一次CA日志事件显示正在续期", days)
+	case diskValid:
+		out.Summary = fmt.Sprintf("磁盘证书有效（密钥匹配，剩余%d天）；未观测到最近CA成功日志（服务端默认warn级别不记录INFO成功事件，OpenRC或日志轮转亦不影响磁盘证书可用）", days)
+	case status.Status == "configured" && caState == "failure":
+		out.Summary = fmt.Sprintf("尚未观测到落盘证书；最近一次CA日志事件记录签发失败（%s）：%s", journal.FailureCategory, journal.FailureReason)
+	case status.Status == "configured" && caState == "issuing":
+		out.Summary = "尚未观测到落盘证书；最近一次CA日志事件显示正在向CA申请证书"
+	case status.Status == "configured":
+		out.Summary = "尚未观测到落盘证书，且无最近CA错误日志；服务启动并完成ACME挑战后才会落盘证书"
+	default:
+		reason := status.Reason
+		if reason == "" && statusErr != nil {
+			reason = statusErr.Error()
+		}
+		if caState == "failure" {
+			out.Summary = fmt.Sprintf("磁盘证书不可用（%s）；最近一次CA日志事件亦记录失败（%s）", reason, journal.FailureCategory)
+		} else {
+			out.Summary = "磁盘证书不可用：" + reason
+		}
+	}
+	return out
+}
+
+var certificateEventLine = regexp.MustCompile(`^(?:[+-][0-9]{4} [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?(?:INFO|WARN|ERROR)[ \t]*(?:\[[0-9]{4,12}\][ \t]*)?(certificate-provider/acme\[certificate-[a-f0-9]{16}\]|inbound/(?:hysteria2|trojan|anytls|tuic|vless|vmess)\[[a-f0-9]{16}\]): (obtain|renew): (obtaining certificate|renewing certificate|certificate obtained successfully|certificate renewed successfully|could not get certificate from issuer): (\{[^\r\n]*\})$`)
 var invocationIDRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 func (b SystemBackend) InspectCertificateJournal(st State, r CertificateResource, now time.Time) (CertificateJournalObservation, error) {
@@ -72,7 +183,7 @@ func (b SystemBackend) InspectCertificateJournal(st State, r CertificateResource
 	} else {
 		for _, n := range st.Nodes {
 			if n.Enabled && n.CertificateID == r.ID {
-				owners["inbound/hysteria2["+n.ID+"]"] = true
+				owners["inbound/"+inboundTagForProtocol(n.Protocol)+"["+n.ID+"]"] = true
 			}
 		}
 	}

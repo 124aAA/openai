@@ -180,13 +180,8 @@ func (s State) MarshalJSON() ([]byte, error) {
 func (s *State) UnmarshalJSON(data []byte) error {
 	type wire State
 	var value wire
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(&value); err != nil {
+	if err := unmarshalStrictStruct(data, &value); err != nil {
 		return err
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return errors.New("状态含多余数据")
 	}
 	*s = State(value)
 	return ResolveCertificates(s)
@@ -415,7 +410,7 @@ func validateACME(a ACMESettings) error {
 	switch a.KeyType {
 	case "", "p256", "p384", "rsa2048", "rsa4096":
 	default:
-		return errors.New("HY2 ACME证书算法仅支持p256/p384/rsa2048/rsa4096")
+		return errors.New("ACME证书算法仅支持p256/p384/rsa2048/rsa4096")
 	}
 	for _, p := range []int{a.AlternativeHTTPPort, a.AlternativeTLSPort} {
 		if p < 0 || p > 65535 {
@@ -693,8 +688,12 @@ type CertificateStatus struct {
 	ResourceID    string     `json:"resource_id"`
 	Status        string     `json:"status"`
 	Mode          string     `json:"mode"`
+	Subject       string     `json:"subject,omitempty"`
+	Issuer        string     `json:"issuer,omitempty"`
 	Algorithm     string     `json:"algorithm,omitempty"`
 	SANs          []string   `json:"sans,omitempty"`
+	ChainLength   int        `json:"chain_length,omitempty"`
+	KeyMatched    *bool      `json:"key_matched,omitempty"`
 	NotBefore     *time.Time `json:"not_before,omitempty"`
 	NotAfter      *time.Time `json:"not_after,omitempty"`
 	DaysRemaining *int       `json:"days_remaining,omitempty"`
@@ -703,9 +702,56 @@ type CertificateStatus struct {
 	Evidence      string     `json:"evidence"`
 }
 
+func certBoolPtr(v bool) *bool { return &v }
+
+func parseCertificateBlocks(certPEM []byte) ([]*x509.Certificate, error) {
+	rest := bytes.TrimSpace(certPEM)
+	if len(rest) == 0 || len(rest) > 1<<20 {
+		return nil, errors.New("证书为空或超过1MiB")
+	}
+	var chain []*x509.Certificate
+	for len(bytes.TrimSpace(rest)) > 0 {
+		block, next := pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return nil, errors.New("证书链含非证书或无效PEM")
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, errors.New("证书链无法解析")
+		}
+		chain = append(chain, c)
+		rest = next
+	}
+	if len(chain) == 0 || len(chain) > 16 {
+		return nil, errors.New("证书链为空或超过16项")
+	}
+	return chain, nil
+}
+
+func populateCertificateLeafStatus(result *CertificateStatus, leaf *x509.Certificate, chainLen int, keyMatched *bool, now time.Time) {
+	result.Evidence = "certificate-file-observed; not issuance/renewal event history"
+	result.Subject = leaf.Subject.String()
+	result.Issuer = leaf.Issuer.String()
+	result.Algorithm = leaf.PublicKeyAlgorithm.String()
+	result.SANs = append([]string(nil), leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		result.SANs = append(result.SANs, ip.String())
+	}
+	result.ChainLength = chainLen
+	result.KeyMatched = keyMatched
+	nb := leaf.NotBefore
+	na := leaf.NotAfter
+	result.NotBefore = &nb
+	result.NotAfter = &na
+	days := int(leaf.NotAfter.Sub(now).Hours() / 24)
+	result.DaysRemaining = &days
+}
+
 func InspectCertificateResource(r CertificateResource, root string, now time.Time) (CertificateStatus, error) {
 	result := CertificateStatus{ResourceID: r.ID, Mode: r.Certificate.Mode, Status: "configured", Evidence: "configuration-only"}
 	var leaf *x509.Certificate
+	selectedChainLen := 0
+	var selectedKeyMatched *bool
 	selectedValid := false
 	selectedReason := ""
 	if r.Certificate.Mode == "acme" {
@@ -720,6 +766,10 @@ func InspectCertificateResource(r CertificateResource, root string, now time.Tim
 		present := map[string]bool{}
 		files, bytesRead := 0, int64(0)
 		invalidCandidates := false
+		var fallbackLeaf *x509.Certificate
+		fallbackChainLen := 0
+		var fallbackKeyMatched *bool
+		fallbackReason := ""
 		err := filepath.WalkDir(result.Storage, func(path string, d os.DirEntry, err error) error {
 			if errors.Is(err, os.ErrNotExist) && path == result.Storage {
 				return nil
@@ -755,38 +805,62 @@ func InspectCertificateResource(r CertificateResource, root string, now time.Tim
 			if e != nil {
 				return errors.New("ACME证书不可读取")
 			}
-			block, _ := pem.Decode(data)
-			if block == nil || block.Type != "CERTIFICATE" {
+			rawChain, rawErr := parseCertificateBlocks(data)
+			if rawErr != nil || len(rawChain) == 0 {
 				invalidCandidates = true
 				return nil
 			}
-			c, e := x509.ParseCertificate(block.Bytes)
-			if e != nil || c.VerifyHostname(r.Certificate.ServerName) != nil {
-				invalidCandidates = true
-				return nil
+			rawLeaf := rawChain[0]
+			key, keyErr := readCertificateFile(keyPath, true)
+			if keyErr == nil {
+				bytesRead += int64(len(key))
+				if bytesRead > 8<<20 {
+					return errors.New("ACME状态扫描超过8MiB")
+				}
 			}
-			key, e := readCertificateFile(keyPath, true)
-			if e != nil {
-				invalidCandidates = true
-				return nil
+			keyMatched := false
+			var pairedLeaf *x509.Certificate
+			pairedChainLen := len(rawChain)
+			var pairErr error
+			if keyErr == nil {
+				if _, pairCheckErr := tls.X509KeyPair(bytes.TrimSpace(data), bytes.TrimSpace(key)); pairCheckErr == nil {
+					keyMatched = true
+				}
+				var pairedChain []*x509.Certificate
+				pairedLeaf, pairedChain, pairErr = parseCertificateChain(data, key)
+				if pairErr == nil {
+					pairedChainLen = len(pairedChain)
+				}
 			}
-			metadata, e := readCertificateFile(metadataPath, false)
+			metadata, metaErr := readCertificateFile(metadataPath, false)
+			if metaErr == nil {
+				bytesRead += int64(len(metadata))
+				if bytesRead > 8<<20 {
+					return errors.New("ACME状态扫描超过8MiB")
+				}
+			}
 			var metadataFields map[string]json.RawMessage
-			if e != nil || rejectSnapshotEnvelopeDuplicates(metadata) != nil || json.Unmarshal(metadata, &metadataFields) != nil || metadataFields == nil {
+			metaOK := metaErr == nil && rejectSnapshotEnvelopeDuplicates(metadata) == nil && json.Unmarshal(metadata, &metadataFields) == nil && metadataFields != nil
+			hostErr := rawLeaf.VerifyHostname(r.Certificate.ServerName)
+			if hostErr != nil || keyErr != nil || pairErr != nil || !metaOK {
 				invalidCandidates = true
-				return nil
-			}
-			bytesRead += int64(len(metadata))
-			if bytesRead > 8<<20 {
-				return errors.New("ACME状态扫描超过8MiB")
-			}
-			bytesRead += int64(len(key))
-			if bytesRead > 8<<20 {
-				return errors.New("ACME状态扫描超过8MiB")
-			}
-			c, _, e = parseCertificateChain(data, key)
-			if e != nil {
-				invalidCandidates = true
+				if fallbackLeaf == nil {
+					fallbackLeaf = rawLeaf
+					fallbackChainLen = len(rawChain)
+					fallbackKeyMatched = certBoolPtr(keyMatched)
+					switch {
+					case hostErr != nil:
+						fallbackReason = "ACME落盘证书SAN不包含指定域名；未确认签发可用"
+					case keyErr != nil:
+						fallbackReason = "指定CA/域名的配对私钥缺失或不可安全读取；未确认签发可用"
+					case !keyMatched:
+						fallbackReason = "ACME落盘证书与私钥不匹配；未确认签发可用"
+					case pairErr != nil:
+						fallbackReason = pairErr.Error() + "；未确认签发可用"
+					default:
+						fallbackReason = "指定CA/域名的ACME签发元数据缺失或无效；未确认签发可用"
+					}
+				}
 				return nil
 			}
 			candidateErr := ValidateCertificateResource(CertificateResource{Certificate: Certificate{Mode: "pem", ServerName: r.Certificate.ServerName, CertPEM: string(data), KeyPEM: string(key)}}, now, true)
@@ -794,8 +868,10 @@ func InspectCertificateResource(r CertificateResource, root string, now time.Tim
 			if !valid {
 				invalidCandidates = true
 			}
-			if leaf == nil || valid && !selectedValid || valid == selectedValid && c.NotAfter.After(leaf.NotAfter) {
-				leaf = c
+			if leaf == nil || valid && !selectedValid || valid == selectedValid && pairedLeaf.NotAfter.After(leaf.NotAfter) {
+				leaf = pairedLeaf
+				selectedChainLen = pairedChainLen
+				selectedKeyMatched = certBoolPtr(true)
 				selectedValid = valid
 				selectedReason = ""
 				if candidateErr != nil {
@@ -810,6 +886,12 @@ func InspectCertificateResource(r CertificateResource, root string, now time.Tim
 			return result, err
 		}
 		if leaf == nil {
+			if fallbackLeaf != nil {
+				populateCertificateLeafStatus(&result, fallbackLeaf, fallbackChainLen, fallbackKeyMatched, now)
+				result.Status = "failed"
+				result.Reason = fallbackReason
+				return result, nil
+			}
 			if invalidCandidates || len(present) > 0 {
 				result.Status = "failed"
 				result.Reason = "指定CA/域名的证书、配对私钥或元数据不完整或无效；未确认签发可用"
@@ -820,33 +902,55 @@ func InspectCertificateResource(r CertificateResource, root string, now time.Tim
 			result.Reason = "另有无法验证的候选证书；当前展示可配对证书，不代表运行核心已采用或最近签发成功"
 		}
 	} else {
-		cert, key, err := certificateMaterial(r.Certificate)
+		var cert, key []byte
+		var certErr, keyErr error
+		if r.Certificate.Mode == "pem" {
+			cert, key = []byte(r.Certificate.CertPEM), []byte(r.Certificate.KeyPEM)
+		} else if r.Certificate.Mode == "file" {
+			cert, certErr = readCertificateFile(r.Certificate.CertificatePath, false)
+			if certErr == nil {
+				key, keyErr = readCertificateFile(r.Certificate.KeyPath, true)
+			}
+		} else {
+			cert, key, certErr = certificateMaterial(r.Certificate)
+		}
+		if certErr != nil {
+			result.Status = "failed"
+			result.Reason = certErr.Error()
+			return result, certErr
+		}
+		rawChain, rawErr := parseCertificateBlocks(cert)
+		if keyErr != nil {
+			if rawErr == nil && len(rawChain) > 0 {
+				populateCertificateLeafStatus(&result, rawChain[0], len(rawChain), certBoolPtr(false), now)
+			}
+			result.Status = "failed"
+			result.Reason = keyErr.Error()
+			return result, keyErr
+		}
+		var chain []*x509.Certificate
+		var err error
+		leaf, chain, err = parseCertificateChain(cert, key)
 		if err != nil {
+			km := false
+			if _, pairErr := tls.X509KeyPair(bytes.TrimSpace(cert), bytes.TrimSpace(key)); pairErr == nil {
+				km = true
+			}
+			if rawErr == nil && len(rawChain) > 0 {
+				populateCertificateLeafStatus(&result, rawChain[0], len(rawChain), certBoolPtr(km), now)
+			}
 			result.Status = "failed"
 			result.Reason = err.Error()
 			return result, err
 		}
-		leaf, _, err = parseCertificateChain(cert, key)
-		if err != nil {
-			result.Status = "failed"
-			result.Reason = err.Error()
-			return result, err
-		}
+		selectedChainLen = len(chain)
+		selectedKeyMatched = certBoolPtr(true)
 		validationErr := ValidateCertificateResource(r, now, true)
 		if validationErr != nil {
 			selectedReason = validationErr.Error()
 		}
 	}
-	result.Evidence = "certificate-file-observed; not issuance/renewal event history"
-	result.Algorithm = leaf.PublicKeyAlgorithm.String()
-	result.SANs = append([]string(nil), leaf.DNSNames...)
-	for _, ip := range leaf.IPAddresses {
-		result.SANs = append(result.SANs, ip.String())
-	}
-	result.NotBefore = &leaf.NotBefore
-	result.NotAfter = &leaf.NotAfter
-	days := int(leaf.NotAfter.Sub(now).Hours() / 24)
-	result.DaysRemaining = &days
+	populateCertificateLeafStatus(&result, leaf, selectedChainLen, selectedKeyMatched, now)
 	switch {
 	case selectedReason != "":
 		result.Status = "failed"

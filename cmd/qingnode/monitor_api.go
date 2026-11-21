@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"qingnode/internal/coreapi"
+	"qingnode/internal/monitor"
 	"qingnode/internal/node"
 	"qingnode/internal/platform"
 )
@@ -449,6 +451,186 @@ func (a *app) monitorTraffic(args []string) error {
 		}
 	})
 	report.ThresholdStatus = trafficThreshold(report.Samples, report.ThresholdBytes)
+	raw, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	if pinned != nil {
+		return pinned.write(append(raw, '\n'))
+	}
+	return writeOutput("", raw)
+}
+
+func captureLedgerSample(ctx context.Context, st node.State, backend node.Backend, preStop bool) (monitor.LedgerSample, error) {
+	if st.Observability == nil || !st.Observability.Enabled {
+		return monitor.LedgerSample{}, coreapi.ErrUnavailable
+	}
+	timeout := 1500 * time.Millisecond
+	if preStop {
+		timeout = 750 * time.Millisecond
+	}
+	client, err := coreapi.New(coreapi.Config{Endpoint: st.Observability.Endpoint(), Secret: st.Observability.Secret, Timeout: timeout})
+	if err != nil {
+		return monitor.LedgerSample{}, err
+	}
+	defer client.Close()
+
+	sampleCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	started, err := client.StartedAt(sampleCtx)
+	if err != nil {
+		return monitor.LedgerSample{}, err
+	}
+	status, err := client.Status(sampleCtx)
+	if err != nil {
+		return monitor.LedgerSample{}, err
+	}
+	connections, connErr := client.Connections(sampleCtx)
+	finished, err := client.StartedAt(sampleCtx)
+	if err != nil {
+		return monitor.LedgerSample{}, err
+	}
+	if started != finished {
+		return monitor.LedgerSample{}, errors.New("epoch_changed_during_sample")
+	}
+
+	pid := trafficPID(backend)
+	epoch := strconv.Itoa(pid) + "/" + strconv.FormatInt(started, 10)
+	owners := trafficOwners(st)
+	out := monitor.LedgerSample{
+		ObservedAt:           time.Now().UTC(),
+		Epoch:                epoch,
+		Status:               status,
+		ConnectionsAvailable: connErr == nil,
+		PreStop:              preStop,
+	}
+	if connErr == nil {
+		for _, ev := range connections.Events {
+			if ev.Connection == nil {
+				continue
+			}
+			c := *ev.Connection
+			nodeID, userID := owners.Resolve(c)
+			id := c.ID
+			if !trafficConnectionIDRE.MatchString(id) {
+				id = coreapi.UnknownOwner
+			}
+			out.Connections = append(out.Connections, monitor.LedgerConnection{
+				ID:       id,
+				NodeID:   nodeID,
+				UserID:   userID,
+				Upload:   c.UplinkTotal,
+				Download: c.DownlinkTotal,
+				Closed:   c.ClosedAt > 0,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (a *app) sampleTrafficLedger(ctx context.Context, st node.State, preStop bool) (monitor.TrafficLedger, bool) {
+	if a == nil || a.offline || st.Observability == nil || !st.Observability.Enabled {
+		return monitor.TrafficLedger{}, false
+	}
+	sample, err := captureLedgerSample(ctx, st, a.store.Backend, preStop)
+	if err != nil {
+		reason, _ := trafficFailure(err)
+		if preStop {
+			reason = "pre_stop_" + reason
+		}
+		_ = a.monitorStore().RecordTrafficGap(time.Now().UTC(), reason)
+		return monitor.TrafficLedger{}, false
+	}
+	ledger, recErr := a.monitorStore().RecordTrafficSample(sample)
+	if recErr != nil && !errors.Is(recErr, coreapi.ErrCounterRegression) {
+		return monitor.TrafficLedger{}, false
+	}
+	return ledger, true
+}
+
+// flushTrafficBeforeStop is a bounded best-effort pre-stop hook. It never
+// blocks or fails core restarts, stops, or transaction recovery.
+func (a *app) flushTrafficBeforeStop(running node.State) {
+	if a == nil || a.offline || running.Observability == nil || !running.Observability.Enabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	_, _ = a.sampleTrafficLedger(ctx, running, true)
+}
+
+func (a *app) monitorLedger(args []string) error {
+	flags := fs("monitor ledger")
+	out := flags.String("out", "", "将流量账本与配额摘要写入尚不存在的私有文件")
+	if err := parse(flags, args); err != nil {
+		return err
+	}
+	if err := rejectTopologyFlags(flags, "out"); err != nil {
+		return err
+	}
+	var pinned *pinnedOutput
+	if *out != "" {
+		if err := a.probeOutput(*out); err != nil {
+			return err
+		}
+		var err error
+		pinned, err = pinNewOutput(*out)
+		if err != nil {
+			return err
+		}
+		defer pinned.root.Close()
+	}
+	var snapshot node.State
+	if err := a.store.InspectExisting(func() error {
+		if err := rejectMonitorPending(a.store.Root); err != nil {
+			return err
+		}
+		st, err := a.store.Load()
+		if err != nil {
+			return err
+		}
+		if err = st.Validate(); err != nil {
+			return err
+		}
+		snapshot = st.Clone()
+		return nil
+	}); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	initialized := true
+	ledger, err := a.monitorStore().LoadTrafficLedger()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "不存在") {
+			initialized = false
+			ledger = monitor.NewTrafficLedger(now)
+		} else {
+			return err
+		}
+	}
+	var lookup node.TrafficUsageLookup
+	if initialized {
+		lookup = func(nodeID, userID string, resetDay int, at time.Time) (int64, int64, bool) {
+			p, ok := ledger.UsageFor(nodeID, userID, resetDay, at)
+			return p.Upload, p.Download, ok
+		}
+	}
+	plan, err := node.PlanTrafficQuotas(snapshot, lookup, ledger.GapDetected, now)
+	if err != nil {
+		return err
+	}
+	report := struct {
+		Version     int                  `json:"version"`
+		Initialized bool                 `json:"initialized"`
+		Ledger      monitor.TrafficLedger `json:"ledger"`
+		Quotas      node.QuotaPlan       `json:"quotas"`
+	}{
+		Version:     1,
+		Initialized: initialized,
+		Ledger:      ledger,
+		Quotas:      plan,
+	}
 	raw, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err

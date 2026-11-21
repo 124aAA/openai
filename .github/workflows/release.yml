@@ -10,6 +10,38 @@ concurrency:
   group: qingnode-release
   cancel-in-progress: false
 jobs:
+  platform-containers:
+    name: Read-only platform facts (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['alpine:3.24.2', 'rockylinux/rockylinux:9.8@sha256:ed654c694190a670bb5c33f68995b862214fc96ffbdca95e07a8935ba0a3717d']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+      - name: Build static manager and check package/service contracts
+        run: |
+          go test -count=1 ./internal/platform
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/qingnode-platform" ./cmd/qingnode
+      - name: Container is not a real init acceptance host
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network none -v "$RUNNER_TEMP/qingnode-platform:/qingnode:ro" "$IMAGE" /bin/sh -ec '
+            /qingnode capabilities --skip-loopback --json >/tmp/capabilities.json
+            cat /tmp/capabilities.json
+            grep -q "\"controller_available\": false" /tmp/capabilities.json
+            test ! -e /var/lib/qingnode
+            /qingnode service unit --manager openrc >/tmp/qingnode.openrc
+            grep -q "command_user=\"qingnode:qingnode\"" /tmp/qingnode.openrc
+          '
   verify:
     name: Verify release gates
     runs-on: ubuntu-24.04
@@ -45,6 +77,12 @@ jobs:
         run: python3 scripts/test-release.py
       - name: Maintenance stream observer regression
         run: python3 scripts/test-maintenance-harness.py
+      - name: Disposable platform acceptance fixture contracts
+        run: |
+          python3 scripts/test-platform-aux_test.py
+          python3 scripts/test-platform-firewall_test.py
+          python3 scripts/test-platform-flow_test.py
+          python3 scripts/test-platform-tls_test.py
       - name: Fetch pinned official test tools
         run: python3 scripts/fetch-test-core.py --integration
       - name: Official parser and transport tests
@@ -64,6 +102,8 @@ jobs:
             --legacy-bin "$QINGNODE_LEGACY_V028_BIN" --legacy-sha256 "$QINGNODE_LEGACY_V028_SHA256" \
             --out "$RUNNER_TEMP/qingnode-cross-batch"
           sudo env "GO=$(command -v go)" "QINGNODE_LEGACY_BIN=$QINGNODE_LEGACY_BIN" sh -c '"$GO" test ./cmd/qingnode -run "^TestLegacyInstallPreflightActualBinary$" -count=1 -v -timeout=3m'
+      - name: Controlled TCP and UDP NAT endpoint transport
+        run: sudo env "GO=$(command -v go)" "SING_BOX_BIN=$SING_BOX_BIN" QINGNODE_NAT_DISPOSABLE=1 sh -c '"$GO" test ./internal/node -run "^TestOfficialCoreControlledNATEndpoints$" -v -count=1 -timeout=2m'
       - name: Controlled topology and WireGuard namespace transport
         # Explicit disposable opt-in; no production route or system WG interface.
         run: sudo env "GO=$(command -v go)" "SING_BOX_BIN=$SING_BOX_BIN" QINGNODE_TOPOLOGY_DISPOSABLE=1 sh -c '"$GO" test ./internal/node -run "^TestOfficialCoreTopologyWireGuardNamespaceExit$" -v -count=1 -timeout=3m'
@@ -83,6 +123,26 @@ jobs:
           tar -xzf "dist/qingnode-${RELEASE_VERSION#v}-linux-amd64.tar.gz" -C "$bundle"
           test "$("$bundle/qingnode" version)" = "QingNode ${RELEASE_VERSION#v} (${GITHUB_SHA:0:12})"
           sudo bash scripts/acceptance-vps.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
+      - name: Extended platform lifecycle on real systemd
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/qingnode-acceptance"
+          sudo env QINGNODE_PLATFORM_EVIDENCE_DIR="$RUNNER_TEMP/qingnode-platform-evidence" bash scripts/acceptance-platform.sh --disposable "$bundle" --core-archive "$SING_BOX_ARCHIVE" 2>&1 | "$bundle/qingnode" redact-log
+      - name: Collect bounded platform evidence
+        if: always()
+        shell: bash
+        run: |
+          if sudo test -d "$RUNNER_TEMP/qingnode-platform-evidence"; then
+            sudo tar -czf - -C "$RUNNER_TEMP/qingnode-platform-evidence" . > "$RUNNER_TEMP/qingnode-platform-evidence.tar.gz"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: systemd-platform-evidence
+          path: ${{ runner.temp }}/qingnode-platform-evidence.tar.gz
+          if-no-files-found: ignore
       - name: Build portable network test tool
         env:
           RELEASE_VERSION: ${{ steps.target.outputs.version }}
@@ -131,11 +191,11 @@ jobs:
           retention-days: 14
   publish:
     name: Publish exact verified artifacts
-    needs: verify
+    needs: [platform-containers, verify]
     # A new release branch can change workflows before main does. GitHub's
     # built-in token cannot publish that workflows difference. Validate the
     # candidate first, fast-forward main to its SHA, then publish from main.
-    if: ${{ needs.verify.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+    if: ${{ needs.platform-containers.result == 'success' && needs.verify.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

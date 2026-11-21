@@ -11,15 +11,30 @@ type Egress struct {
 	Port        int                `json:"port,omitempty"`
 	Detour      string             `json:"detour,omitempty"`
 	UDP         bool               `json:"udp"`
+	Transport   *TransportOptions  `json:"transport,omitempty"`
+	Multiplex   *MultiplexOptions  `json:"multiplex,omitempty"`
 	Socks       *RemoteSOCKS       `json:"socks,omitempty"`
+	HTTP        *RemoteHTTP        `json:"http,omitempty"`
 	Reality     *RemoteReality     `json:"reality,omitempty"`
 	Shadowsocks *RemoteSS          `json:"shadowsocks,omitempty"`
 	HY2         *RemoteHY2         `json:"hysteria2,omitempty"`
+	Trojan      *RemoteTrojan      `json:"trojan,omitempty"`
+	VLESS       *RemoteVLESS       `json:"vless,omitempty"`
+	VMess       *RemoteVMess       `json:"vmess,omitempty"`
+	AnyTLS      *RemoteAnyTLS      `json:"anytls,omitempty"`
+	TUIC        *RemoteTUIC        `json:"tuic,omitempty"`
 	WireGuard   *WireGuardEndpoint `json:"wireguard,omitempty"`
 }
 type RemoteSOCKS struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+type RemoteHTTP struct {
+	Username       string `json:"username,omitempty"`
+	Password       string `json:"password,omitempty"`
+	TLS            bool   `json:"tls,omitempty"`
+	ServerName     string `json:"server_name,omitempty"`
+	CertificatePEM string `json:"certificate_pem,omitempty"`
 }
 type RemoteReality struct {
 	UUID        string `json:"uuid"`
@@ -37,6 +52,41 @@ type RemoteHY2 struct {
 	ServerName     string          `json:"server_name"`
 	CertificatePEM string          `json:"certificate_pem,omitempty"`
 	Performance    *HY2Performance `json:"performance,omitempty"`
+}
+type RemoteTrojan struct {
+	Password       string `json:"password"`
+	ServerName     string `json:"server_name"`
+	CertificatePEM string `json:"certificate_pem,omitempty"`
+}
+type RemoteVLESS struct {
+	UUID           string `json:"uuid"`
+	ServerName     string `json:"server_name"`
+	CertificatePEM string `json:"certificate_pem,omitempty"`
+	PacketEncoding string `json:"packet_encoding,omitempty"`
+}
+type RemoteVMess struct {
+	UUID           string `json:"uuid"`
+	Security       string `json:"security,omitempty"`
+	ServerName     string `json:"server_name"`
+	CertificatePEM string `json:"certificate_pem,omitempty"`
+	PacketEncoding string `json:"packet_encoding,omitempty"`
+}
+type RemoteAnyTLS struct {
+	Password                 string `json:"password"`
+	ServerName               string `json:"server_name"`
+	CertificatePEM           string `json:"certificate_pem,omitempty"`
+	IdleSessionCheckInterval string `json:"idle_session_check_interval,omitempty"`
+	IdleSessionTimeout       string `json:"idle_session_timeout,omitempty"`
+	MinIdleSession           *int   `json:"min_idle_session,omitempty"`
+}
+type RemoteTUIC struct {
+	UUID              string `json:"uuid"`
+	Password          string `json:"password"`
+	ServerName        string `json:"server_name"`
+	CertificatePEM    string `json:"certificate_pem,omitempty"`
+	CongestionControl string `json:"congestion_control,omitempty"`
+	UDPRelayMode      string `json:"udp_relay_mode,omitempty"`
+	Heartbeat         string `json:"heartbeat,omitempty"`
 }
 
 // WireGuardEndpoint is always userland (system:false). It never creates a host

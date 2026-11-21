@@ -92,6 +92,10 @@ func (s *Store) RestoreMigrationAssets(m MigrationPackage, targets MigrationTarg
 			cleanup()
 			return errors.New("ACME仅能恢复到当前State受管目录")
 		}
+		if r.ID == "monitor" && target != filepath.Join(s.Root, "monitor") && target != filepath.Join(s.Root, "monitor-staged") {
+			cleanup()
+			return errors.New("监控资产仅能暂存到monitor-staged或显式恢复到当前State受管monitor目录")
+		}
 		if r.ID == "subscription" && (strings.HasPrefix(target, s.Root+string(os.PathSeparator)) || strings.HasPrefix(s.Root, target+string(os.PathSeparator)) || target == s.Root) {
 			cleanup()
 			return errors.New("订阅发布目录必须独立于State目录")
@@ -111,6 +115,13 @@ func (s *Store) RestoreMigrationAssets(m MigrationPackage, targets MigrationTarg
 				if err != nil || string(b) != "QingNode subscription publication v1\n" {
 					cleanup()
 					return errors.New("目标订阅目录没有QingNode所有权标记")
+				}
+			}
+			if r.ID == "monitor" {
+				b, err := os.ReadFile(filepath.Join(target, ".qingnode-monitor"))
+				if err != nil || string(b) != "qingnode-monitor-v1\n" {
+					cleanup()
+					return errors.New("目标监控目录没有QingNode所有权标记")
 				}
 			}
 			x.HadPrevious = true
@@ -163,15 +174,20 @@ func (s *Store) RestoreMigrationAssets(m MigrationPackage, targets MigrationTarg
 			}
 			// Apply trusted target group, not archived uid/gid values.
 			gid := mapping.GroupID
+			dirMode := os.FileMode(0750)
 			if r.ID == "acme" {
 				gid = s.GID
+			}
+			if r.ID == "monitor" {
+				gid = -1
+				dirMode = 0700
 			}
 			if e = filepath.WalkDir(x.Staged, func(p string, d os.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
 				if d.IsDir() {
-					if err = os.Chmod(p, 0750); err != nil {
+					if err = os.Chmod(p, dirMode); err != nil {
 						return err
 					}
 				}
@@ -421,9 +437,7 @@ func (s *Store) RecoverMigrationAssets() error {
 		return e
 	}
 	var j migrationRestoreJournal
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if e = d.Decode(&j); e != nil || j.Version != 1 || !id32(j.ID) || len(j.Switches) > 3 {
+	if e = unmarshalStrictStruct(b, &j); e != nil || j.Version != 1 || !id32(j.ID) || len(j.Switches) > 4 {
 		return errors.New("迁移恢复记录无效")
 	}
 	if j.PreviousGeneration != "" && !generationRE.MatchString(j.PreviousGeneration) {
@@ -441,7 +455,10 @@ func (s *Store) RecoverMigrationAssets() error {
 		if !filepath.IsAbs(x.Target) || x.Staged != x.Target+".qingnode-stage-"+j.ID || x.Previous != x.Target+".qingnode-previous-"+j.ID {
 			return errors.New("迁移恢复路径无效")
 		}
-		if x.ID == "acme" && x.Target != filepath.Join(s.Root, "acme") || x.ID == "publisher" && x.Target != filepath.Join(s.Root, "subscription-publisher.json") || x.ID != "acme" && x.ID != "publisher" && x.ID != "subscription" {
+		if x.ID == "acme" && x.Target != filepath.Join(s.Root, "acme") ||
+			x.ID == "publisher" && x.Target != filepath.Join(s.Root, "subscription-publisher.json") ||
+			x.ID == "monitor" && x.Target != filepath.Join(s.Root, "monitor") && x.Target != filepath.Join(s.Root, "monitor-staged") ||
+			x.ID != "acme" && x.ID != "publisher" && x.ID != "subscription" && x.ID != "monitor" {
 			return errors.New("迁移恢复目录不属于本项目")
 		}
 		if e = validateMigrationSwitch(s.Root, x); e != nil {
@@ -540,10 +557,19 @@ func validateMigrationSwitch(root string, x migrationSwitch) error {
 			if !i.IsDir() || i.Mode().Perm() != 0750 && i.Mode().Perm() != 0700 {
 				return errors.New("迁移资产目录权限无效")
 			}
+			if x.ID == "monitor" && i.Mode().Perm() != 0700 {
+				return errors.New("迁移监控目录权限必须为0700")
+			}
 			if x.ID == "subscription" {
 				b, e := os.ReadFile(filepath.Join(p, ".qingnode-subscription-owner"))
 				if e != nil || string(b) != "QingNode subscription publication v1\n" {
 					return errors.New("迁移订阅恢复路径缺少自有标记")
+				}
+			}
+			if x.ID == "monitor" {
+				b, e := os.ReadFile(filepath.Join(p, ".qingnode-monitor"))
+				if e != nil || string(b) != "qingnode-monitor-v1\n" {
+					return errors.New("迁移监控恢复路径缺少自有标记")
 				}
 			}
 		}

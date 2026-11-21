@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -24,10 +25,153 @@ type HandlerOptions struct {
 	MaxConcurrent int
 }
 
-// NewHandler reads a complete publication for every request. There is no token
-// cache: after an atomic revocation, every new request consults the new registry.
-// Already-authenticated in-flight responses cannot be recalled from a client.
+func validFlagParam(s string) bool {
+	if len(s) < 1 || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func parseUnifiedQuery(rawQuery string) (explicitFormat string, flagHint string, ok bool) {
+	if rawQuery == "" {
+		return "", "", true
+	}
+	parts := strings.Split(rawQuery, "&")
+	if len(parts) > 2 {
+		return "", "", false
+	}
+	seenFormat, seenFlag := false, false
+	for _, part := range parts {
+		k, v, found := strings.Cut(part, "=")
+		if !found || k == "" || v == "" {
+			return "", "", false
+		}
+		switch k {
+		case "format":
+			if seenFormat {
+				return "", "", false
+			}
+			if _, valid := ContentType(v); !valid {
+				return "", "", false
+			}
+			seenFormat = true
+			explicitFormat = v
+		case "flag":
+			if seenFlag || !validFlagParam(v) {
+				return "", "", false
+			}
+			seenFlag = true
+			flagHint = v
+		default:
+			return "", "", false
+		}
+	}
+	return explicitFormat, flagHint, true
+}
+
+func NegotiateFormat(ua, flagHint, defaultFormat string, outputs map[string]Payload) (string, bool) {
+	if len(outputs) == 0 {
+		return "", false
+	}
+	if flagHint != "" {
+		var hinted string
+		switch strings.ToLower(flagHint) {
+		case "sing-box", "sfa", "sfi", "sfm":
+			hinted = "sing-box"
+		case "mihomo", "clash", "clash.meta", "meta", "flclash", "stash":
+			hinted = "mihomo"
+		case "base64", "v2ray", "v2rayn", "v2rayng", "shadowrocket", "nekobox", "streisand":
+			hinted = "base64"
+		case "uri":
+			hinted = "uri"
+		case "provider":
+			hinted = "provider"
+		}
+		if hinted != "" {
+			if _, ok := outputs[hinted]; ok {
+				return hinted, true
+			}
+		}
+	}
+
+	lowerUA := strings.ToLower(ua)
+	switch {
+	case strings.Contains(lowerUA, "sing-box") ||
+		strings.Contains(lowerUA, "sfa/") || strings.HasPrefix(lowerUA, "sfa") ||
+		strings.Contains(lowerUA, "sfi/") || strings.HasPrefix(lowerUA, "sfi") ||
+		strings.Contains(lowerUA, "sfm/") || strings.HasPrefix(lowerUA, "sfm"):
+		if _, ok := outputs["sing-box"]; ok {
+			return "sing-box", true
+		}
+	case strings.Contains(lowerUA, "mihomo") ||
+		strings.Contains(lowerUA, "clash.meta") ||
+		strings.Contains(lowerUA, "flclash") ||
+		strings.Contains(lowerUA, "clash verge") ||
+		strings.Contains(lowerUA, "clashverge") ||
+		strings.Contains(lowerUA, "clash-verge") ||
+		strings.Contains(lowerUA, "stash"):
+		if _, ok := outputs["mihomo"]; ok {
+			return "mihomo", true
+		}
+	case strings.Contains(lowerUA, "v2rayn") ||
+		strings.Contains(lowerUA, "v2rayng") ||
+		strings.Contains(lowerUA, "shadowrocket") ||
+		strings.Contains(lowerUA, "nekobox") ||
+		strings.Contains(lowerUA, "streisand"):
+		if _, ok := outputs["base64"]; ok {
+			return "base64", true
+		}
+		if _, ok := outputs["uri"]; ok {
+			return "uri", true
+		}
+	}
+
+	fallbacks := []string{}
+	if defaultFormat != "" {
+		fallbacks = append(fallbacks, defaultFormat)
+	}
+	fallbacks = append(fallbacks, "base64", "uri", "sing-box", "mihomo", "provider")
+	for _, candidate := range fallbacks {
+		if _, ok := outputs[candidate]; ok {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func formatExtension(format string) string {
+	switch format {
+	case "sing-box":
+		return "json"
+	case "mihomo", "provider":
+		return "yaml"
+	default:
+		return "txt"
+	}
+}
+
+// NewHandler reads a publication per request and delegates to NewIndexedHandler.
 func NewHandler(read Reader, opts HandlerOptions) (http.Handler, error) {
+	if read == nil {
+		return nil, errors.New("publication reader is required")
+	}
+	return NewIndexedHandler(func() (IndexedSnapshot, error) {
+		s, err := read()
+		if err != nil {
+			return IndexedSnapshot{}, err
+		}
+		return BuildIndex(s)
+	}, opts)
+}
+
+func NewIndexedHandler(read IndexedReader, opts HandlerOptions) (http.Handler, error) {
 	if read == nil {
 		return nil, errors.New("publication reader is required")
 	}
@@ -44,7 +188,7 @@ func NewHandler(read Reader, opts HandlerOptions) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Vary", "Authorization")
+		w.Header().Set("Vary", "Authorization, User-Agent")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -52,7 +196,7 @@ func NewHandler(read Reader, opts HandlerOptions) (http.Handler, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.ContentLength > 0 || r.Body != nil && r.Body != http.NoBody || len(r.URL.RequestURI()) > 256 || r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.RawPath != "" {
+		if r.ContentLength > 0 || r.Body != nil && r.Body != http.NoBody || len(r.URL.RequestURI()) > 256 || r.URL.ForceQuery || r.URL.RawPath != "" {
 			http.NotFound(w, r)
 			return
 		}
@@ -63,67 +207,136 @@ func NewHandler(read Reader, opts HandlerOptions) (http.Handler, error) {
 			http.Error(w, "subscription busy", http.StatusServiceUnavailable)
 			return
 		}
+
 		parts := strings.Split(r.URL.Path, "/")
-		var raw, format string
-		switch {
-		case len(parts) == 4 && parts[0] == "" && parts[1] == "s":
-			raw, format = parts[2], parts[3]
-			if r.Header.Get("Authorization") != "" {
+		authValues := r.Header.Values("Authorization")
+		var raw, explicitFormat, flagHint string
+		unified := false
+
+		if len(authValues) > 0 {
+			if len(authValues) != 1 || !strings.HasPrefix(authValues[0], "Bearer ") {
 				http.NotFound(w, r)
 				return
 			}
-		case len(parts) == 3 && parts[0] == "" && parts[1] == "s":
-			format = parts[2]
-			auth := r.Header.Values("Authorization")
-			if len(auth) != 1 || !strings.HasPrefix(auth[0], "Bearer ") {
+			raw = strings.TrimPrefix(authValues[0], "Bearer ")
+			switch {
+			case len(parts) == 3 && parts[0] == "" && parts[1] == "s":
+				if r.URL.RawQuery != "" {
+					http.NotFound(w, r)
+					return
+				}
+				explicitFormat = parts[2]
+			case len(parts) == 2 && parts[0] == "" && parts[1] == "s":
+				var ok bool
+				explicitFormat, flagHint, ok = parseUnifiedQuery(r.URL.RawQuery)
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				unified = true
+			default:
 				http.NotFound(w, r)
 				return
 			}
-			raw = strings.TrimPrefix(auth[0], "Bearer ")
-		default:
-			http.NotFound(w, r)
-			return
+		} else {
+			switch {
+			case len(parts) == 4 && parts[0] == "" && parts[1] == "s":
+				if r.URL.RawQuery != "" {
+					http.NotFound(w, r)
+					return
+				}
+				raw, explicitFormat = parts[2], parts[3]
+			case len(parts) == 3 && parts[0] == "" && parts[1] == "s":
+				raw = parts[2]
+				var ok bool
+				explicitFormat, flagHint, ok = parseUnifiedQuery(r.URL.RawQuery)
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				unified = true
+			default:
+				http.NotFound(w, r)
+				return
+			}
 		}
-		if _, ok := ContentType(format); !ok {
-			http.NotFound(w, r)
-			return
+
+		if explicitFormat != "" {
+			if _, ok := ContentType(explicitFormat); !ok {
+				http.NotFound(w, r)
+				return
+			}
 		}
 		// Reject malformed secrets before allocating/decoding a publication.
-		// All syntactically valid random tokens still use the same hash lookup.
 		if !exactHex(raw, 64) {
 			http.NotFound(w, r)
 			return
 		}
-		s, err := read()
+		indexed, err := read()
 		if err != nil {
-			http.Error(w, "subscription unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if err = Validate(s); err != nil {
 			http.Error(w, "subscription unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		sum := sha256.Sum256([]byte(raw))
 		now := opts.Clock()
 		var selected *Record
-		validToken := exactHex(raw, 64)
-		for i := range s.Records {
-			rec := &s.Records[i]
-			expected, _ := hex.DecodeString(rec.TokenSHA256)
-			match := subtle.ConstantTimeCompare(sum[:], expected) == 1
-			if match && validToken && !rec.Revoked && !now.Before(rec.IssuedAt) && now.Before(rec.ExpiresAt) {
+		if idx, ok := indexed.tokenIndex[sum]; ok && idx >= 0 && idx < len(indexed.Snapshot.Records) {
+			rec := &indexed.Snapshot.Records[idx]
+			var expected [32]byte
+			_, _ = hex.Decode(expected[:], []byte(rec.TokenSHA256))
+			if subtle.ConstantTimeCompare(sum[:], expected[:]) == 1 && !rec.Revoked && !now.Before(rec.IssuedAt) && now.Before(rec.ExpiresAt) {
 				selected = rec
 			}
+		} else {
+			var zero [32]byte
+			_ = subtle.ConstantTimeCompare(sum[:], zero[:])
 		}
 		if selected == nil {
 			http.NotFound(w, r)
 			return
 		}
-		p, ok := selected.Outputs[format]
+
+		chosenFormat := explicitFormat
+		if chosenFormat == "" && unified {
+			var ok bool
+			chosenFormat, ok = NegotiateFormat(r.Header.Get("User-Agent"), flagHint, selected.DefaultFormat, selected.Outputs)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		p, ok := selected.Outputs[chosenFormat]
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
+
+		title := selected.DeviceName
+		if title == "" {
+			title = selected.DeviceID
+		}
+		expireUnix := selected.ExpiresAt.Unix()
+		if selected.EffectiveExpireUnix > 0 && selected.EffectiveExpireUnix < expireUnix {
+			expireUnix = selected.EffectiveExpireUnix
+		}
+
+		userinfo := "expire=" + strconv.FormatInt(expireUnix, 10)
+		if selected.UploadBytes != nil && selected.DownloadBytes != nil {
+			parts := []string{
+				"upload=" + strconv.FormatInt(*selected.UploadBytes, 10),
+				"download=" + strconv.FormatInt(*selected.DownloadBytes, 10),
+			}
+			if selected.TotalBytes != nil && *selected.TotalBytes > 0 {
+				parts = append(parts, "total="+strconv.FormatInt(*selected.TotalBytes, 10))
+			}
+			parts = append(parts, userinfo)
+			userinfo = strings.Join(parts, "; ")
+		}
+
+		w.Header().Set("Profile-Update-Interval", "24")
+		w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte(title)))
+		w.Header().Set("Content-Disposition", `attachment; filename="qingnode-`+selected.DeviceID+`.`+formatExtension(chosenFormat)+`"`)
+		w.Header().Set("Subscription-Userinfo", userinfo)
 		w.Header().Set("Content-Type", p.ContentType)
 		w.Header().Set("Content-Length", strconv.Itoa(len(p.Content)))
 		w.WriteHeader(http.StatusOK)
@@ -185,10 +398,11 @@ func Serve(ctx context.Context, listener net.Listener, opts ServeOptions) error 
 			return errors.New("plain HTTP requires an explicit HTTPS reverse proxy and a loopback listener")
 		}
 	}
-	if _, err = Read(opts.Directory); err != nil {
+	cache := NewSnapshotCache(opts.Directory)
+	if _, err = cache.Read(); err != nil {
 		return errors.New("subscription publication is unavailable")
 	}
-	h, err := NewHandler(func() (Snapshot, error) { return Read(opts.Directory) }, HandlerOptions{MaxConcurrent: opts.MaxConcurrent})
+	h, err := NewIndexedHandler(cache.Read, HandlerOptions{MaxConcurrent: opts.MaxConcurrent})
 	if err != nil {
 		return err
 	}

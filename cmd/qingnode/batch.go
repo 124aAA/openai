@@ -34,6 +34,7 @@ type nodeEdit struct {
 	ConnectPort         *int                       `json:"connect_port,omitempty"`
 	AdditionalEndpoints *[]node.ConnectionEndpoint `json:"additional_endpoints,omitempty"`
 	Fingerprint         *string                    `json:"fingerprint,omitempty"`
+	ShortIDs            *[]string                  `json:"short_ids,omitempty"`
 	SNI                 *string                    `json:"sni,omitempty"`
 	Target              *string                    `json:"target,omitempty"`
 	Cert                *string                    `json:"cert,omitempty"`
@@ -47,13 +48,21 @@ type nodeEdit struct {
 	Path                *string                    `json:"path,omitempty"`
 	TransportHost       *string                    `json:"transport_host,omitempty"`
 	ServiceName         *string                    `json:"service_name,omitempty"`
+	WSMaxEarlyData      *int                       `json:"ws_max_early_data,omitempty"`
+	WSEarlyDataHeader   *string                    `json:"ws_early_data_header,omitempty"`
+	MultiplexProtocol   *string                    `json:"multiplex_protocol,omitempty"`
+	MuxMaxConnections   *int                       `json:"mux_max_connections,omitempty"`
+	MuxMinStreams       *int                       `json:"mux_min_streams,omitempty"`
+	MuxPadding          *bool                      `json:"mux_padding,omitempty"`
 }
 
 func (e nodeEdit) empty() bool {
 	return e.Name == nil && e.Server == nil && e.Listen == nil && e.Port == nil && e.ConnectPort == nil && e.AdditionalEndpoints == nil &&
-		e.Fingerprint == nil && e.SNI == nil && e.Target == nil && e.Cert == nil &&
+		e.Fingerprint == nil && e.ShortIDs == nil && e.SNI == nil && e.Target == nil && e.Cert == nil &&
 		e.Key == nil && e.ACMEEmail == nil && e.Enabled == nil && e.EgressID == nil && e.Tags == nil && e.Method == nil &&
-		e.Transport == nil && e.Path == nil && e.TransportHost == nil && e.ServiceName == nil
+		e.Transport == nil && e.Path == nil && e.TransportHost == nil && e.ServiceName == nil &&
+		e.WSMaxEarlyData == nil && e.WSEarlyDataHeader == nil &&
+		e.MultiplexProtocol == nil && e.MuxMaxConnections == nil && e.MuxMinStreams == nil && e.MuxPadding == nil
 }
 
 func editString(s string) *string {
@@ -98,7 +107,7 @@ func decodeEditBatch(data []byte) (editBatch, error) {
 		if e.ID == "" || e.empty() {
 			return batch, fmt.Errorf("第 %d 项需要 id 和至少一个修改字段", i+1)
 		}
-		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method, e.Transport, e.Path, e.TransportHost, e.ServiceName} {
+		for _, v := range []*string{e.Name, e.Server, e.Listen, e.Fingerprint, e.SNI, e.Target, e.Cert, e.Key, e.ACMEEmail, e.EgressID, e.Method, e.Transport, e.Path, e.TransportHost, e.ServiceName, e.WSEarlyDataHeader, e.MultiplexProtocol} {
 			if v != nil && *v == "" {
 				return batch, fmt.Errorf("第 %d 项不能用空字符串修改字段；保留旧值请省略字段", i+1)
 			}
@@ -245,8 +254,8 @@ func (e nodeEdit) apply(n *node.Node) error {
 	if e.EgressID != nil {
 		n.EgressID = directEgress(*e.EgressID)
 	}
-	if n.Protocol != "reality" && e.Fingerprint != nil {
-		return errors.New("fingerprint 仅用于 REALITY")
+	if n.Protocol != "reality" && (e.Fingerprint != nil || e.ShortIDs != nil) {
+		return errors.New("fingerprint 与 short_ids 仅用于 REALITY")
 	}
 	if e.Method != nil {
 		if n.Protocol != "ss-aead" {
@@ -258,9 +267,9 @@ func (e nodeEdit) apply(n *node.Node) error {
 		}
 		n.Shadowsocks = settings
 	}
-	if e.Transport != nil || e.Path != nil || e.TransportHost != nil || e.ServiceName != nil {
-		if !node.ProtocolSupportsTransport(n.Protocol) {
-			return fmt.Errorf("%s 不支持应用层传输（ws / grpc / httpupgrade）", n.Protocol)
+	if e.Transport != nil || e.Path != nil || e.TransportHost != nil || e.ServiceName != nil || e.WSMaxEarlyData != nil || e.WSEarlyDataHeader != nil {
+		if !node.ProtocolSupportsTransport(n.Protocol) && n.Protocol != "reality" {
+			return fmt.Errorf("%s 不支持应用层传输（ws / grpc / httpupgrade / http）", n.Protocol)
 		}
 		var tr node.TransportOptions
 		if n.Transport != nil {
@@ -270,8 +279,13 @@ func (e nodeEdit) apply(n *node.Node) error {
 		}
 		if e.Transport != nil {
 			nextType := strings.ToLower(strings.TrimSpace(*e.Transport))
-			if nextType == "none" {
+			switch nextType {
+			case "none":
 				nextType = "tcp"
+			case "websocket":
+				nextType = "ws"
+			case "h2":
+				nextType = "http"
 			}
 			if nextType != tr.Type {
 				tr.Type = nextType
@@ -280,11 +294,19 @@ func (e nodeEdit) apply(n *node.Node) error {
 					tr.Path = ""
 					tr.Host = ""
 					tr.ServiceName = ""
-				case "ws", "httpupgrade":
+					tr.MaxEarlyData = 0
+					tr.EarlyDataHeaderName = ""
+				case "ws":
 					tr.ServiceName = ""
+				case "httpupgrade", "http":
+					tr.ServiceName = ""
+					tr.MaxEarlyData = 0
+					tr.EarlyDataHeaderName = ""
 				case "grpc":
 					tr.Path = ""
 					tr.Host = ""
+					tr.MaxEarlyData = 0
+					tr.EarlyDataHeaderName = ""
 				}
 			}
 		}
@@ -301,7 +323,78 @@ func (e nodeEdit) apply(n *node.Node) error {
 		if err != nil {
 			return err
 		}
+		if normTr != nil && normTr.Type == "ws" {
+			normTr.MaxEarlyData = tr.MaxEarlyData
+			normTr.EarlyDataHeaderName = tr.EarlyDataHeaderName
+		}
+		if e.WSMaxEarlyData != nil || e.WSEarlyDataHeader != nil {
+			if normTr == nil || normTr.Type != "ws" {
+				return errors.New("WebSocket Early Data 参数仅适用于 ws 传输层")
+			}
+			if e.WSMaxEarlyData != nil {
+				normTr.MaxEarlyData = *e.WSMaxEarlyData
+				if normTr.MaxEarlyData == 0 && e.WSEarlyDataHeader == nil {
+					normTr.EarlyDataHeaderName = ""
+				}
+			}
+			if e.WSEarlyDataHeader != nil {
+				hdr := strings.TrimSpace(*e.WSEarlyDataHeader)
+				if hdr == "clear" || hdr == "default" {
+					normTr.EarlyDataHeaderName = ""
+				} else {
+					normTr.EarlyDataHeaderName = hdr
+				}
+			}
+		}
 		n.Transport = normTr
+	}
+	if e.MultiplexProtocol != nil || e.MuxMaxConnections != nil || e.MuxMinStreams != nil || e.MuxPadding != nil {
+		if !node.ProtocolSupportsMultiplex(n.Protocol) {
+			return fmt.Errorf("%s 不支持 sing-mux 多路复用", n.Protocol)
+		}
+		var mux node.MultiplexOptions
+		if n.Multiplex != nil {
+			mux = *n.Multiplex
+		}
+		turningOff := false
+		if e.MultiplexProtocol != nil {
+			mp := strings.ToLower(strings.TrimSpace(*e.MultiplexProtocol))
+			switch mp {
+			case "off", "none", "false":
+				turningOff = true
+			case "on", "true":
+				mux.Enabled = true
+				if mux.Protocol == "" {
+					mux.Protocol = "h2mux"
+				}
+			default:
+				mux.Enabled = true
+				mux.Protocol = mp
+			}
+		}
+		if turningOff {
+			if e.MuxMaxConnections != nil || e.MuxMinStreams != nil || (e.MuxPadding != nil && *e.MuxPadding) {
+				return errors.New("关闭多路复用时不能同时指定连接数、流数或 padding")
+			}
+			n.Multiplex = nil
+		} else {
+			if !mux.Enabled {
+				mux.Enabled = true
+				if mux.Protocol == "" {
+					mux.Protocol = "h2mux"
+				}
+			}
+			if e.MuxMaxConnections != nil {
+				mux.MaxConnections = *e.MuxMaxConnections
+			}
+			if e.MuxMinStreams != nil {
+				mux.MinStreams = *e.MuxMinStreams
+			}
+			if e.MuxPadding != nil {
+				mux.Padding = *e.MuxPadding
+			}
+			n.Multiplex = &mux
+		}
 	}
 	switch n.Protocol {
 	case "reality":
@@ -320,6 +413,13 @@ func (e nodeEdit) apply(n *node.Node) error {
 		}
 		if e.Fingerprint != nil {
 			n.Reality.Fingerprint = *e.Fingerprint
+		}
+		if e.ShortIDs != nil {
+			if len(*e.ShortIDs) == 0 {
+				n.Reality.ShortIDs = nil
+			} else {
+				n.Reality.ShortIDs = append([]string(nil), (*e.ShortIDs)...)
+			}
 		}
 		if e.SNI != nil || e.Target != nil {
 			return node.RealityTargetPolicy(n.Reality)
@@ -458,7 +558,7 @@ func (a *app) batch(args []string) error {
 		fmt.Fprintln(f.Output(), "用法：qingnode batch --file edits.json [--preview]")
 		f.PrintDefaults()
 		fmt.Fprintln(f.Output(), `JSON 示例：{"version":1,"edits":[{"id":"节点ID或旧名称","name":"新名称"}]}`)
-		fmt.Fprintln(f.Output(), "修改字段：name / server / listen / port（本地）/ connect_port（客户端）/ additional_endpoints / fingerprint / sni / target / cert / key / acme_email / enabled / egress_id / transport / path / transport_host / service_name。")
+		fmt.Fprintln(f.Output(), "修改字段：name / server / listen / port（本地）/ connect_port（客户端）/ additional_endpoints / fingerprint / short_ids / sni / target / cert / key / acme_email / enabled / egress_id / transport / path / transport_host / service_name / ws_max_early_data / ws_early_data_header / multiplex_protocol / mux_max_connections / mux_min_streams / mux_padding。")
 		fmt.Fprintln(f.Output(), "每项需要 id 和至少一个修改字段；省略字段保留旧值，cert/key 为本地 PEM 文件路径。")
 		fmt.Fprintln(f.Output(), "所有目标按修改前的状态定位；无效项、未知字段、重复节点、null 和空字符串整批拒绝。")
 		fmt.Fprintln(f.Output(), "批量编辑保留现有身份与凭据；随机端口和凭据轮换请用已有专用命令。")

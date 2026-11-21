@@ -117,7 +117,30 @@ func MigrationMissingAssets(m MigrationPackage) ([]string, error) {
 			}
 		}
 	}
+	if _, mon := roots["monitor"]; mon {
+		marker, mok := files["monitor/.qingnode-monitor"]
+		if !mok || marker.Mode != 0600 || string(marker.Data) != "qingnode-monitor-v1\n" {
+			return nil, errors.New("迁移包缺少监控私有所有权标记或权限不符")
+		}
+		for _, f := range m.Files {
+			if f.RootID != "monitor" {
+				continue
+			}
+			if f.Directory || f.Mode != 0600 || !validMigrationMonitorFile(f.Path) {
+				return nil, errors.New("监控迁移含未知或非私有条目")
+			}
+		}
+	}
 	return missing, nil
+}
+
+func validMigrationMonitorFile(name string) bool {
+	switch name {
+	case ".qingnode-monitor", "config.json", "status.json", "history.json", "traffic-ledger.json", "alerts.json":
+		return true
+	default:
+		return false
+	}
 }
 
 type migrationPublisher struct {
@@ -144,7 +167,7 @@ func decodeMigrationPublisher(b []byte) (migrationPublisher, error) {
 	var formats []string
 	var sing, mihomo string
 	var allow bool
-	if json.Unmarshal(raw["formats"], &formats) != nil || json.Unmarshal(raw["sing_box_version"], &sing) != nil || json.Unmarshal(raw["mihomo_version"], &mihomo) != nil || json.Unmarshal(raw["allow_lossy"], &allow) != nil || len(formats) < 1 || len(formats) > 5 || sing != "1.14.0" && sing != "1.14.3" || mihomo != "1.19.30" {
+	if json.Unmarshal(raw["formats"], &formats) != nil || json.Unmarshal(raw["sing_box_version"], &sing) != nil || json.Unmarshal(raw["mihomo_version"], &mihomo) != nil || json.Unmarshal(raw["allow_lossy"], &allow) != nil || len(formats) < 1 || len(formats) > 5 || !SupportedVersion(sing) || !SupportedMihomoVersion(mihomo) {
 		return c, errors.New("迁移发布配置客户端能力无效")
 	}
 	seen := map[string]bool{}

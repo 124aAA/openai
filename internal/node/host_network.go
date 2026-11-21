@@ -357,53 +357,7 @@ func (h NetworkHost) locked(fn func() error) error {
 	return fn()
 }
 func networkDecode(b []byte, out any) error {
-	d := json.NewDecoder(bytes.NewReader(b))
-	var walk func() error
-	walk = func() error {
-		t, e := d.Token()
-		if e != nil {
-			return e
-		}
-		if delim, ok := t.(json.Delim); ok {
-			if delim == '{' {
-				seen := map[string]bool{}
-				for d.More() {
-					t, e = d.Token()
-					if e != nil {
-						return e
-					}
-					k, ok := t.(string)
-					if !ok || seen[k] {
-						return errors.New("恢复记录出现重复 JSON 字段")
-					}
-					seen[k] = true
-					if e = walk(); e != nil {
-						return e
-					}
-				}
-			} else if delim == '[' {
-				for d.More() {
-					if e = walk(); e != nil {
-						return e
-					}
-				}
-			} else {
-				return errors.New("恢复记录 JSON 格式无效")
-			}
-			_, e = d.Token()
-			return e
-		}
-		return nil
-	}
-	if e := walk(); e != nil {
-		return e
-	}
-	if _, e := d.Token(); e != io.EOF {
-		return errors.New("恢复记录含多余 JSON 内容")
-	}
-	d = json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	return d.Decode(out)
+	return decodeStrictJSON(b, out, stateJSONPolicy)
 }
 func (h NetworkHost) writeJSON(path string, v any) error {
 	b, e := json.MarshalIndent(v, "", "  ")

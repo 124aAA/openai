@@ -1,6 +1,6 @@
 # 从安装到客户端验收
 
-本文对应当前源码（`0.4.0`）；已安装版本用 `qingnode version` 查看，正式包以 Release 和 `RELEASE.json` 为准。源码中的新菜单与协议组合需要相应版本才会出现。能力与实测范围见[支持矩阵](CAPABILITIES.md)，历史结果见[验证报告](TEST_REPORT.md)。
+本文对应当前源码（`0.5.0`）；已安装版本用 `qingnode version` 查看，正式包以 Release 和 `RELEASE.json` 为准。源码中的新菜单与协议组合需要相应版本才会出现。能力与实测范围见[支持矩阵](CAPABILITIES.md)，历史结果见[验证报告](TEST_REPORT.md)。
 
 ## 最短使用路径
 
@@ -92,11 +92,11 @@ sudo qingnode export --id vless-ws-node --format uri
 sudo qingnode qr --id vless-ws-node
 ```
 
-本地安装包示例（使用已下载并核验的完整 `0.4.0` 包及匹配架构的官方核心归档）：
+本地安装包示例（使用已下载并核验的完整 `0.5.0` 包及匹配架构的官方核心归档）：
 
 ```bash
 mkdir -m 700 ./qingnode-package
-tar -xzf ./qingnode-0.4.0-linux-amd64.tar.gz -C ./qingnode-package
+tar -xzf ./qingnode-0.5.0-linux-amd64.tar.gz -C ./qingnode-package
 sudo bash ./qingnode-package/install.sh --protocol ss2022 --name main \
   --server 203.0.113.10 --listen 0.0.0.0 --port 443 \
   --core-archive /root/sing-box-1.14.0-linux-amd64.tar.gz
@@ -147,9 +147,9 @@ sudo qingnode export --id NODE_ID --user USER_ID --format mihomo \
 
 ### VMess 的两种分享链接导出（标准 URI 与 v2rayN 导出）
 
-针对 `vmess-tls`（含 `tcp`/`ws`/`grpc`/`httpupgrade`），QingNode 同时支持两种分享格式：
+针对 `vmess-tls`（含 `tcp`/`ws`/`grpc`/`httpupgrade`/`http`），QingNode 同时支持两种分享格式：
 - **标准 RFC 3986 URI（`--format uri`，菜单选项 `1`）**：形如 `vmess://<uuid>@<host>:<port>?security=tls&sni=...&type=ws&path=...#name`，与 `vless://`、`trojan://` 风格统一，适合支持标准 URL 查询参数的客户端。
-- **v2rayN Base64 JSON 导出（`--format vmess-v2rayn`，菜单选项 `6`）**：形如 `vmess://eyJ2IjoiMiIsInBzIjoi...`，编码完整的 v2 JSON 字段（`v:"2"`、`add`、`port`、`id`、`aid:"0"`、`scy:"auto"`、`net:"tcp|ws|grpc|httpupgrade"`、`path`、`host`、`tls:"tls"`、`sni`、`alpn`），专为 v2rayN、v2rayNG 等广泛使用传统 Base64 JSON 格式的客户端准备：
+- **v2rayN Base64 JSON 导出（`--format vmess-v2rayn`，菜单选项 `6`）**：形如 `vmess://eyJ2IjoiMiIsInBzIjoi...`，编码完整的 v2 JSON 字段（`v:"2"`、`add`、`port`、`id`、`aid:"0"`、`scy:"auto"`、`net:"tcp|ws|grpc|httpupgrade|h2"`、`path`、`host`、`tls:"tls"`、`sni`、`alpn`），专为 v2rayN、v2rayNG 等广泛使用传统 Base64 JSON 格式的客户端准备：
   ```bash
   sudo qingnode export --id NODE_ID --user USER_ID --format vmess-v2rayn
   ```
@@ -158,19 +158,21 @@ sudo qingnode export --id NODE_ID --user USER_ID --format mihomo \
 
 | 导出方式 | 适用协议与场景 | 限制与不适用情况 |
 | --- | --- | --- |
-| **标准分享链接（`uri` / `vmess-v2rayn`）** | 适合单节点快速导入：`reality`、`ss2022`、`ss-aead`、`hysteria2`（基础设置）、`trojan`、`vless-tls`、`vmess-tls`（含 `ws`/`grpc`/`httpupgrade`）、`anytls`（默认连接池） | **不适用**：`tuic`（无通用核验 URI 标准）、配置了自定义空闲池的 `anytls`、配置了非默认带宽/端口跳跃的 `hysteria2`、或使用静态 Ed25519 证书的 TLS 节点（因客户端默认 Chrome 指纹不兼容 Ed25519，拒绝生成有损 URI） |
-| **终端二维码（`qr`）** | 适用范围与分享链接相同，适合手机扫码直接导入单节点；本机离线生成，不上传外部网站 | 除继承分享链接的限制外，当 SSH 终端窗口过窄导致二维码被强行折行时无法识别，应拉宽终端或改用分享链接/配置文件 |
-| **完整客户端配置（`sing-box` JSON / `mihomo` YAML）** | **全部 9 种协议与 11 个新增组合均支持**；完整保留 TLS/ALPN、传输层参数、TUIC 拥塞与心跳、AnyTLS 空闲池、HY2 速率参数及基础分流 | 需要显式匹配客户端版本（`sing-box` 用 `--client-version 1.14.0` 或 `1.14.3`；`mihomo` 用 `--client-version 1.19.30`）；`provider` 仅含节点列表片段，不能单独作为完整配置运行 |
-| **设备多节点与在线订阅（`device` / `subscription`）** | 适合一人多机或多节点聚合管理，支持按设备签发带独立 256 位令牌的只读订阅或离线导出 | 在线订阅需自备可信 HTTPS 反代或证书；当设备绑定含 `tuic` 或带高级连接池的 `anytls` 时，应将 `subscription_formats` 设为 `["sing-box","mihomo","provider"]`，排除有损的默认 URI 格式 |
+| **标准分享链接（`uri` / `vmess-v2rayn`）** | 适合单节点快速导入：`reality`、`ss2022`、`ss-aead`、`hysteria2`（基础设置）、`trojan`、`vless-tls`、`vmess-tls`（含 `ws`/`grpc`/`httpupgrade`/`http`）、`anytls`（默认连接池）、`tuic`（标准 NEP-408 `tuic://`，未设置 `client_heartbeat` 时无损导出） | **默认拒绝有损导出**（除非显式确认 `--allow-lossy`）：配置了 `client_heartbeat` 的 `tuic`（NEP-408 无标准心跳参数）、开启 `multiplex` 的节点、自定义空闲池的 `anytls`、非默认带宽的 `hysteria2`；使用静态 Ed25519 证书的 TLS 节点始终拒绝生成默认 Chrome 指纹不兼容的 URI |
+| **终端二维码（`qr`）** | 适用范围与分享链接相同，适合手机扫码直接导入单节点或在线订阅统一地址；本机离线生成，不上传外部网站 | 除继承分享链接限制外，当 SSH 终端窗口过窄导致二维码被折行时会拒绝渲染并提示所需最小列宽，应拉宽终端或改用链接/配置文件 |
+| **完整客户端配置（`sing-box` JSON / `mihomo` YAML）** | **全部 9 种协议与全部传输/多路复用组合均支持**；支持分流与防污染 DNS 预设（`global`、`basic`、`cn-direct`、`global-secure-dns`）、可选 `TUN` 入站（`--tun`）及仅绑 `127.0.0.1` 随机密钥的控制端口（`--enable-controller`） | 需按语义兼容线指定客户端版本（`sing-box` 为 `1.14.x`，如 `--client-version 1.14.0` 或 `1.14.3`；`mihomo` 为 `>= 1.19.0`，如 `--client-version 1.19.30`）；`provider` 仅含节点列表片段 |
+| **设备多节点与在线订阅（`device` / `subscription`）** | 适合一人多机或多节点聚合管理；统一订阅入口 `/s/<TOKEN>` 支持按 `User-Agent` / `?format=` / `?flag=` 自动协商格式并返回标准订阅响应头；`base64` 订阅对 `vmess-tls` 自动使用兼容度更高的 `vmess-v2rayn` 编码 | 在线订阅需自备可信 HTTPS 反代或证书；当设备绑定含带高级连接池的 `anytls`、开启 `multiplex` 或设置了 `client_heartbeat` 的 `tuic` 时，应将 `subscription_formats` 限定为 `["sing-box","mihomo","provider"]` |
 
-手机或桌面应用显示“导入成功”之后，还要测试真实 TCP 与所需 UDP。设备有多节点需求时，明确绑定每个节点与凭据：
+手机或桌面应用显示“导入成功”之后，还要测试真实 TCP 与所需 UDP。设备有多节点或国内外分流/`TUN` 需求时，明确绑定每个节点与策略：
 
 ```bash
-sudo qingnode device create --name phone --binding NODE_ID:USER_ID --preview
-sudo qingnode device create --name phone --binding NODE_ID:USER_ID
+sudo qingnode device create --name phone --binding NODE_ID:USER_ID \
+  --routing cn-direct --tun --enable-controller --default-subscription-format mihomo --preview
+sudo qingnode device create --name phone --binding NODE_ID:USER_ID \
+  --routing cn-direct --tun --enable-controller --default-subscription-format mihomo
 sudo qingnode device list
 sudo qingnode export --device DEVICE_ID --format sing-box \
-  --client-version 1.14.0 --out /root/phone.json
+  --client-version 1.14.3 --out /root/phone.json
 ```
 
 ## 5. 从实际客户端网络排查延迟
@@ -185,7 +187,7 @@ sudo qingnode probe run --path server-outbound --target https://TEST_HOST/status
 sudo qingnode probe profile --id NODE_ID --user USER_ID --out /root/private-test-profile.json
 ```
 
-最后一个文件含认证，只传给自己的测试机器并在用后处理。独立工具在桌面或另一台 Linux 上运行；先核实其官方核心和二进制摘要：
+最后一个文件含认证，只传给自己的测试机器并在用后处理。独立工具在桌面（Linux / macOS / Windows）或另一台 Linux 上运行；先核实其官方核心和二进制摘要：
 
 ```bash
 qingprobe run --path client-proxy --profile ./private-test-profile.json \
@@ -200,9 +202,14 @@ qingprobe run --path client-proxy --profile ./private-test-profile.json \
 
 失败不回落 direct。报告区分空闲和下载期间 RTT、端到端耗时、单连接有效载荷吞吐及可得资源；详见[网络测试](NETWORK_TESTS.md)。
 
-## 6. 中转与修改先看真实影响
+## 6. 中转、高级向导与修改先看真实影响
 
-端口中转不是重新实现代理协议。先只读预览，再用同一组参数应用：
+在交互菜单 `6 高级设置` 中，除保留从 JSON 文件导入外，证书、中转/远程出口与多节点订阅均提供免手写 JSON 的交互式表单向导（支持 `:cancel` 或 `0` 随时放弃且不留半成品，API Token / 出口密码全程隐藏回显，提交前先做完整候选校验并展示真实变更影响预览）：
+- **证书管理（`3 证书与域名`）**：交互创建 `ACME HTTP-01`、`ACME DNS-01`（`cloudflare` / `alidns` / `acmedns`）、`ACME TLS-ALPN-01` 或本机已有证书路径（`mode: file`），以及交互更新、绑定、替换解绑与删除未引用证书。
+- **中转与出口（`2 中转与出口`）**：交互添加/删除 `TCP` / `UDP` / `TCP+UDP` 端口中转（`PortForward`），交互添加/删除常用远程出口（`SOCKS5`、`SS2022`、`REALITY`、`Hysteria2`），以及将入口节点路由一键绑定到指定出口/策略或切回 `direct`。
+- **多节点与订阅（`3 导出` -> `3 多节点与订阅` 或 `6 高级设置`）**：交互多选节点创建 `DeviceProfile`（可选 `manual` / `auto` / `fallback`、分流预设、`TUN` 与 `127.0.0.1` 控制端口），并在已初始化订阅服务下交互签发/轮换令牌、生成统一订阅链接 `/s/<TOKEN>` 及终端二维码（自动校验终端列宽）。
+
+端口中转不是重新实现代理协议。使用 CLI 时同样先只读预览，再用同一组参数应用：
 
 ```bash
 sudo qingnode forward add --name local-forward --listen 127.0.0.1 --port 24443 \
@@ -221,7 +228,7 @@ sudo qingnode edit --id NODE_ID --name renamed-main
 
 ### 第一步：先备份当前配置
 
-以下命令使用 `v0.4.0`（或当前已安装的 `v0.3.x`）。口令至少 12 字节，使用权限 `0600` 的口令文件或交互隐藏输入，不要写进命令行历史：
+以下命令适用于当前已安装的 `v0.4.x` / `v0.3.x`。口令至少 12 字节，使用权限 `0600` 的口令文件或交互隐藏输入，不要写进命令行历史：
 
 ```bash
 sudo qingnode backup --file /root/config-before-upgrade.qnbak --password-file /root/backup-pass.txt
@@ -235,8 +242,8 @@ sudo qingnode backup --full --preview
 可在主菜单 `5 备份与更新` 中选择 `4 更新管理器` 或 `3 更新 sing-box`，或直接在终端执行：
 
 ```bash
-# 在线升级管理器到指定正式版本（如 v0.4.0）
-sudo qingnode self-update --version v0.4.0
+# 在线升级管理器到指定正式版本（如 v0.5.0；受限网络可加 --github-mirror https://...）
+sudo qingnode self-update --version v0.5.0
 
 # 或使用已下载并核对 SHA256SUMS 的本地发行包升级
 sudo qingnode self-update --bundle /root/qingnode-package

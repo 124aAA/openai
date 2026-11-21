@@ -1,10 +1,10 @@
 # QingNode 开发与验证
 
-当前第10批State为schema9，旧1–8仅读入内存兼容，restore/rollback写schema9；平台边界与准确执行结果见[PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。第09批当时为schema8；AnyTLS/Trojan第一阶段521b9a7完整11/11项通过，SS AEAD/TUIC第二阶段ca0df8a定向25/25项通过，完整回归另列。开发须区分本机监听、承载业务、凭据、证书、构建标签和各客户端格式；基础URI不允许静默丢高级设置。协议说明见[PROTOCOLS.md](PROTOCOLS.md)，基线与各阶段准确源码结果见[BATCH09.md](BATCH09.md)。前批结果不替代当前源码验证。
+当前 `v0.5.0` State 为 `schema 10`，旧 `1..9` 仅读入内存无损兼容，`restore`/`rollback` 写 `schema 10`；平台扩展（含同源兼容发行版、原生 `nftables` 防火墙、`--github-mirror` 及 macOS `qingprobe` 9 项发行资产契约）与历史执行结果见 [PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。第09批当时为schema8；AnyTLS/Trojan第一阶段521b9a7完整11/11项通过，SS AEAD/TUIC第二阶段ca0df8a定向25/25项通过，完整回归另列。开发须区分本机监听、承载业务、凭据、证书、构建标签和各客户端格式；基础URI不允许静默丢高级设置。协议说明见[PROTOCOLS.md](PROTOCOLS.md)，基线与各阶段准确源码结果见[BATCH09.md](BATCH09.md)。前批结果不替代当前源码验证。
 
-第07批证书/迁移新增schema6与QNBK3，第08批真实API/到期字段升为schema7；该批接口与准确实测见 [CERTIFICATES.md](CERTIFICATES.md)、[MIGRATION.md](MIGRATION.md)、[MONITORING.md](MONITORING.md)、[BATCH08.md](BATCH08.md)。第08批当时恢复/回退写schema7、旧1–6内存兼容，第09批当时写schema8、兼容旧1–7，均为历史边界。新增字段要经DecodeState与CanonicalCertificates，不能让新State同时持久化旧node内联证书。只读观测不修复/签发，不恢复事务；独立监控政策不属于配置代，也未纳入QNBK3，发现时必须列明迁移缺项。
+第07批证书/迁移新增schema6与QNBK3，第08批真实API/到期字段升为schema7，第10批升为schema9，当前v0.5.0升为schema10；接口与实测分别见 [CERTIFICATES.md](CERTIFICATES.md)、[MIGRATION.md](MIGRATION.md)、[MONITORING.md](MONITORING.md)、[BATCH08.md](BATCH08.md)。新增字段要经 `DecodeState` 与 `CanonicalCertificates`，不能让新State同时持久化旧node内联证书。只读观测不修复/签发，不恢复事务；受管 `monitor/` 资产现已纳入 `QNBK3` 第 4 类受管根 `monitor-state`（目标机默认安全暂存 `monitor-staged`，显式 `--restore-monitor` 才恢复活跃目录）。
 
-周期探测复用internal/probe，按整轮预算分配，不另造成功判定。节点Profile从同一State快照的独立副本构造，不在并发worker重新争抢管理锁或重新加载当前代；主动probe读取入口仍持锁并拒绝待恢复事务。核心API流量仅为当前启动生命周期观测，缺失、reset与采集间隙保留；不能将无序连接事件累加为计费或硬配额。新增外部通知和恢复能力各自显式启用，测试用受控接收器；systemd/OpenRC周期任务的本批实际证据见BATCH10，公网通知另验。
+周期探测复用 `internal/probe`，按整轮预算分配并基于文件元数据缓存单轮核心摘要与构建标签校验，不另造成功判定。节点Profile从同一State快照的独立副本构造，不在并发worker重新争抢管理锁或重新加载当前代；主动probe读取入口仍持锁并拒绝待恢复事务。`monitor/traffic-ledger.json` 结合受管 `<pid>/<started_ms>` 纪元与核心停止前有界安全刷新钩子记录跨重启增量，遇崩溃或回退如实标记 `gap_detected: true` 且固定 `billing_suitable: false`（不做运营商精确计费承诺）；硬配额仅在显式 `--apply-quota` / `quota apply --yes` 时执行停用。新增外部通知（`webhook`、`telegram`、`bark`、`discord`、`feishu`、`dingtalk`）和恢复能力各自显式启用，测试用受控接收器；公网通知另验。
 
 受控CA验收需要独立、摘要校验过的官方Pebble v2.10.1，不访问生产CA，也不改宿主信任/DNS。普通套件缺工具会明确SKIP；要取得签发证据必须显式提供两工具实际运行：
 

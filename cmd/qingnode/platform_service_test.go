@@ -176,7 +176,7 @@ func TestPlatformOpenRCMigrationManifestKeepsSchema8Identity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if migrated.Schema != 9 || !reflect.DeepEqual(migrated.Nodes, st.Nodes) {
+	if migrated.Schema != node.Schema || !reflect.DeepEqual(migrated.Nodes, st.Nodes) {
 		t.Fatal("schema8 identity changed during in-memory platform migration")
 	}
 	snap, err := a.snapshot(migrated)

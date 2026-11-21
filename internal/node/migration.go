@@ -77,11 +77,11 @@ func validMigrationPath(p string) bool {
 }
 
 func validMigrationRoot(r MigrationRoot) bool {
-	return (r.ID == "acme" && r.Kind == "acme-storage" || r.ID == "subscription" && r.Kind == "subscription-publication" || r.ID == "publisher" && r.Kind == "subscription-config") && filepath.IsAbs(r.Source) && filepath.Clean(r.Source) != string(os.PathSeparator) && r.GroupID >= -1 && r.OwnerID >= 0
+	return (r.ID == "acme" && r.Kind == "acme-storage" || r.ID == "subscription" && r.Kind == "subscription-publication" || r.ID == "publisher" && r.Kind == "subscription-config" || r.ID == "monitor" && r.Kind == "monitor-state") && filepath.IsAbs(r.Source) && filepath.Clean(r.Source) != string(os.PathSeparator) && r.GroupID >= -1 && r.OwnerID >= 0
 }
 
 func (m MigrationPackage) Validate() error {
-	if m.Version != MigrationVersion || m.Mode != "complete" && m.Mode != "limited" || len(m.Roots) > 3 || len(m.Files) > MaxMigrationFiles || len(m.External) > 256 {
+	if m.Version != MigrationVersion || m.Mode != "complete" && m.Mode != "limited" || len(m.Roots) > 4 || len(m.Files) > MaxMigrationFiles || len(m.External) > 256 {
 		return errors.New("不支持的迁移包版本、模式或条目数量")
 	}
 	if m.Consistency != "stopped-owned-core" && m.Consistency != "no-runtime-assets" {
@@ -185,9 +185,7 @@ func RestoreMigration(data []byte, password string) (MigrationPackage, error) {
 	if err = rejectMigrationJSON(b); err != nil {
 		return m, err
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err = d.Decode(&m); err != nil {
+	if err = unmarshalStrictStruct(b, &m); err != nil {
 		return m, errors.New("迁移包结构无效")
 	}
 	// DecodeState is authoritative for legacy migration and unsupported versions.
@@ -208,72 +206,7 @@ func RestoreMigration(data []byte, password string) (MigrationPackage, error) {
 // All typed envelope objects reject aliases, duplicates and null. Saved server
 // JSON is original evidence and is delegated to Snapshot's existing decoder.
 func rejectMigrationJSON(b []byte) error {
-	d := json.NewDecoder(bytes.NewReader(b))
-	var walk func(int, string) error
-	walk = func(depth int, key string) error {
-		if depth > 48 {
-			return errors.New("迁移包嵌套过深")
-		}
-		t, e := d.Token()
-		if e != nil {
-			return e
-		}
-		if t == nil {
-			return errors.New("迁移包不接受null")
-		}
-		delim, ok := t.(json.Delim)
-		if !ok {
-			return nil
-		}
-		if delim == '{' {
-			seen := map[string]bool{}
-			for d.More() {
-				t, e = d.Token()
-				if e != nil {
-					return e
-				}
-				name, ok := t.(string)
-				if !ok {
-					return errors.New("迁移字段无效")
-				}
-				fold := stateFieldKey(name)
-				if seen[fold] {
-					return errors.New("迁移包对象含重复字段")
-				}
-				seen[fold] = true
-				if name != strings.ToLower(name) {
-					return errors.New("迁移包字段拼写无效")
-				}
-				if name == "server_config" {
-					var raw json.RawMessage
-					if e = d.Decode(&raw); e != nil {
-						return e
-					}
-					continue
-				}
-				if e = walk(depth+1, name); e != nil {
-					return e
-				}
-			}
-		} else if delim == '[' {
-			for d.More() {
-				if e = walk(depth+1, key); e != nil {
-					return e
-				}
-			}
-		} else {
-			return errors.New("迁移包JSON无效")
-		}
-		_, e = d.Token()
-		return e
-	}
-	if err := walk(0, ""); err != nil {
-		return err
-	}
-	if _, err := d.Token(); err != io.EOF {
-		return errors.New("迁移包包含额外JSON")
-	}
-	return nil
+	return validateStrictJSON(b, migrationJSONPolicy)
 }
 
 // CaptureMigration must run under the management lock. quiesced means the
@@ -356,6 +289,17 @@ func captureMigrationRoot(r MigrationRoot) ([]MigrationFile, error) {
 			if r.ID == "publisher" && entry.Name() != "subscription-publisher.json" {
 				continue
 			}
+			if r.ID == "monitor" {
+				if rel == "." && (entry.Name() == ".monitor.lock" || entry.Name() == ".monitor-config.lock") {
+					continue
+				}
+				if strings.HasPrefix(entry.Name(), ".monitor-write-") {
+					return errors.New("监控目录含未完成写入临时文件，未创建完整迁移包")
+				}
+				if rel != "." || !validMigrationMonitorFile(entry.Name()) {
+					return errors.New("监控目录含未知资产，未创建完整迁移包")
+				}
+			}
 			if r.ID == "subscription" && (rel != "." || entry.Name() != "snapshot.json" && entry.Name() != ".qingnode-subscription-owner") {
 				return errors.New("订阅目录含未知资产或未完成发布文件，未创建完整迁移包")
 			}
@@ -385,6 +329,9 @@ func captureMigrationRoot(r MigrationRoot) ([]MigrationFile, error) {
 			st, ok := info.Sys().(*syscall.Stat_t)
 			if !info.Mode().IsRegular() || !ok || st.Nlink != 1 || st.Uid != uint32(os.Geteuid()) && st.Uid != 0 && st.Uid != uint32(r.OwnerID) || mode != 0600 && mode != 0640 && mode != 0644 {
 				return errors.New("迁移来源含链接、特殊文件或不可信权限/属主")
+			}
+			if r.ID == "monitor" && mode != 0600 {
+				return errors.New("监控私有文件权限必须为0600")
 			}
 			if info.Size() > MaxMigrationFileBytes {
 				return errors.New("迁移单文件超过16MiB")
@@ -450,6 +397,9 @@ func captureMigrationRoot(r MigrationRoot) ([]MigrationFile, error) {
 		}
 		for _, entry := range entries {
 			if r.ID == "publisher" && entry.Name() != "subscription-publisher.json" {
+				continue
+			}
+			if r.ID == "monitor" && rel == "." && (entry.Name() == ".monitor.lock" || entry.Name() == ".monitor-config.lock") {
 				continue
 			}
 			p := path.Join(rel, entry.Name())
@@ -645,9 +595,7 @@ func loadBackupIndex(dir string) (backupIndex, error) {
 	if err = rejectMigrationJSON(b); err != nil {
 		return i, err
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err = d.Decode(&i); err != nil || i.Version != 1 || len(i.Files) > 4096 {
+	if err = unmarshalStrictStruct(b, &i); err != nil || i.Version != 1 || len(i.Files) > 4096 {
 		return i, errors.New("备份索引无效")
 	}
 	seen := map[string]bool{}

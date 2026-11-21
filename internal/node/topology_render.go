@@ -101,78 +101,28 @@ func buildEgressGraph(st State, id string) ([]M, []M, string, error) {
 	}
 	return outbounds, endpoints, EgressTag(id), nil
 }
+func remoteTLSWithTransport(serverName, certPEM string, tr *TransportOptions) M {
+	tls := M{"enabled": true, "server_name": serverName}
+	if certPEM != "" {
+		tls["certificate"] = []string{certPEM}
+	}
+	if alpn := transportALPN(tr); len(alpn) > 0 {
+		tls["alpn"] = alpn
+	}
+	return tls
+}
+
 func renderEgress(e Egress) M {
 	m := M{"tag": EgressTag(e.ID)}
-	if e.Protocol != "wireguard" {
+	spec, ok := egressProtocol(e.Protocol)
+	if !ok || !spec.IsEndpoint {
 		m["server"], m["server_port"] = e.Server, e.Port
 	}
 	if e.Detour != "" {
 		m["detour"] = EgressTag(e.Detour)
 	}
-	switch e.Protocol {
-	case "socks5":
-		m["type"], m["version"] = "socks", "5"
-		if !e.UDP {
-			m["network"] = "tcp"
-		}
-		if p := e.Socks; p.Username != "" {
-			m["username"], m["password"] = p.Username, p.Password
-		}
-	case "reality":
-		p := e.Reality
-		fp := p.Fingerprint
-		if fp == "" {
-			fp = "chrome"
-		}
-		m["type"], m["uuid"], m["flow"] = "vless", p.UUID, "xtls-rprx-vision"
-		m["tls"] = M{"enabled": true, "server_name": p.ServerName, "utls": M{"enabled": true, "fingerprint": fp}, "reality": M{"enabled": true, "public_key": p.PublicKey, "short_id": p.ShortID}}
-	case "ss2022":
-		p := e.Shadowsocks
-		m["type"], m["method"], m["password"] = "shadowsocks", p.Method, p.Password
-		if !e.UDP {
-			m["network"] = "tcp"
-		}
-	case "hysteria2":
-		p := e.HY2
-		m["type"], m["password"] = "hysteria2", p.Password
-		tls := M{"enabled": true, "server_name": p.ServerName}
-		if p.CertificatePEM != "" {
-			tls["certificate"] = []string{p.CertificatePEM}
-		}
-		m["tls"] = tls
-		if perf := p.Performance; perf != nil {
-			if perf.ClientUpMbps != nil {
-				m["up_mbps"] = *perf.ClientUpMbps
-			}
-			if perf.ClientDownMbps != nil {
-				m["down_mbps"] = *perf.ClientDownMbps
-			}
-			hy2Transport(m, perf.Client)
-		}
-	case "wireguard":
-		w := e.WireGuard
-		m["type"], m["system"], m["address"], m["private_key"] = "wireguard", false, w.Address, w.PrivateKey
-		if w.ListenPort != 0 {
-			m["listen_port"] = w.ListenPort
-		}
-		if w.MTU != 0 {
-			m["mtu"] = w.MTU
-		}
-		peers := []M{}
-		for _, p := range w.Peers {
-			peer := M{"public_key": p.PublicKey, "allowed_ips": p.AllowedIPs}
-			if p.Address != "" {
-				peer["address"], peer["port"] = p.Address, p.Port
-			}
-			if p.PreSharedKey != "" {
-				peer["pre_shared_key"] = p.PreSharedKey
-			}
-			if p.Keepalive != 0 {
-				peer["persistent_keepalive_interval"] = p.Keepalive
-			}
-			peers = append(peers, peer)
-		}
-		m["peers"] = peers
+	if ok && spec.Render != nil {
+		spec.Render(e, m)
 	}
 	return m
 }

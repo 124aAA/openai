@@ -376,9 +376,16 @@ func (r Removal) Recover() error {
 	if e = check(); e != nil {
 		return e
 	}
-	if s, e := ReadState(filepath.Join(r.Root, "current", "state.json")); e == nil && (s.Firewall == "ufw" || s.Firewall == "firewalld") {
-		if e = (Firewall{Execute: run}).Sync(s, true); e != nil {
-			return e
+	if s, e := ReadState(filepath.Join(r.Root, "current", "state.json")); e == nil {
+		if s.Firewall == "ufw" || s.Firewall == "firewalld" || s.Firewall == "nftables" {
+			if e = (Firewall{Execute: run}).Sync(s, true); e != nil {
+				return e
+			}
+		}
+		if len(RequiredHY2Redirects(s)) > 0 {
+			if e = (HY2Redirect{Execute: run}).Sync(s); e != nil {
+				return e
+			}
 		}
 	}
 	action := "disable"
@@ -496,7 +503,7 @@ func (r Removal) Remove(full bool) (err error) {
 	if err = manager.DisableNow("qingnode"); err != nil {
 		return err
 	}
-	if s, e := ReadState(filepath.Join(r.Root, "current", "state.json")); e == nil && (s.Firewall == "ufw" || s.Firewall == "firewalld") {
+	if s, e := ReadState(filepath.Join(r.Root, "current", "state.json")); e == nil && (s.Firewall == "ufw" || s.Firewall == "firewalld" || s.Firewall == "nftables" || len(RequiredHY2Redirects(s)) > 0) {
 		if err = (SystemBackend{Execute: run, ManagerKind: r.ManagerKind}).FinishEffects(s, NewState()); err != nil {
 			return err
 		}

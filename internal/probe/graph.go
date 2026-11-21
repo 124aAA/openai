@@ -11,6 +11,8 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // GraphProfile is a private, manager-derived probe path. It is deliberately
@@ -141,6 +143,111 @@ func graphTLSFields(raw []byte) error {
 	return nil
 }
 
+func graphTransportFields(raw []byte) error {
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &object)
+	tr, present := object["transport"]
+	if !present {
+		return nil
+	}
+	if string(tr) == "null" {
+		return errors.New("null client transport is not supported")
+	}
+	if err := graphFields(tr, "type path host headers service_name max_early_data early_data_header_name"); err != nil {
+		return err
+	}
+	var values map[string]json.RawMessage
+	_ = json.Unmarshal(tr, &values)
+	for _, v := range values {
+		if string(v) == "null" {
+			return errors.New("null client transport field is not supported")
+		}
+	}
+	var kind string
+	_ = json.Unmarshal(values["type"], &kind)
+	switch kind {
+	case "ws":
+		if err := graphFields(tr, "type path headers max_early_data early_data_header_name"); err != nil {
+			return err
+		}
+		if headers, hasHeaders := values["headers"]; hasHeaders {
+			if err := graphFields(headers, "Host"); err != nil {
+				return err
+			}
+			var hv map[string]json.RawMessage
+			_ = json.Unmarshal(headers, &hv)
+			if len(hv) == 0 || string(hv["Host"]) == "null" {
+				return errors.New("invalid WebSocket Host header")
+			}
+		}
+		if hdrName, hasHdr := values["early_data_header_name"]; hasHdr && string(hdrName) == `""` {
+			return errors.New("empty WebSocket early_data_header_name is not supported")
+		}
+	case "httpupgrade":
+		if err := graphFields(tr, "type path host"); err != nil {
+			return err
+		}
+		if rawHost, hasHost := values["host"]; hasHost {
+			trimmed := strings.TrimSpace(string(rawHost))
+			if trimmed == `""` || !strings.HasPrefix(trimmed, `"`) {
+				return errors.New("HTTPUpgrade host must be a non-empty string")
+			}
+		}
+	case "http":
+		if err := graphFields(tr, "type path host"); err != nil {
+			return err
+		}
+		if rawHost, hasHost := values["host"]; hasHost {
+			trimmed := strings.TrimSpace(string(rawHost))
+			if trimmed == "[]" || !strings.HasPrefix(trimmed, "[") {
+				return errors.New("HTTP/2 host must be a non-empty string array")
+			}
+		}
+	case "grpc":
+		if err := graphFields(tr, "type service_name"); err != nil {
+			return err
+		}
+	default:
+		return errors.New("unsupported client transport type")
+	}
+	return nil
+}
+
+func graphMultiplexFields(raw []byte) error {
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &object)
+	mux, present := object["multiplex"]
+	if !present {
+		return nil
+	}
+	if string(mux) == "null" {
+		return errors.New("null client multiplex is not supported")
+	}
+	if err := graphFields(mux, "enabled protocol max_connections min_streams padding"); err != nil {
+		return err
+	}
+	var values map[string]json.RawMessage
+	_ = json.Unmarshal(mux, &values)
+	for _, v := range values {
+		if string(v) == "null" || string(v) == `""` {
+			return errors.New("null or empty client multiplex field is not supported")
+		}
+	}
+	return nil
+}
+
+func validGraphAuthText(s string) bool {
+	if len(s) > 255 || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func canonicalGraphOutbound(raw []byte, version string) (json.RawMessage, graphOutbound, error) {
 	var o graphOutbound
 	if err := graphFields(raw, graphOutboundFields); err != nil {
@@ -149,13 +256,20 @@ func canonicalGraphOutbound(raw []byte, version string) (json.RawMessage, graphO
 	if err := graphTLSFields(raw); err != nil {
 		return nil, o, err
 	}
+	if err := graphTransportFields(raw); err != nil {
+		return nil, o, err
+	}
+	if err := graphMultiplexFields(raw); err != nil {
+		return nil, o, err
+	}
 	if err := StrictJSON(raw, &o); err != nil {
 		return nil, o, err
 	}
 	if err := profileProtocolFields(raw, o.Type); err != nil {
 		return nil, o, err
 	}
-	if !validGraphHost(o.Server) || o.Port == 0 || !graphTag.MatchString(o.Tag) || o.Tag == "probe" || o.Tag == "bootstrap" {
+	hasHY2PortRange := o.Type == "hysteria2" && len(o.ServerPorts) > 0
+	if !validGraphHost(o.Server) || (o.Port == 0 && !hasHY2PortRange) || (o.Port != 0 && hasHY2PortRange) || !graphTag.MatchString(o.Tag) || o.Tag == "probe" || o.Tag == "bootstrap" {
 		return nil, o, errors.New("invalid private graph proxy endpoint")
 	}
 	if o.DomainResolver != "" && o.DomainResolver != "bootstrap" && o.DomainResolver != "system" {
@@ -173,8 +287,9 @@ func canonicalGraphOutbound(raw []byte, version string) (json.RawMessage, graphO
 	if o.Network != "" && o.Network != "tcp" && o.Network != "udp" {
 		return nil, o, errors.New("private graph network must be tcp or udp")
 	}
-	if o.Type == "socks" {
-		if o.Version != "5" || (o.Username == "") != (o.Password == "") || len(o.Username) > 255 || len(o.Password) > 255 || o.UUID != "" || o.Flow != "" || o.Method != "" || o.TLS != nil {
+	switch o.Type {
+	case "socks":
+		if o.Version != "5" || (o.Username == "") != (o.Password == "") || !validGraphAuthText(o.Username) || !validGraphAuthText(o.Password) || o.UUID != "" || o.Flow != "" || o.PacketEncoding != "" || o.Method != "" || o.TLS != nil || o.Transport != nil || o.Multiplex != nil {
 			return nil, o, errors.New("invalid SOCKS5 graph credential or protocol options")
 		}
 		if err := o.profileHY2Options.validate("socks"); err != nil {
@@ -186,9 +301,39 @@ func canonicalGraphOutbound(raw []byte, version string) (json.RawMessage, graphO
 		if err := o.profileTUICOptions.validate("socks"); err != nil {
 			return nil, o, err
 		}
-	} else {
-		if o.Version != "" || o.Username != "" || o.Network != "" && o.Type != "shadowsocks" {
-			return nil, o, errors.New("SOCKS options cannot be used on another graph protocol")
+		if err := o.profileVMessOptions.validate("socks"); err != nil {
+			return nil, o, err
+		}
+	case "http":
+		if o.Version != "" || o.Network != "" || (o.Username == "") != (o.Password == "") || !validGraphAuthText(o.Username) || !validGraphAuthText(o.Password) || o.UUID != "" || o.Flow != "" || o.PacketEncoding != "" || o.Method != "" || o.Transport != nil || o.Multiplex != nil {
+			return nil, o, errors.New("invalid HTTP proxy graph credential or protocol options")
+		}
+		if err := o.profileHY2Options.validate("http"); err != nil {
+			return nil, o, err
+		}
+		if err := o.profileAnyTLSOptions.validate("http"); err != nil {
+			return nil, o, err
+		}
+		if err := o.profileTUICOptions.validate("http"); err != nil {
+			return nil, o, err
+		}
+		if err := o.profileVMessOptions.validate("http"); err != nil {
+			return nil, o, err
+		}
+		if o.TLS != nil {
+			if !o.TLS.Enabled || !validGraphHost(o.TLS.ServerName) || len(o.TLS.Certificate) > 16 || o.TLS.UTLS != nil || o.TLS.Reality != nil || len(o.TLS.ALPN) > 0 {
+				return nil, o, errors.New("invalid HTTPS proxy TLS options")
+			}
+			for _, cert := range o.TLS.Certificate {
+				if len(cert) > 256<<10 {
+					return nil, o, errors.New("HTTPS proxy CA certificate exceeds limit")
+				}
+			}
+		}
+	default:
+		allowsNetwork := o.Type == "shadowsocks" || o.Type == "trojan" || o.Type == "vmess" || o.Type == "tuic" || (o.Type == "vless" && (o.TLS == nil || o.TLS.Reality == nil))
+		if o.Version != "" || o.Username != "" || (o.Network != "" && !allowsNetwork) {
+			return nil, o, errors.New("SOCKS or network options cannot be used on another graph protocol")
 		}
 		legacy := o.outbound
 		legacy.Tag = "proxy"
@@ -380,17 +525,20 @@ func (p GraphProfile) SupportsNetwork(network string) bool {
 	if p.Validate() != nil || network != "tcp" && network != "udp" {
 		return false
 	}
-	type member struct{ kind, detour, network string }
+	type member struct {
+		kind, detour, network string
+		mux                   bool
+	}
 	members := map[string]member{}
 	for _, raw := range p.Outbounds {
 		var o graphOutbound
 		_ = json.Unmarshal(raw, &o)
-		members[o.Tag] = member{o.Type, o.Detour, o.Network}
+		members[o.Tag] = member{o.Type, o.Detour, o.Network, o.Multiplex != nil && o.Multiplex.Enabled}
 	}
 	for _, raw := range p.Endpoints {
 		var w graphWG
 		_ = json.Unmarshal(raw, &w)
-		members[w.Tag] = member{"wireguard", w.Detour, ""}
+		members[w.Tag] = member{"wireguard", w.Detour, "", false}
 	}
 	needTCP, needUDP := network == "tcp", network == "udp"
 	for tag := p.FinalTag; tag != ""; {
@@ -399,10 +547,19 @@ func (p GraphProfile) SupportsNetwork(network string) bool {
 			return false
 		}
 		switch m.kind {
+		case "http":
+			if needUDP {
+				return false
+			}
+			needTCP, needUDP = true, false
 		case "hysteria2", "tuic", "wireguard":
 			needTCP, needUDP = false, true
-		case "vless", "anytls", "trojan":
+		case "vless", "vmess", "anytls", "trojan":
 			needTCP, needUDP = true, false
+		case "shadowsocks":
+			if m.mux {
+				needTCP, needUDP = true, false
+			}
 		case "socks":
 			needTCP = needTCP || needUDP // UDP ASSOCIATE needs a TCP control channel.
 		}
@@ -447,7 +604,7 @@ func StartGraphSandbox(ctx context.Context, p GraphProfile, opts SandboxOptions)
 	for _, raw := range p.Outbounds {
 		var o graphOutbound
 		_ = json.Unmarshal(raw, &o)
-		kinds = append(kinds, o.Type)
+		kinds = append(kinds, probeCoreKind(o.outbound))
 	}
 	if len(p.Endpoints) > 0 {
 		kinds = append(kinds, "wireguard")

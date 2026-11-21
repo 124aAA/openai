@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-VERSION=${1:-0.4.0}
+VERSION=${1:-0.5.0}
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '需要三段数字版本号' >&2; exit 2; }
 REVISION=$(git rev-parse --short=12 HEAD 2>/dev/null || printf source)
 command -v go >/dev/null || { echo '构建需要 Go 1.25 或更新版本。' >&2; exit 1; }
@@ -10,7 +10,7 @@ command -v python3 >/dev/null || { echo '构建需要 Python 3。' >&2; exit 1; 
 mkdir -p artifacts/probe
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
-for TARGET in linux-amd64 linux-arm64 windows-amd64; do
+for TARGET in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
   TARGET_OS=${TARGET%-*}
   TARGET_ARCH=${TARGET#*-}
   DEST=$TEMP_DIR/$TARGET
@@ -50,5 +50,5 @@ PY
     python3 scripts/package-tar.py "$DEST" "$ARCHIVE.tar.gz" 2026-10-13 "$BINARY"
   fi
 done
-(cd artifacts/probe && python3 "$OLDPWD/scripts/package-sums.py" "qingprobe-$VERSION-linux-amd64.tar.gz" "qingprobe-$VERSION-linux-arm64.tar.gz" "qingprobe-$VERSION-windows-amd64.zip" > SHA256SUMS)
-echo "已构建 qingprobe Linux amd64/arm64 与 Windows amd64，版本 $VERSION，源码修订 $REVISION；输出 artifacts/probe/"
+(cd artifacts/probe && python3 "$OLDPWD/scripts/package-sums.py" "qingprobe-$VERSION-linux-amd64.tar.gz" "qingprobe-$VERSION-linux-arm64.tar.gz" "qingprobe-$VERSION-darwin-amd64.tar.gz" "qingprobe-$VERSION-darwin-arm64.tar.gz" "qingprobe-$VERSION-windows-amd64.zip" > SHA256SUMS)
+echo "已构建 qingprobe Linux amd64/arm64、macOS amd64/arm64 与 Windows amd64，版本 $VERSION，源码修订 $REVISION；输出 artifacts/probe/"

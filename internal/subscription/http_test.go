@@ -56,7 +56,7 @@ func TestTLSHTTPDeviceIsolationAndRevocation(t *testing.T) {
 	if status != 200 || body != "ss://private-device-a\n" {
 		t.Fatal(status, body)
 	}
-	if headers.Get("Cache-Control") != "private, no-store, max-age=0" || headers.Get("Vary") != "Authorization" || headers.Get("Subscription-Userinfo") != "" || headers.Get("ETag") != "" {
+	if headers.Get("Cache-Control") != "private, no-store, max-age=0" || headers.Get("Vary") != "Authorization, User-Agent" || !strings.HasPrefix(headers.Get("Subscription-Userinfo"), "expire=") || strings.Contains(headers.Get("Subscription-Userinfo"), "upload=") || strings.Contains(headers.Get("Subscription-Userinfo"), "download=") || headers.Get("Profile-Update-Interval") != "24" || headers.Get("ETag") != "" {
 		t.Fatal("cache or invented accounting headers", headers)
 	}
 	if status, body, _ = request("HEAD", "/s/uri", "Bearer "+raw); status != 200 || body != "" {

@@ -37,18 +37,52 @@ type Snapshot struct {
 }
 
 type Record struct {
-	DeviceID    string             `json:"device_id"`
-	TokenID     string             `json:"token_id"`
-	TokenSHA256 string             `json:"token_sha256"`
-	IssuedAt    time.Time          `json:"issued_at"`
-	ExpiresAt   time.Time          `json:"expires_at"`
-	Revoked     bool               `json:"revoked"`
-	Outputs     map[string]Payload `json:"outputs"`
+	DeviceID            string             `json:"device_id"`
+	DeviceName          string             `json:"device_name,omitempty"`
+	DefaultFormat       string             `json:"default_format,omitempty"`
+	EffectiveExpireUnix int64              `json:"effective_expire_unix,omitempty"`
+	UploadBytes         *int64             `json:"upload_bytes,omitempty"`
+	DownloadBytes       *int64             `json:"download_bytes,omitempty"`
+	TotalBytes          *int64             `json:"total_bytes,omitempty"`
+	TokenID             string             `json:"token_id"`
+	TokenSHA256         string             `json:"token_sha256"`
+	IssuedAt            time.Time          `json:"issued_at"`
+	ExpiresAt           time.Time          `json:"expires_at"`
+	Revoked             bool               `json:"revoked"`
+	Outputs             map[string]Payload `json:"outputs"`
 }
 
 type Payload struct {
 	ContentType string `json:"content_type"`
 	Content     []byte `json:"content"`
+}
+
+type IndexedSnapshot struct {
+	Snapshot   Snapshot
+	tokenIndex map[[32]byte]int
+}
+
+type IndexedReader func() (IndexedSnapshot, error)
+
+func BuildIndex(s Snapshot) (IndexedSnapshot, error) {
+	if err := Validate(s); err != nil {
+		return IndexedSnapshot{}, err
+	}
+	records := make([]Record, len(s.Records))
+	idx := make(map[[32]byte]int, len(s.Records))
+	for i, r := range s.Records {
+		outputs := make(map[string]Payload, len(r.Outputs))
+		for k, v := range r.Outputs {
+			outputs[k] = v
+		}
+		r.Outputs = outputs
+		records[i] = r
+		var key [32]byte
+		_, _ = hex.Decode(key[:], []byte(r.TokenSHA256))
+		idx[key] = i
+	}
+	s.Records = records
+	return IndexedSnapshot{Snapshot: s, tokenIndex: idx}, nil
 }
 
 // NewToken returns 256 random bits, encoded as 64 lower-case hexadecimal bytes,
@@ -91,6 +125,18 @@ func ContentType(format string) (string, bool) {
 	}
 }
 
+func validDeviceTitle(name string) bool {
+	if len(name) > 160 || !utf8.ValidString(name) {
+		return false
+	}
+	for _, ch := range name {
+		if unicode.IsControl(ch) {
+			return false
+		}
+	}
+	return true
+}
+
 func Validate(s Snapshot) error {
 	if s.Version != Version {
 		return fmt.Errorf("unsupported subscription publication version %d", s.Version)
@@ -107,6 +153,9 @@ func Validate(s Snapshot) error {
 		if !exactHex(r.DeviceID, 16) || !exactHex(r.TokenID, 16) || !exactHex(r.TokenSHA256, 64) {
 			return errors.New("invalid publication record identity")
 		}
+		if !validDeviceTitle(r.DeviceName) {
+			return errors.New("invalid publication device name")
+		}
 		if tokens[r.TokenSHA256] || ids[r.TokenID] {
 			return errors.New("duplicate subscription token record")
 		}
@@ -120,8 +169,33 @@ func Validate(s Snapshot) error {
 		if r.IssuedAt.IsZero() || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > MaxTokenLifetime {
 			return errors.New("subscription token expiry must be within 366 days of issue")
 		}
+		if r.EffectiveExpireUnix < 0 {
+			return errors.New("invalid effective subscription expiry")
+		}
+		if (r.UploadBytes != nil) != (r.DownloadBytes != nil) {
+			return errors.New("subscription upload and download usage must be paired")
+		}
+		if r.UploadBytes != nil && *r.UploadBytes < 0 || r.DownloadBytes != nil && *r.DownloadBytes < 0 || r.TotalBytes != nil && *r.TotalBytes <= 0 {
+			return errors.New("invalid subscription traffic usage or quota")
+		}
+		if r.TotalBytes != nil && r.UploadBytes == nil {
+			return errors.New("subscription total quota requires paired usage counters")
+		}
+		if r.Revoked && (r.UploadBytes != nil || r.DownloadBytes != nil || r.TotalBytes != nil) {
+			return errors.New("revoked subscription record must not retain usage metadata")
+		}
 		if r.Outputs == nil || len(r.Outputs) > 5 || (!r.Revoked && len(r.Outputs) == 0) {
 			return errors.New("invalid publication output count")
+		}
+		if r.DefaultFormat != "" {
+			if _, ok := ContentType(r.DefaultFormat); !ok {
+				return errors.New("invalid default subscription format")
+			}
+			if !r.Revoked {
+				if _, ok := r.Outputs[r.DefaultFormat]; !ok {
+					return errors.New("default subscription format is not published")
+				}
+			}
 		}
 		for format, p := range r.Outputs {
 			ct, ok := ContentType(format)

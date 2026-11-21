@@ -27,18 +27,25 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	f := fs(cmd)
 	auto := f.Bool("auto", false, "无交互发现公网地址、验证 REALITY 目标并避开默认端口冲突")
 	name := f.String("name", "main", "节点名称")
-	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless-tls / vmess-tls（支持 vless-ws-tls 等组合简写）")
-	method := f.String("method", "aes-256-gcm", "仅传统ss-aead：aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305")
-	transport := f.String("transport", "", "传输方式：tcp（默认）/ ws / grpc / httpupgrade（仅 vless-tls / vmess-tls / trojan）")
-	transportPath := f.String("path", "", "WebSocket / HTTPUpgrade 路径（如 /ws）")
-	transportHost := f.String("transport-host", "", "WebSocket / HTTPUpgrade Host 头（可选）")
+	protocol := f.String("protocol", "reality", "reality / ss2022 / hysteria2 / anytls / trojan / ss-aead / tuic / vless-tls / vmess-tls（支持 vless-ws-tls / reality-grpc 等简写）")
+	method := f.String("method", "", "ss-aead（默认 aes-256-gcm）或 ss2022（默认 2022-blake3-aes-256-gcm，支持 2022-blake3-aes-128-gcm / 2022-blake3-chacha20-poly1305）")
+	transport := f.String("transport", "", "传输方式：tcp（默认）/ ws / grpc / httpupgrade / http(h2)")
+	transportPath := f.String("path", "", "WebSocket / HTTPUpgrade / HTTP2 路径（如 /ws）")
+	transportHost := f.String("transport-host", "", "WebSocket / HTTPUpgrade / HTTP2 Host 头（可选）")
 	serviceName := f.String("service-name", "", "gRPC serviceName（如 grpc）")
+	wsMaxEarlyData := f.Int("ws-max-early-data", 0, "WebSocket 0-RTT Early Data 最大字节数（1–65536；0 关闭）")
+	wsEarlyDataHeader := f.String("ws-early-data-header", "", "WebSocket Early Data 头名称（默认 Sec-WebSocket-Protocol）")
+	multiplex := f.String("multiplex", "", "开启 sing-mux 多路复用：h2mux / smux / yamux（仅兼容 TCP 协议）")
+	muxMaxConnections := f.Int("mux-max-connections", 0, "多路复用客户端最大连接数（0–64）")
+	muxMinStreams := f.Int("mux-min-streams", 0, "多路复用单连接最小流数（0–256）")
+	muxPadding := f.Bool("mux-padding", false, "开启多路复用填充（padding）")
 	host := f.String("server", "", "客户端连接的公网 IP 或域名")
 	listen := f.String("listen", "", "监听 IP，默认按公网地址选择通配地址")
 	port := portFlag(f, 443)
 	connectPort := namedPortFlag(f, "connect-port", 0, "客户端连接端口（十进制）；省略使用最终本地监听端口，NAT映射须显式填写")
 	randomPort := f.Bool("random-port", false, "选择避开已有节点、监听和 SSH 的随机端口")
 	fingerprint := f.String("fingerprint", "chrome", "REALITY 客户端指纹")
+	shortIDs := f.String("short-ids", "", "REALITY 多 short ID 列表（逗号分隔 1–8 字节小写十六进制，首项为主 short ID）")
 	sni := f.String("sni", "", "REALITY 目标域名 / TLS 协议证书名称")
 	target := f.String("target", "", "REALITY 目标主机:端口，默认 SNI:443")
 	cert := f.String("cert", "", "PEM 完整证书链")
@@ -58,6 +65,35 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	normProto, normTransport, normErr := node.NormalizeProtocolAndTransport(*protocol, *transport, *transportPath, *transportHost, *serviceName)
 	if normErr == nil {
 		*protocol = normProto
+	}
+	if flagSet(f, "method") && *protocol != "ss-aead" && *protocol != "ss2022" {
+		return errors.New("--method 仅用于 ss-aead 或 ss2022")
+	}
+	if flagSet(f, "short-ids") && *protocol != "reality" {
+		return errors.New("--short-ids 仅用于 REALITY")
+	}
+	var parsedShortIDs []string
+	if flagSet(f, "short-ids") {
+		var err error
+		parsedShortIDs, err = parseShortIDsFlag(*shortIDs)
+		if err != nil {
+			return err
+		}
+	}
+	var muxOpts *node.MultiplexOptions
+	if normErr == nil {
+		var err error
+		normTransport, err = applyWSEarlyDataFlags(normTransport, flagSet(f, "ws-max-early-data"), *wsMaxEarlyData, flagSet(f, "ws-early-data-header"), *wsEarlyDataHeader)
+		if err != nil {
+			normErr = err
+		}
+	}
+	if normErr == nil {
+		var err error
+		muxOpts, err = buildMultiplexFlags(*protocol, flagSet(f, "multiplex"), *multiplex, flagSet(f, "mux-max-connections"), *muxMaxConnections, flagSet(f, "mux-min-streams"), *muxMinStreams, flagSet(f, "mux-padding"), *muxPadding)
+		if err != nil {
+			normErr = err
+		}
 	}
 	if cmd == "install" || cmd == "validate-install" {
 		if cmd == "install" && a.offline {
@@ -84,9 +120,6 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 		if (*cert == "") != (*key == "") {
 			return errors.New("PEM证书与私钥须成对提供")
 		}
-	}
-	if flagSet(f, "method") && *protocol != "ss-aead" {
-		return errors.New("--method仅用于传统ss-aead；SS2022原方法和密钥语义保持")
 	}
 	if *auto && a.offline {
 		return errors.New("--auto 需要在线部署；离线生成请移除 --auto 并显式提供 --server 和协议参数")
@@ -138,9 +171,7 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 					return errors.New("REALITY目标端口无效")
 				}
 			}
-			switch *fingerprint {
-			case "chrome", "firefox", "safari", "ios", "edge":
-			default:
+			if !node.ValidRealityFingerprint(*fingerprint) {
 				return errors.New("不支持该 fingerprint")
 			}
 		}
@@ -172,7 +203,7 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 						return err
 					}
 				}
-				if *protocol == "reality" && (flagSet(f, "sni") || flagSet(f, "target") || flagSet(f, "fingerprint")) {
+				if *protocol == "reality" && (flagSet(f, "sni") || flagSet(f, "target") || flagSet(f, "fingerprint") || len(parsedShortIDs) > 0) {
 					if *sni == "" || !node.ValidHost(*sni) || net.ParseIP(*sni) != nil {
 						return errors.New("REALITY 需要有效 SNI 域名")
 					}
@@ -181,6 +212,10 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 						return err
 					}
 					r.Fingerprint = *fingerprint
+					if len(parsedShortIDs) > 0 {
+						r.ShortID = parsedShortIDs[0]
+						r.ShortIDs = parsedShortIDs
+					}
 					adapter, _ := node.Protocol("reality")
 					if err := adapter.Validate(node.Node{Reality: r}); err != nil {
 						return err
@@ -242,11 +277,15 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 		if err := validateAddProtocolFlags(*protocol, *method, *sni, *target, *cert, *key, *email, *certificateID, flagSet(f, "fingerprint")); err != nil {
 			return err
 		}
-		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Transport: normTransport, Host: *host, Listen: *listen, Port: *port, Enabled: true, Users: []node.User{node.NewUser(*uname, *protocol)}, EgressID: directEgress(*egress)}
+		n := node.Node{ID: node.Token(8), Name: *name, Protocol: *protocol, Transport: normTransport, Multiplex: muxOpts, Host: *host, Listen: *listen, Port: *port, Enabled: true, EgressID: directEgress(*egress)}
 		if *protocol == "reality" {
 			n.Reality, e = node.NewReality(*sni, *target)
 			if e == nil {
 				n.Reality.Fingerprint = *fingerprint
+				if len(parsedShortIDs) > 0 {
+					n.Reality.ShortID = parsedShortIDs[0]
+					n.Reality.ShortIDs = parsedShortIDs
+				}
 				e = node.RealityTargetPolicy(n.Reality)
 				if e == nil && !*auto && !a.offline {
 					e = node.CheckReality(n.Reality)
@@ -265,13 +304,20 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 				n.Certificate, e = loadCert(*sni, *cert, *key, *email)
 			}
 		} else if *protocol == "ss-aead" {
-			n.Shadowsocks, e = node.NewShadowsocksAEAD(*method)
+			ssMethod := *method
+			if ssMethod == "" {
+				ssMethod = node.DefaultSSAEADMethod
+			}
+			n.Shadowsocks, e = node.NewShadowsocksAEAD(ssMethod)
+		} else if *protocol == "ss2022" {
+			n.Shadowsocks, e = node.NewShadowsocks2022(*method)
 		} else {
 			n.Shadowsocks = node.NewShadowsocks()
 		}
 		if e != nil {
 			return e
 		}
+		n.Users = []node.User{node.NewUserForNode(*uname, n)}
 		if *auto {
 			n.Port, e = autoPort(*s, n, flagSet(f, "port"), *randomPort, probes)
 			if e != nil {
@@ -337,12 +383,101 @@ func (a *app) addNode(cmd string, args []string, probes autoProbes, createdID *s
 	}
 	return nil
 }
+
+func parseShortIDsFlag(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, p := range parts {
+		sid := strings.TrimSpace(p)
+		if !node.ValidRealityShortID(sid) || strings.ToLower(sid) != sid {
+			return nil, errors.New("REALITY short_ids 须为逗号分隔的 1–8 字节小写十六进制")
+		}
+		if seen[sid] {
+			return nil, errors.New("REALITY short_ids 不能包含重复项")
+		}
+		seen[sid] = true
+		out = append(out, sid)
+	}
+	if len(out) == 0 || len(out) > 16 {
+		return nil, errors.New("REALITY short_ids 数量须为 1–16 个")
+	}
+	return out, nil
+}
+
+func applyWSEarlyDataFlags(tr *node.TransportOptions, maxSet bool, maxVal int, hdrSet bool, hdrVal string) (*node.TransportOptions, error) {
+	if !maxSet && !hdrSet {
+		return tr, nil
+	}
+	if tr == nil || tr.Type != "ws" {
+		return nil, errors.New("WebSocket Early Data 参数仅适用于 ws 传输层")
+	}
+	cp := *tr
+	if maxSet {
+		cp.MaxEarlyData = maxVal
+	}
+	if hdrSet {
+		hdr := strings.TrimSpace(hdrVal)
+		if hdr == "clear" || hdr == "default" {
+			cp.EarlyDataHeaderName = ""
+		} else {
+			cp.EarlyDataHeaderName = hdr
+		}
+	}
+	if err := node.ValidateTransportOptions(&cp); err != nil {
+		return nil, err
+	}
+	return &cp, nil
+}
+
+func buildMultiplexFlags(protocol string, muxSet bool, muxProto string, maxConnSet bool, maxConn int, minStrSet bool, minStr int, padSet bool, pad bool) (*node.MultiplexOptions, error) {
+	if !muxSet && !maxConnSet && !minStrSet && !padSet {
+		return nil, nil
+	}
+	if !node.ProtocolSupportsMultiplex(protocol) {
+		return nil, fmt.Errorf("%s 不支持 sing-mux 多路复用", protocol)
+	}
+	mp := strings.ToLower(strings.TrimSpace(muxProto))
+	if muxSet && (mp == "off" || mp == "none" || mp == "false") {
+		if maxConnSet || minStrSet || (padSet && pad) {
+			return nil, errors.New("关闭多路复用时不能同时指定连接数、流数或 padding")
+		}
+		return nil, nil
+	}
+	if mp == "" || mp == "on" || mp == "true" {
+		mp = "h2mux"
+	}
+	m := &node.MultiplexOptions{Enabled: true, Protocol: mp}
+	if maxConnSet {
+		m.MaxConnections = maxConn
+	}
+	if minStrSet {
+		m.MinStreams = minStr
+	}
+	if padSet {
+		m.Padding = pad
+	}
+	if err := node.ValidateMultiplexOptions(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func validateAddProtocolFlags(protocol, method, sni, target, cert, key, email, certificateID string, fingerprintSet bool) error {
 	if _, ok := node.Protocol(protocol); !ok {
 		return errors.New("不支持该协议")
 	}
 	if protocol == "ss-aead" {
-		if _, err := node.NewShadowsocksAEAD(method); err != nil {
+		m := method
+		if m == "" {
+			m = node.DefaultSSAEADMethod
+		}
+		if _, err := node.NewShadowsocksAEAD(m); err != nil {
+			return err
+		}
+	}
+	if protocol == "ss2022" {
+		if _, err := node.NewShadowsocks2022(method); err != nil {
 			return err
 		}
 	}
@@ -491,16 +626,23 @@ func (a *app) edit(args []string) error {
 	connectPort := namedPortFlag(f, "connect-port", 0, "新客户端连接端口（十进制）；--port只改本地监听")
 	randomPort := f.Bool("random-port", false, "选择随机端口")
 	fingerprint := f.String("fingerprint", "", "新 REALITY 客户端指纹")
+	shortIDs := f.String("short-ids", "", "REALITY 多 short ID 列表（逗号分隔小写十六进制，需含主 short ID；clear 清除额外列表）")
 	sni := f.String("sni", "", "新 SNI")
 	target := f.String("target", "", "新 REALITY 目标")
 	cert := f.String("cert", "", "替换证书链")
 	key := f.String("key", "", "替换私钥")
 	email := f.String("acme-email", "", "改用 ACME HTTP-01")
 	method := f.String("method", "", "仅传统ss-aead：更换方法但保留用户密码；客户端须重新导入")
-	transport := f.String("transport", "", "切换传输方式：tcp / ws / grpc / httpupgrade（仅 vless-tls / vmess-tls / trojan）")
-	transportPath := f.String("path", "", "修改 WebSocket / HTTPUpgrade 路径")
-	transportHost := f.String("transport-host", "", "修改 WebSocket / HTTPUpgrade Host 头")
+	transport := f.String("transport", "", "切换传输方式：tcp / ws / grpc / httpupgrade / http(h2)")
+	transportPath := f.String("path", "", "修改 WebSocket / HTTPUpgrade / HTTP2 路径")
+	transportHost := f.String("transport-host", "", "修改 WebSocket / HTTPUpgrade / HTTP2 Host 头")
 	serviceName := f.String("service-name", "", "修改 gRPC serviceName")
+	wsMaxEarlyData := f.Int("ws-max-early-data", 0, "修改 WebSocket Early Data 最大字节数（0 关闭）")
+	wsEarlyDataHeader := f.String("ws-early-data-header", "", "修改 WebSocket Early Data 头名称（default 恢复默认）")
+	multiplex := f.String("multiplex", "", "切换多路复用：h2mux / smux / yamux / off")
+	muxMaxConnections := f.Int("mux-max-connections", 0, "修改多路复用最大连接数（0–64）")
+	muxMinStreams := f.Int("mux-min-streams", 0, "修改多路复用单连接最小流数（0–256）")
+	muxPadding := f.Bool("mux-padding", false, "修改多路复用填充开关")
 	preview := f.Bool("preview", false, "只读显示影响，不保存、不恢复事务、不启停服务")
 	asJSON := f.Bool("json", false, "仅--preview：输出版本1变更影响JSON")
 	egress := f.String("egress", "", "入口的出口/策略稳定ID；direct明确改回直连")
@@ -515,6 +657,42 @@ func (a *app) edit(args []string) error {
 		Cert: editString(*cert), Key: editString(*key), ACMEEmail: editString(*email),
 		Transport: editString(*transport), Path: editString(*transportPath),
 		TransportHost: editString(*transportHost), ServiceName: editString(*serviceName)}
+	if flagSet(f, "short-ids") {
+		if strings.EqualFold(strings.TrimSpace(*shortIDs), "clear") {
+			empty := []string{}
+			e.ShortIDs = &empty
+		} else {
+			parsed, err := parseShortIDsFlag(*shortIDs)
+			if err != nil {
+				return err
+			}
+			e.ShortIDs = &parsed
+		}
+	}
+	if flagSet(f, "ws-max-early-data") {
+		e.WSMaxEarlyData = wsMaxEarlyData
+	}
+	if flagSet(f, "ws-early-data-header") {
+		if *wsEarlyDataHeader == "" {
+			return errors.New("--ws-early-data-header不能为空；恢复默认请填写 default")
+		}
+		e.WSEarlyDataHeader = wsEarlyDataHeader
+	}
+	if flagSet(f, "multiplex") {
+		if *multiplex == "" {
+			return errors.New("--multiplex不能为空；停用请填写 off")
+		}
+		e.MultiplexProtocol = multiplex
+	}
+	if flagSet(f, "mux-max-connections") {
+		e.MuxMaxConnections = muxMaxConnections
+	}
+	if flagSet(f, "mux-min-streams") {
+		e.MuxMinStreams = muxMinStreams
+	}
+	if flagSet(f, "mux-padding") {
+		e.MuxPadding = muxPadding
+	}
 	if flagSet(f, "method") {
 		if *method == "" {
 			return errors.New("方法不能为空")
@@ -601,11 +779,15 @@ func (a *app) users(cmd string, args []string) error {
 	u := f.String("user", "", "凭据 ID 或名称")
 	name := f.String("name", "", "新增凭据名称")
 	keys := f.Bool("keys", false, "更换 REALITY 密钥，所有客户端需要重新导入")
-	shortID := f.Bool("short-id", false, "仅重新生成 short ID；旧链接将失效")
+	shortID := f.Bool("short-id", false, "重新生成主 short ID；未加 --keep-old-short-id 时旧链接将失效")
+	keepOldShortID := f.Bool("keep-old-short-id", false, "轮换 REALITY short ID 时保留旧 short ID 以平滑过渡")
 	serverKey := f.Bool("server-key", false, "轮换 SS2022 服务密钥；所有客户端链接将失效")
 	yes := f.Bool("yes", false, "确认删除或轮换")
 	if e := parse(f, args); e != nil {
 		return e
+	}
+	if *keepOldShortID && (!*shortID || cmd != "rotate") {
+		return errors.New("--keep-old-short-id 仅与 rotate --short-id 一起使用")
 	}
 	return a.mutate(func(s *node.State) error {
 		n, e := s.Find(*id)
@@ -616,7 +798,7 @@ func (a *app) users(cmd string, args []string) error {
 			if *name == "" {
 				return errors.New("缺少 --name")
 			}
-			n.Users = append(n.Users, node.NewUser(*name, n.Protocol))
+			n.Users = append(n.Users, node.NewUserForNode(*name, *n))
 			return nil
 		}
 		if !*yes {
@@ -626,8 +808,8 @@ func (a *app) users(cmd string, args []string) error {
 			if *keys || *shortID || cmd != "rotate" || n.Protocol != "ss2022" || n.Shadowsocks == nil {
 				return errors.New("--server-key 仅单独用于 SS2022 rotate")
 			}
-			n.Shadowsocks = node.NewShadowsocks()
-			return nil
+			n.Shadowsocks, e = node.NewShadowsocks2022(n.Shadowsocks.Method)
+			return e
 		}
 		if *keys && *shortID {
 			return errors.New("--keys 与 --short-id 分别操作，避免误轮换")
@@ -636,7 +818,23 @@ func (a *app) users(cmd string, args []string) error {
 			if n.Reality == nil {
 				return errors.New("short ID 仅用于 REALITY")
 			}
-			n.Reality.ShortID = node.Token(8)
+			nextSID := node.Token(8)
+			if *keepOldShortID {
+				existing := node.EffectiveRealityShortIDs(n.Reality)
+				merged := []string{nextSID}
+				for _, sid := range existing {
+					if sid != nextSID {
+						merged = append(merged, sid)
+					}
+				}
+				if len(merged) > 16 {
+					return errors.New("REALITY short_ids 已达 16 个上限；请先用 edit --short-ids 清理已停用旧 ID")
+				}
+				n.Reality.ShortIDs = merged
+			} else {
+				n.Reality.ShortIDs = nil
+			}
+			n.Reality.ShortID = nextSID
 			return nil
 		}
 		if cmd == "rotate" && *keys {
@@ -647,6 +845,7 @@ func (a *app) users(cmd string, args []string) error {
 			n.Reality, e = node.NewReality(old.ServerName, old.Target)
 			if e == nil {
 				n.Reality.ShortID = old.ShortID
+				n.Reality.ShortIDs = append([]string(nil), old.ShortIDs...)
 				n.Reality.Fingerprint = old.Fingerprint
 			}
 			return e
@@ -665,7 +864,7 @@ func (a *app) users(cmd string, args []string) error {
 				}
 				n.Users = append(n.Users[:i], n.Users[i+1:]...)
 			} else {
-				nu := node.NewUser(n.Users[i].Name, n.Protocol)
+				nu := node.NewUserForNode(n.Users[i].Name, *n)
 				nu.ID = n.Users[i].ID
 				n.Users[i] = nu
 			}

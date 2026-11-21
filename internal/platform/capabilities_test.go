@@ -118,18 +118,34 @@ func TestHostCapabilitiesStandardOSReleaseLinksAndFallback(t *testing.T) {
 	}
 }
 func TestPackagePlansBoundExactTargetsAndArchitecture(t *testing.T) {
-	for _, c := range []struct{ d, v, m string }{{"debian", "12", "apt-get"}, {"debian", "13", "apt-get"}, {"ubuntu", "24.04", "apt-get"}, {"rocky", "9.7", "dnf"}, {"alpine", "3.24.0", "apk"}} {
+	for _, c := range []struct {
+		d, v, m, tier string
+	}{
+		{"debian", "12", "apt-get", "baseline"},
+		{"debian", "13", "apt-get", "baseline"},
+		{"debian", "11", "apt-get", "compatible-family"},
+		{"ubuntu", "24.04", "apt-get", "baseline"},
+		{"rocky", "9.7", "dnf", "baseline"},
+		{"rocky", "10.0", "dnf", "compatible-family"},
+		{"almalinux", "9.5", "dnf", "compatible-family"},
+		{"almalinux", "10.0", "dnf", "compatible-family"},
+		{"ol", "9.4", "dnf", "compatible-family"},
+		{"centos", "9", "dnf", "compatible-family"},
+		{"alpine", "3.24.0", "apk", "baseline"},
+		{"alpine", "3.20.3", "apk", "compatible-family"},
+		{"alpine", "3.23.1", "apk", "compatible-family"},
+	} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			p, e := DependenciesFor(c.d, c.v, arch)
-			if e != nil || p.Manager != c.m || len(p.Packages) < 10 {
-				t.Fatal(p, e)
+			if e != nil || p.Manager != c.m || p.SupportTier != c.tier || len(p.Packages) < 10 {
+				t.Fatal(c, p, e)
 			}
 			if strings.Contains(strings.Join(p.Install, " "), "upgrade") {
 				t.Fatal(p)
 			}
 		}
 	}
-	for _, c := range []struct{ d, v, a string }{{"rocky", "10", "amd64"}, {"alpine", "3.23", "amd64"}, {"alpine", "3.24.evil", "amd64"}, {"rocky", "9.$(bad)", "amd64"}, {"debian", "12", "386"}, {"centos", "7", "amd64"}} {
+	for _, c := range []struct{ d, v, a string }{{"debian", "10", "amd64"}, {"rocky", "8.10", "amd64"}, {"almalinux", "8.10", "amd64"}, {"ol", "8.9", "amd64"}, {"centos", "8", "amd64"}, {"alpine", "3.19", "amd64"}, {"alpine", "3.25", "amd64"}, {"alpine", "3.24.evil", "amd64"}, {"rocky", "9.$(bad)", "amd64"}, {"debian", "12", "386"}, {"centos", "7", "amd64"}} {
 		if _, e := DependenciesFor(c.d, c.v, c.a); e == nil {
 			t.Fatal(c)
 		}

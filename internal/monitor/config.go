@@ -154,18 +154,46 @@ func NormalizeConfig(c Config) (Config, error) {
 	if c.Notifications.TimeoutMS < 1 || c.Notifications.TimeoutMS > 10000 || c.Notifications.Retries < 0 || c.Notifications.Retries > 2 {
 		return c, errors.New("通知最多等待10秒、重试2次")
 	}
-	if c.Notifications.Kind != "webhook" && c.Notifications.Kind != "telegram" {
-		return c, errors.New("通知类型必须为webhook或telegram")
+	switch c.Notifications.Kind {
+	case "webhook", "telegram", "bark", "discord", "feishu", "dingtalk":
+	default:
+		return c, errors.New("通知类型必须为webhook、telegram、bark、discord、feishu或dingtalk")
+	}
+	if c.Notifications.MessageThreadID < 0 {
+		return c, errors.New("Telegram话题ID不能为负数")
+	}
+	if c.Notifications.MessageThreadID > 0 && c.Notifications.Kind != "telegram" {
+		return c, errors.New("message_thread_id仅支持telegram通知")
+	}
+	if len(c.Notifications.HostLabel) > 128 || strings.ContainsAny(c.Notifications.HostLabel, "\r\n\x00") {
+		return c, errors.New("通知主机标识过长或含控制字符")
+	}
+	if len(c.Notifications.Token) > 2048 || strings.ContainsAny(c.Notifications.Token, "\r\n\x00") ||
+		len(c.Notifications.Secret) > 2048 || strings.ContainsAny(c.Notifications.Secret, "\r\n\x00") ||
+		len(c.Notifications.ChatID) > 128 || strings.ContainsAny(c.Notifications.ChatID, "\r\n\x00") {
+		return c, errors.New("通知私有凭据过长或含控制字符")
 	}
 	if c.Notifications.Enabled {
-		if _, err := notificationURL(c.Notifications); err != nil {
+		u, err := notificationURL(c.Notifications)
+		if err != nil {
 			return c, err
 		}
-		if c.Notifications.Token == "" || len(c.Notifications.Token) > 2048 || strings.ContainsAny(c.Notifications.Token, "\r\n\x00") {
-			return c, errors.New("启用通知需要私有配置中的有效令牌")
-		}
-		if c.Notifications.Kind == "telegram" && (c.Notifications.ChatID == "" || len(c.Notifications.ChatID) > 128) {
-			return c, errors.New("Telegram通知需要私有配置中的会话ID")
+		switch c.Notifications.Kind {
+		case "webhook":
+			if c.Notifications.Token == "" {
+				return c, errors.New("启用通知需要私有配置中的有效令牌")
+			}
+		case "telegram":
+			if c.Notifications.Token == "" {
+				return c, errors.New("启用通知需要私有配置中的有效令牌")
+			}
+			if c.Notifications.ChatID == "" || len(c.Notifications.ChatID) > 128 {
+				return c, errors.New("Telegram通知需要私有配置中的会话ID")
+			}
+		case "bark":
+			if c.Notifications.Token == "" && (u.Path == "" || u.Path == "/") {
+				return c, errors.New("Bark通知需要私有配置中的token（device_key）或专用推送路径")
+			}
 		}
 	}
 	return c, nil
@@ -204,23 +232,37 @@ func notificationURL(n NotificationConfig) (*url.URL, error) {
 	if u.Scheme != "https" && !(u.Scheme == "http" && ip != nil && ip.IsLoopback()) {
 		return nil, errors.New("通知地址必须使用HTTPS；受控本机测试仅允许回环IP的HTTP地址")
 	}
-	if n.Kind == "telegram" {
+	switch n.Kind {
+	case "telegram":
 		if u.RawQuery != "" {
 			return nil, errors.New("Telegram通知地址不能含查询参数")
 		}
 		u.Path = strings.TrimRight(u.Path, "/") + "/bot" + n.Token + "/sendMessage"
+	case "bark":
+		if u.RawQuery != "" {
+			return nil, errors.New("Bark通知地址不能含查询参数")
+		}
+		if n.Token != "" {
+			trimmed := strings.TrimRight(u.Path, "/")
+			if !strings.HasSuffix(trimmed, "/push") {
+				u.Path = trimmed + "/push"
+			}
+		}
 	}
 	return u, nil
 }
 
 type privateNotification struct {
-	Enabled   bool   `json:"enabled"`
-	Kind      string `json:"kind"`
-	Endpoint  string `json:"endpoint,omitempty"`
-	Token     string `json:"token,omitempty"`
-	ChatID    string `json:"chat_id,omitempty"`
-	TimeoutMS int    `json:"timeout_ms"`
-	Retries   int    `json:"retries"`
+	Enabled         bool   `json:"enabled"`
+	Kind            string `json:"kind"`
+	Endpoint        string `json:"endpoint,omitempty"`
+	Token           string `json:"token,omitempty"`
+	Secret          string `json:"secret,omitempty"`
+	ChatID          string `json:"chat_id,omitempty"`
+	MessageThreadID int64  `json:"message_thread_id,omitempty"`
+	HostLabel       string `json:"host_label,omitempty"`
+	TimeoutMS       int    `json:"timeout_ms"`
+	Retries         int    `json:"retries"`
 }
 
 type privateConfig struct {
@@ -236,13 +278,27 @@ type privateConfig struct {
 	Notifications   privateNotification `json:"notifications"`
 }
 
+func toPrivateNotification(n NotificationConfig) privateNotification {
+	return privateNotification{
+		Enabled:         n.Enabled,
+		Kind:            n.Kind,
+		Endpoint:        n.Endpoint,
+		Token:           n.Token,
+		Secret:          n.Secret,
+		ChatID:          n.ChatID,
+		MessageThreadID: n.MessageThreadID,
+		HostLabel:       n.HostLabel,
+		TimeoutMS:       n.TimeoutMS,
+		Retries:         n.Retries,
+	}
+}
+
 func encodeConfig(c Config) ([]byte, error) {
 	c, err := NormalizeConfig(c)
 	if err != nil {
 		return nil, err
 	}
-	n := c.Notifications
-	p := privateConfig{c.Version, c.Enabled, c.IntervalSeconds, c.TimeoutMS, c.Concurrency, c.MaxBytes, c.History, c.Jobs, c.Recovery, privateNotification{n.Enabled, n.Kind, n.Endpoint, n.Token, n.ChatID, n.TimeoutMS, n.Retries}}
+	p := privateConfig{c.Version, c.Enabled, c.IntervalSeconds, c.TimeoutMS, c.Concurrency, c.MaxBytes, c.History, c.Jobs, c.Recovery, toPrivateNotification(c.Notifications)}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if len(b) > MaxConfigBytes {
 		return nil, errors.New("监控私有配置超过64KiB")
@@ -256,7 +312,29 @@ func decodeConfig(b []byte) (Config, error) {
 		return Config{}, errors.New("监控配置JSON无效、字段重复或包含未知字段")
 	}
 	n := p.Notifications
-	c := Config{Version: p.Version, Enabled: p.Enabled, IntervalSeconds: p.IntervalSeconds, TimeoutMS: p.TimeoutMS, Concurrency: p.Concurrency, MaxBytes: p.MaxBytes, History: p.History, Jobs: p.Jobs, Recovery: p.Recovery, Notifications: NotificationConfig{n.Enabled, n.Kind, n.Endpoint, n.Token, n.ChatID, n.TimeoutMS, n.Retries}}
+	c := Config{
+		Version:         p.Version,
+		Enabled:         p.Enabled,
+		IntervalSeconds: p.IntervalSeconds,
+		TimeoutMS:       p.TimeoutMS,
+		Concurrency:     p.Concurrency,
+		MaxBytes:        p.MaxBytes,
+		History:         p.History,
+		Jobs:            p.Jobs,
+		Recovery:        p.Recovery,
+		Notifications: NotificationConfig{
+			Enabled:         n.Enabled,
+			Kind:            n.Kind,
+			Endpoint:        n.Endpoint,
+			Token:           n.Token,
+			Secret:          n.Secret,
+			ChatID:          n.ChatID,
+			MessageThreadID: n.MessageThreadID,
+			HostLabel:       n.HostLabel,
+			TimeoutMS:       n.TimeoutMS,
+			Retries:         n.Retries,
+		},
+	}
 	return NormalizeConfig(c)
 }
 
@@ -333,6 +411,6 @@ func configBudget(c Config) Budget {
 }
 
 func notificationHash(n NotificationConfig) [32]byte {
-	b, _ := json.Marshal(privateNotification{n.Enabled, n.Kind, n.Endpoint, n.Token, n.ChatID, n.TimeoutMS, n.Retries})
+	b, _ := json.Marshal(toPrivateNotification(n))
 	return sha256.Sum256(b)
 }

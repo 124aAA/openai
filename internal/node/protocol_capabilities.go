@@ -31,7 +31,8 @@ type ProtocolCapability struct {
 }
 
 func ProtocolRequiresCertificate(name string) bool {
-	return name == "hysteria2" || name == "anytls" || name == "trojan" || name == "tuic" || name == "vless-tls" || name == "vmess-tls"
+	p, ok := Protocol(name)
+	return ok && p.RequiresCertificate
 }
 
 func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
@@ -41,46 +42,25 @@ func ProtocolCapabilities(name string) (ProtocolCapability, bool) {
 	}
 	// Both fixed official cores passed the Batch09 targeted5 protocol suite.
 	// This matrix is project evidence, not verification of the installed binary.
-	c := ProtocolCapability{Protocol: name, MinimumManagedCore: "1.14.0", TestedCoreVersions: []string{"1.14.0", "1.14.3"},
-		ServerBuildTags: []string{}, ClientBuildTags: []string{}, ListenerNetworks: append([]string{}, p.Networks...), BusinessNetworks: []string{"tcp", "udp"},
-		CertificateRequired: ProtocolRequiresCertificate(name), Server: true, Outbound: true, ClientOutbound: true,
-		ServerEgress: name == "reality" || name == "ss2022" || name == "hysteria2",
-		SingBox:      true, Mihomo: true, URI: true, AdvancedOptions: []string{}}
-	// Exact test commands, source commit and transport evidence are in BATCH09.md.
-	// An accepted or tested version alone does not verify a custom core build.
-	switch name {
-	case "reality":
-		c.Credentials = "UUID"
-		c.ClientBuildTags = []string{"with_utls"}
-	case "ss2022":
-		c.Credentials = "32-byte base64 server key plus independent 32-byte base64 user key"
-	case "ss-aead":
-		c.Credentials = "independent UTF-8 user password; method-specific KDF, no server:user composition"
-	case "anytls":
-		c.Credentials = "independent UTF-8 user password"
-		c.AdvancedOptions = []string{"idle_session_check_interval", "idle_session_timeout", "min_idle_session"}
-	case "trojan":
-		c.Credentials = "independent UTF-8 user password"
-		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
-	case "vless-tls":
-		c.Credentials = "UUID"
-		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
-	case "vmess-tls":
-		c.Credentials = "UUID (AEAD, alterId=0)"
-		c.AdvancedOptions = []string{"transport (tcp/ws/grpc/httpupgrade)"}
-	case "hysteria2":
-		c.Credentials = "independent user password"
-		c.ServerBuildTags = []string{"with_quic"}
-		c.ClientBuildTags = []string{"with_quic"}
-		c.AdvancedOptions = []string{"hysteria2 performance settings"}
-	case "tuic":
-		c.Credentials = "UUID plus independent user password"
-		c.ServerBuildTags = []string{"with_quic"}
-		c.ClientBuildTags = []string{"with_quic"}
-		c.URI = false
-		c.AdvancedOptions = []string{"congestion_control", "auth_timeout (server)", "heartbeat", "udp_relay_mode (client)", "zero_rtt_handshake=false"}
-	}
-	return c, true
+	return ProtocolCapability{
+		Protocol:            name,
+		MinimumManagedCore:  "1.14.0",
+		TestedCoreVersions:  []string{"1.14.0", "1.14.3"},
+		ServerBuildTags:     append([]string{}, p.ServerBuildTags...),
+		ClientBuildTags:     append([]string{}, p.ClientBuildTags...),
+		ListenerNetworks:    append([]string{}, p.Networks...),
+		BusinessNetworks:    []string{"tcp", "udp"},
+		Credentials:         p.CredentialsDesc,
+		CertificateRequired: p.RequiresCertificate,
+		Server:              true,
+		Outbound:            true,
+		ClientOutbound:      true,
+		ServerEgress:        true,
+		SingBox:             true,
+		Mihomo:              true,
+		URI:                 true,
+		AdvancedOptions:     append([]string{}, p.AdvancedOptions...),
+	}, true
 }
 
 func ValidateProtocolCapabilities(st State, tags []string) error {
@@ -103,45 +83,52 @@ func ValidateProtocolCapabilities(st State, tags []string) error {
 }
 
 func ProtocolExportWarnings(n Node, format string) []string {
-	if (n.Protocol == "trojan" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls") && (format == "uri" || format == "base64" || format == "qr") && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
+	if n.Multiplex != nil && n.Multiplex.Enabled && (format == "uri" || format == "base64" || format == "qr" || format == "vmess-v2rayn") {
+		return []string{"已启用服务端多路复用（multiplex），分享链接无法表达 sing-mux 封装参数；请导出完整 sing-box 或 Mihomo 配置"}
+	}
+	if n.Transport != nil && n.Transport.Type == "ws" && n.Transport.MaxEarlyData > 0 && EffectiveWSEarlyDataHeader(n.Transport) != DefaultWSEarlyDataHeader && format == "vmess-v2rayn" {
+		return []string{"vmess-v2rayn JSON 链接不能表达自定义 WebSocket early_data_header_name；请导出标准 URI、sing-box 或 Mihomo 配置"}
+	}
+	p, ok := Protocol(n.Protocol)
+	if !ok {
+		return nil
+	}
+	if p.TLSWarningLabel != "" && (format == "uri" || format == "base64" || format == "qr" || format == "vmess-v2rayn") && n.Certificate != nil && (n.Certificate.Mode == "pem" || n.Certificate.Mode == "file") {
 		cert, key, err := certificateMaterial(*n.Certificate)
 		if err != nil {
-			return []string{"无法核对Trojan分享链接的证书兼容性"}
+			return []string{fmt.Sprintf("无法核对%s分享链接的证书兼容性", p.TLSWarningLabel)}
 		}
 		leaf, _, err := parseCertificateChain(cert, key)
 		if err != nil {
-			return []string{"无法核对Trojan分享链接的证书兼容性"}
+			return []string{fmt.Sprintf("无法核对%s分享链接的证书兼容性", p.TLSWarningLabel)}
 		}
 		if leaf.PublicKeyAlgorithm == x509.Ed25519 {
-			return []string{"Mihomo1.19.30导入Trojan URI默认Chrome指纹不支持Ed25519证书；请导出原生TLS完整配置或使用ECDSA/RSA证书"}
+			return []string{fmt.Sprintf("Mihomo1.19.30导入%s URI默认Chrome指纹不支持Ed25519证书；请导出原生TLS完整配置或使用ECDSA/RSA证书", p.TLSWarningLabel)}
 		}
 	}
-	if n.Protocol == "anytls" && AnyTLSClientSettingsPresent(n.AnyTLS) && (format == "uri" || format == "base64" || format == "qr") {
-		return []string{"AnyTLS分享格式不能表达空闲连接池设置；请导出完整sing-box或Mihomo配置"}
-	}
-	if n.Protocol == "tuic" && (format == "uri" || format == "base64" || format == "qr") {
-		return []string{"尚未验证通用TUIC分享URI；请导出完整sing-box或Mihomo配置"}
+	if p.ExportWarnings != nil {
+		return p.ExportWarnings(n, format)
 	}
 	return nil
 }
 
 func ValidateProtocolClient(n Node, format, version string, tags []string) error {
-	if n.Protocol != "anytls" && n.Protocol != "trojan" && n.Protocol != "ss-aead" && n.Protocol != "tuic" && n.Protocol != "vless-tls" && n.Protocol != "vmess-tls" {
+	p, ok := Protocol(n.Protocol)
+	if !ok || p.MinSchema < 8 {
 		return nil
 	}
-	if (format == "sing-box" || format == "sing-box-outbounds") && version != "1.14.0" && version != "1.14.3" {
-		return errors.New("新协议sing-box客户端仅核对1.14.0与1.14.3；其他版本须单独适配验证")
+	if (format == "sing-box" || format == "sing-box-outbounds") && !SupportedVersion(version) {
+		return errors.New("新协议sing-box客户端要求1.14.x正式版本；其他主次版本须单独适配验证")
 	}
-	if (format == "mihomo" || format == "provider") && version != "1.19.30" {
-		return errors.New("新协议Mihomo导出仅核对1.19.30")
+	if (format == "mihomo" || format == "provider") && !SupportedMihomoVersion(version) {
+		return errors.New("新协议Mihomo导出要求>=1.19.0正式版本")
 	}
 	if (format == "sing-box" || format == "sing-box-outbounds") && tags != nil {
-		c, _ := ProtocolCapabilities(n.Protocol)
 		seen := map[string]bool{}
 		for _, tag := range tags {
 			seen[tag] = true
 		}
-		for _, tag := range c.ClientBuildTags {
+		for _, tag := range p.ClientBuildTags {
 			if !seen[tag] {
 				return fmt.Errorf("客户端缺少%s构建能力", tag)
 			}

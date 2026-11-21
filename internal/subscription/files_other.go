@@ -18,3 +18,12 @@ func Publish(string, Snapshot, int) error {
 func Read(string) (Snapshot, error) {
 	return Snapshot{}, errors.New("subscription publication filesystem requires Linux")
 }
+
+type SnapshotCache struct{}
+
+func NewSnapshotCache(string) *SnapshotCache { return &SnapshotCache{} }
+func (*SnapshotCache) Decodes() uint64       { return 0 }
+func (*SnapshotCache) Read() (IndexedSnapshot, error) {
+	return IndexedSnapshot{}, errors.New("subscription publication filesystem requires Linux")
+}
+

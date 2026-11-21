@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"qingnode/internal/node"
 	"qingnode/internal/probe"
 )
 
@@ -307,6 +308,7 @@ func (e Engine) runOnce(ctx context.Context, c Config, collector Collector, veri
 	}
 	close(jobs)
 	wg.Wait()
+	hostLabel := e.resolveHostLabel(c)
 	for i, j := range c.Jobs {
 		current := &result.Jobs[i]
 		current.ConfigurationSHA256 = jobConfigFingerprint(c, j)
@@ -323,8 +325,11 @@ func (e Engine) runOnce(ctx context.Context, c Config, collector Collector, veri
 		if exists {
 			from = old.Status
 		}
+		statusEventIdx := -1
 		if current.Status != from {
-			result.Events = append(result.Events, Event{At: current.FinishedAt, JobID: j.ID, From: from, To: current.Status, Kind: "status-change", Notification: "disabled"})
+			ev := e.buildJobEvent(c, j, *current, from, current.Status, "status-change", hostLabel)
+			result.Events = append(result.Events, ev)
+			statusEventIdx = len(result.Events) - 1
 		}
 		current.Actions = retainedActions(old.Actions, time.Now().UTC(), c.Recovery)
 		evidence, _ := recoveryEvidence(current.Observation)
@@ -341,16 +346,40 @@ func (e Engine) runOnce(ctx context.Context, c Config, collector Collector, veri
 		} else {
 			e.recover(round, c, j, current, verifier, &result.Actions)
 		}
-		if len(result.Actions) > before {
+		actedForJob := len(result.Actions) > before
+		if actedForJob {
 			actedThisRound = true
 		}
+		recoverySummary := summarizeJobRecovery(*current, c.Recovery, actedForJob)
+		if statusEventIdx >= 0 && recoverySummary != "" {
+			result.Events[statusEventIdx].RecoveryResult = e.cleanEventField(recoverySummary, c.Notifications, 128)
+		}
 		if current.Status == Healthy && initial != Healthy {
-			result.Events = append(result.Events, Event{At: current.FinishedAt, JobID: j.ID, From: initial, To: Healthy, Kind: "recovery", Notification: "disabled"})
-		} else if current.Status == Healthy && (from == Failed || from == Degraded) && len(result.Events) > 0 {
-			result.Events[len(result.Events)-1].Kind = "recovery"
+			ev := e.buildJobEvent(c, j, *current, initial, Healthy, "recovery", hostLabel)
+			ev.RecoveryResult = e.cleanEventField(recoverySummary, c.Notifications, 128)
+			result.Events = append(result.Events, ev)
+		} else if current.Status == Healthy && (from == Failed || from == Degraded) && statusEventIdx >= 0 {
+			result.Events[statusEventIdx].Kind = "recovery"
 		}
 	}
 	result.FinishedAt = time.Now().UTC()
+	if c.Enabled && e.ExtraEvents != nil {
+		alerts, alertErr := e.Store.LoadAlerts()
+		if alertErr != nil && !os.IsNotExist(alertErr) {
+			return result, alertErr
+		}
+		for _, extra := range e.ExtraEvents(result.FinishedAt, c) {
+			if extra.DedupeKey != "" && alerts.Sent != nil {
+				if _, already := alerts.Sent[extra.DedupeKey]; already {
+					continue
+				}
+			}
+			extra = e.normalizeExtraEvent(extra, c, hostLabel, result.FinishedAt)
+			if validEvent(extra) {
+				result.Events = append(result.Events, extra)
+			}
+		}
+	}
 	// Local transitions are durable before any external delivery is attempted.
 	if err = e.Store.save(result, c.History); err != nil {
 		return result, err
@@ -367,19 +396,161 @@ func (e Engine) runOnce(ctx context.Context, c Config, collector Collector, veri
 				if !latest.Enabled || !latest.Notifications.Enabled {
 					state = "disabled"
 				} else {
-					state = n.Send(round, latest, result.Events[i])
+					state = n.SendRedacted(round, latest, result.Events[i], e.Redactor)
 				}
 			}
 			result.Events[i].Notification = state
+			if result.Events[i].DedupeKey != "" && state == "delivered" {
+				_ = e.Store.recordAlertKeyLocked(result.Events[i].DedupeKey, result.FinishedAt)
+			}
 		}
 		if err = e.Store.save(result, c.History); err != nil {
 			return result, err
+		}
+	} else {
+		for _, ev := range result.Events {
+			if ev.DedupeKey != "" {
+				_ = e.Store.recordAlertKeyLocked(ev.DedupeKey, result.FinishedAt)
+			}
 		}
 	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
 	return result, nil
+}
+
+func (e Engine) cleanEventField(s string, nc NotificationConfig, maxBytes int) string {
+	if s == "" {
+		return ""
+	}
+	s = strings.NewReplacer("\r", " ", "\n", " ", "\x00", "").Replace(strings.TrimSpace(s))
+	s = node.Redact(s)
+	if e.Redactor != nil {
+		s = e.Redactor(s)
+	}
+	for _, secret := range []string{nc.Token, nc.Secret, nc.ChatID, nc.Endpoint} {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[redacted]")
+		}
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if len(string(out))+len(string(r))+3 > maxBytes {
+			return string(out) + "..."
+		}
+		out = append(out, r)
+	}
+	return string(out)
+}
+
+func (e Engine) resolveHostLabel(c Config) string {
+	raw := c.Notifications.HostLabel
+	if raw == "" {
+		raw, _ = os.Hostname()
+	}
+	return e.cleanEventField(raw, c.Notifications, 128)
+}
+
+func summarizeJobRecovery(js JobStatus, p RecoveryPolicy, acted bool) string {
+	if acted && len(js.Actions) > 0 {
+		last := js.Actions[len(js.Actions)-1]
+		if last.VerificationCause != "" {
+			return last.Action + ":" + last.AttemptStatus + "/" + string(last.Verification) + "(" + last.VerificationCause + ")"
+		}
+		return last.Action + ":" + last.AttemptStatus + "/" + string(last.Verification)
+	}
+	if p.Mode == "restart" && js.RecoveryReason != "" {
+		return js.RecoveryReason
+	}
+	return ""
+}
+
+func (e Engine) buildJobEvent(c Config, j Job, current JobStatus, from, to Status, kind, hostLabel string) Event {
+	var targetName, targetID string
+	var certDaysLeft *int
+	if e.TargetResolver != nil {
+		targetName, targetID, certDaysLeft = e.TargetResolver(j)
+	}
+	if targetID == "" {
+		if j.NodeID != "" {
+			targetID = j.NodeID
+		} else if j.EgressID != "" {
+			targetID = j.EgressID
+		}
+	}
+	if targetName == "" && j.Labels != nil {
+		targetName = j.Labels["name"]
+	}
+	if certDaysLeft != nil && *certDaysLeft >= 14 {
+		certDaysLeft = nil
+	}
+	var sigs []string
+	var causes []string
+	for _, s := range current.Observation.Signals {
+		if s.Status == Healthy {
+			continue
+		}
+		item := string(s.Kind) + "=" + string(s.Status)
+		if s.Cause != "" {
+			item += "(" + s.Cause + ")"
+			if s.Status == Failed || s.Status == Degraded {
+				causes = append(causes, string(s.Kind)+":"+s.Cause)
+			}
+		}
+		cleaned := e.cleanEventField(item, c.Notifications, 128)
+		if cleaned != "" && len(sigs) < 9 {
+			sigs = append(sigs, cleaned)
+		}
+	}
+	reason := strings.Join(causes, "; ")
+	if reason == "" && current.Observation.ManualStopped {
+		reason = "manual_stopped"
+	} else if reason == "" && current.Observation.Inactive {
+		reason = "node_inactive"
+	} else if reason == "" && current.Observation.Maintenance {
+		reason = "maintenance_pending"
+	}
+	return Event{
+		At:           current.FinishedAt,
+		JobID:        j.ID,
+		From:         from,
+		To:           to,
+		Kind:         kind,
+		Notification: "disabled",
+		Host:         hostLabel,
+		TargetName:   e.cleanEventField(targetName, c.Notifications, 160),
+		TargetID:     e.cleanEventField(targetID, c.Notifications, 128),
+		Signals:      sigs,
+		Reason:       e.cleanEventField(reason, c.Notifications, 256),
+		CertDaysLeft: certDaysLeft,
+	}
+}
+
+func (e Engine) normalizeExtraEvent(ev Event, c Config, hostLabel string, fallbackAt time.Time) Event {
+	if ev.At.IsZero() {
+		ev.At = fallbackAt
+	}
+	if ev.Host == "" {
+		ev.Host = hostLabel
+	} else {
+		ev.Host = e.cleanEventField(ev.Host, c.Notifications, 128)
+	}
+	ev.TargetName = e.cleanEventField(ev.TargetName, c.Notifications, 160)
+	ev.TargetID = e.cleanEventField(ev.TargetID, c.Notifications, 128)
+	ev.Reason = e.cleanEventField(ev.Reason, c.Notifications, 256)
+	ev.RecoveryResult = e.cleanEventField(ev.RecoveryResult, c.Notifications, 128)
+	ev.Notification = "disabled"
+	if len(ev.Signals) > 9 {
+		ev.Signals = ev.Signals[:9]
+	}
+	for i := range ev.Signals {
+		ev.Signals[i] = e.cleanEventField(ev.Signals[i], c.Notifications, 128)
+	}
+	return ev
 }
 
 // Watch is deliberately finite. It waits after each completed attempt and uses

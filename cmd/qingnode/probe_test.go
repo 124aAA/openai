@@ -185,3 +185,42 @@ func TestExternalOutputRejectsDanglingManagedBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildProbeEndpointProfileSupportsAllNineProtocolsAndTransports(t *testing.T) {
+	wApp := wizardApp(t, "")
+	specs := [][]string{
+		{"init", "--protocol", "reality", "--server", "203.0.113.10", "--sni", "www.microsoft.com", "--target", "www.microsoft.com:443", "--port", "20001", "--quiet"},
+		{"add", "--name", "n2", "--protocol", "ss2022", "--server", "203.0.113.10", "--port", "20002", "--quiet"},
+		{"add", "--name", "n3", "--protocol", "hysteria2", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20003", "--quiet"},
+		{"add", "--name", "n4", "--protocol", "anytls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20004", "--quiet"},
+		{"add", "--name", "n5", "--protocol", "trojan", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20005", "--quiet"},
+		{"add", "--name", "n6", "--protocol", "ss-aead", "--server", "203.0.113.10", "--port", "20006", "--quiet"},
+		{"add", "--name", "n7", "--protocol", "tuic", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20007", "--quiet"},
+		{"add", "--name", "n8", "--protocol", "vless-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20008", "--quiet"},
+		{"add", "--name", "n9", "--protocol", "vmess-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--port", "20009", "--quiet"},
+		{"add", "--name", "n10", "--protocol", "vless-ws-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--transport-host", "cdn.example.com", "--port", "20010", "--quiet"},
+		{"add", "--name", "n11", "--protocol", "vmess-grpc-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--service-name", "rpc1", "--port", "20011", "--quiet"},
+		{"add", "--name", "n12", "--protocol", "trojan-httpupgrade-tls", "--server", "edge.example.com", "--sni", "edge.example.com", "--acme-email", "ops@example.com", "--transport-host", "cdn.example.com", "--port", "20012", "--quiet"},
+	}
+	for _, args := range specs {
+		if err := wApp.command(args); err != nil {
+			t.Fatalf("command %v failed: %v", args, err)
+		}
+	}
+	s, err := wApp.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Nodes) != len(specs) {
+		t.Fatalf("got %d nodes, want %d", len(s.Nodes), len(specs))
+	}
+	for _, n := range s.Nodes {
+		p, err := buildProbeEndpointProfile(s, n.ID, "", "default")
+		if err != nil {
+			t.Fatalf("buildProbeEndpointProfile(%s/%s) failed: %v", n.Name, n.Protocol, err)
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("Validate(%s/%s) failed: %v", n.Name, n.Protocol, err)
+		}
+	}
+}

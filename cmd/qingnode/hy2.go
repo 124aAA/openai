@@ -112,6 +112,43 @@ func hy2Clone(p *node.HY2Performance) *node.HY2Performance {
 	_ = json.Unmarshal(b, &v)
 	return &v
 }
+
+func hy2SanitizeForDisplay(p *node.HY2Performance) *node.HY2Performance {
+	c := hy2Clone(p)
+	if c != nil && c.Obfs != nil {
+		c.Obfs = &node.HY2Obfs{Type: c.Obfs.Type, Password: "[混淆密码已隐藏]"}
+	}
+	return c
+}
+
+func hy2StripObfs(p *node.HY2Performance) *node.HY2Performance {
+	c := hy2Clone(p)
+	if c == nil {
+		return nil
+	}
+	c.Obfs = nil
+	b, _ := json.Marshal(c)
+	if string(b) == "{}" {
+		return nil
+	}
+	return c
+}
+
+func hy2RestoreObfs(target *node.HY2Performance, existing *node.HY2Performance, clearAll bool) *node.HY2Performance {
+	if clearAll {
+		return nil
+	}
+	c := hy2Clone(target)
+	if existing != nil && existing.Obfs != nil {
+		if c == nil {
+			c = &node.HY2Performance{}
+		}
+		obfsCopy := *existing.Obfs
+		c.Obfs = &obfsCopy
+	}
+	return c
+}
+
 func hy2Text(s string) bool {
 	if s == "" || len(s) > 2048 {
 		return false
@@ -190,6 +227,9 @@ func validateHY2Plan(p hy2Plan) error {
 		return errors.New("性能计划预设无效")
 	}
 	for _, v := range []*node.HY2Performance{p.Before, p.After} {
+		if v != nil && v.Obfs != nil {
+			return errors.New("性能计划文件不保存 salamander 混淆密码；请使用 hy2 set 或 edit 管理混淆")
+		}
 		if e := node.ValidateHY2Capabilities(node.Node{Protocol: "hysteria2", HY2: v}, p.CoreVersion, nil); e != nil {
 			return e
 		}
@@ -386,7 +426,7 @@ func (a *app) hy2(args []string) error {
 					Core        string               `json:"core_version"`
 					Performance *node.HY2Performance `json:"performance"`
 					Warnings    []string             `json:"warnings"`
-				}{n.ID, publicQueryText(n.Name, *s), s.CoreVersion, n.HY2, warnings})
+				}{n.ID, publicQueryText(n.Name, *s), s.CoreVersion, hy2SanitizeForDisplay(n.HY2), warnings})
 			}
 			if *id != "" && len(rows) == 0 {
 				return errors.New("未找到所选Hysteria2节点")
@@ -405,6 +445,8 @@ func (a *app) hy2(args []string) error {
 			fmt.Println("server up为VPS发往客户端，client up为客户端上传；速率是每条QUIC连接协商值，不是VPS总限速。nil表示保留核心默认。")
 			return nil
 		})
+	case "set":
+		return a.hy2Set(args[1:])
 	case "plan":
 		return a.hy2Plan(args[1:])
 	case "apply", "revert":
@@ -432,9 +474,10 @@ func (a *app) hy2(args []string) error {
 }
 
 const hy2Help = `hy2 show [--id ID] [--json]
+hy2 set --id ID [--obfs-password 混淆密码 | --clear-obfs] [--hop-ports 20000-30000] [--hop-interval 30s | --clear-hop-interval] [--hop-mode external|nftables] [--clear-hop] [--preview]
 hy2 plan --id ID [--user ID] --preset core-default|automatic|fixed|conservative|custom --out 新计划.json [--json]
   fixed: --up-mbps N --down-mbps N --measured-at RFC3339 --initiator 测试发起点 --upload-basis 上传依据 --download-basis 下载依据
-  custom: --settings typed性能JSON文件（只接受HY2Performance字段）
+  custom: --settings typed性能JSON文件（只接受HY2Performance非私密字段）
 hy2 apply --file 计划.json | hy2 revert --file 计划.json
 hy2 compare --help
 plan只读并保存独立私有文件；apply/revert验证未过期摘要后只修改性能。恢复核心默认会清除本节点全部HY2性能选择。
@@ -442,6 +485,115 @@ automatic仅把客户端恢复为不声明速率的BBR；fixed仅设置客户端
 依据只填工具文字说明、文件名或SHA摘要；不接受URL、分享链接或凭据。
 conservative仅改本机服务端BBR及1MiB/4MiB窗口，须MemAvailable证据，不改客户端。
 Chrome QUIC伪装默认保留，可能覆盖部分客户端参数；计划会列出实际导出限制。`
+
+func (a *app) hy2Set(args []string) error {
+	f := fs("hy2 set")
+	id := f.String("id", "", "节点ID或名称")
+	obfsPassword := f.String("obfs-password", "", "salamander 独立混淆密码")
+	clearObfs := f.Bool("clear-obfs", false, "清除 salamander 混淆")
+	hopPorts := f.String("hop-ports", "", "端口跳跃范围（如 20000-30000）")
+	hopInterval := f.String("hop-interval", "", "客户端端口跳跃间隔（如 30s）")
+	clearHopInterval := f.Bool("clear-hop-interval", false, "清除客户端端口跳跃间隔，恢复客户端默认")
+	hopMode := f.String("hop-mode", "", "端口跳跃服务端模式：external（外部映射）或 nftables（本机受管转发）")
+	clearHop := f.Bool("clear-hop", false, "清除端口跳跃配置")
+	preview := f.Bool("preview", false, "只读显示变更影响预览")
+	if e := parse(f, args); e != nil {
+		return e
+	}
+	if *id == "" {
+		return errors.New("hy2 set 需要 --id")
+	}
+	if *obfsPassword != "" && *clearObfs {
+		return errors.New("不能同时指定 --obfs-password 与 --clear-obfs")
+	}
+	if *clearHop && (*hopPorts != "" || *hopInterval != "" || *hopMode != "" || *clearHopInterval) {
+		return errors.New("--clear-hop 不能与 --hop-ports / --hop-interval / --hop-mode 同时使用")
+	}
+	if *hopInterval != "" && *clearHopInterval {
+		return errors.New("不能同时指定 --hop-interval 与 --clear-hop-interval")
+	}
+	if *obfsPassword == "" && !*clearObfs && *hopPorts == "" && *hopInterval == "" && !*clearHopInterval && *hopMode == "" && !*clearHop {
+		return errors.New("hy2 set 至少需要一项修改参数（如 --obfs-password 或 --hop-ports）")
+	}
+	applyFn := func(s *node.State) error {
+		n, err := s.Find(*id)
+		if err != nil {
+			return err
+		}
+		if n.Protocol != "hysteria2" {
+			return errors.New("hy2 set 仅支持 Hysteria2 节点")
+		}
+		p := hy2Clone(n.HY2)
+		if p == nil {
+			p = &node.HY2Performance{}
+		}
+		if *clearObfs {
+			p.Obfs = nil
+		} else if *obfsPassword != "" {
+			p.Obfs = &node.HY2Obfs{Type: "salamander", Password: *obfsPassword}
+		}
+		if *clearHop {
+			p.HopPorts = ""
+			p.HopInterval = ""
+			p.HopMode = ""
+		} else {
+			if *hopPorts != "" {
+				p.HopPorts = *hopPorts
+			}
+			if *clearHopInterval {
+				p.HopInterval = ""
+			} else if *hopInterval != "" {
+				p.HopInterval = *hopInterval
+			}
+			if *hopMode != "" {
+				p.HopMode = *hopMode
+			}
+		}
+		b, _ := json.Marshal(p)
+		if string(b) == "{}" {
+			n.HY2 = nil
+		} else {
+			n.HY2 = p
+		}
+		return s.Validate()
+	}
+	if *preview {
+		return a.store.InspectExisting(func() error {
+			for _, name := range []string{"transaction.json", "uninstall.json"} {
+				if _, err := os.Lstat(filepath.Join(a.store.Root, name)); err == nil {
+					return errors.New("存在未完成事务；预览不会恢复，请先核查 doctor 并显式执行 recover")
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			s, err := a.store.Load()
+			if err != nil {
+				return err
+			}
+			if err = applyFn(&s); err != nil {
+				return err
+			}
+			impact, err := a.store.Preview(s)
+			if err != nil {
+				return err
+			}
+			printChangeImpact(impact)
+			fmt.Println("这是只读预览：未保存、未恢复事务、未启停服务。")
+			return nil
+		})
+	}
+	return a.mutate(func(s *node.State) error {
+		if err := applyFn(s); err != nil {
+			return err
+		}
+		impact, err := a.store.Preview(*s)
+		if err != nil {
+			return err
+		}
+		printChangeImpact(impact)
+		return nil
+	})
+}
 
 func (a *app) hy2Plan(args []string) error {
 	f := fs("hy2 plan")
@@ -498,6 +650,9 @@ func (a *app) hy2Plan(args []string) error {
 		if custom == nil {
 			return errors.New("custom需要性能对象；清除全部请选core-default")
 		}
+		if custom.Obfs != nil {
+			return errors.New("性能计划文件不保存 salamander 混淆密码；请使用 hy2 set 或 edit 管理混淆")
+		}
 	}
 	return a.inspectReadyState(func(s *node.State) error {
 		n, e := s.Find(*id)
@@ -517,7 +672,7 @@ func (a *app) hy2Plan(args []string) error {
 		}
 		switch *preset {
 		case "core-default":
-			after = nil
+			after = hy2RestoreObfs(nil, n.HY2, false)
 		case "automatic":
 			after.ClientMode = "bbr"
 			after.ClientUpMbps = nil
@@ -538,7 +693,7 @@ func (a *app) hy2Plan(args []string) error {
 			after.Server.QUIC.StreamReceiveWindow = &stream
 			after.Server.QUIC.ConnectionReceiveWindow = &connection
 		case "custom":
-			after = hy2Clone(custom)
+			after = hy2RestoreObfs(custom, n.HY2, false)
 		default:
 			return errors.New("预设必须为core-default、automatic、fixed、conservative或custom")
 		}
@@ -557,7 +712,7 @@ func (a *app) hy2Plan(args []string) error {
 			return e
 		}
 		impact = hy2SafeImpact(impact, *s)
-		p := hy2Plan{Version: 1, CreatedAt: time.Now().UTC(), NodeID: n.ID, UserID: u.ID, CoreVersion: s.CoreVersion, Preset: *preset, Before: hy2Clone(n.HY2), After: hy2Clone(after), Evidence: evidence, Resources: resources, Impact: impact, Warnings: []string{"服务器速率仅参与各QUIC连接协商，不是整个VPS带宽硬上限。", "客户端资源未知；本机内存证据不能证明手机或桌面客户端资源充足。", "接收窗口不是总RSS承诺；并发连接数与实际负载仍需单独验证。"}}
+		p := hy2Plan{Version: 1, CreatedAt: time.Now().UTC(), NodeID: n.ID, UserID: u.ID, CoreVersion: s.CoreVersion, Preset: *preset, Before: hy2StripObfs(n.HY2), After: hy2StripObfs(after), Evidence: evidence, Resources: resources, Impact: impact, Warnings: []string{"服务器速率仅参与各QUIC连接协商，不是整个VPS带宽硬上限。", "客户端资源未知；本机内存证据不能证明手机或桌面客户端资源充足。", "接收窗口不是总RSS承诺；并发连接数与实际负载仍需单独验证。"}}
 		p.GlobalSHA, e = hy2GlobalSHA(*s)
 		if e != nil {
 			return e
@@ -682,7 +837,7 @@ func (a *app) applyHY2Plan(p hy2Plan, revert bool) error {
 				if !equalHY2JSON(currentRendered, targetRendered) {
 					return errors.New("已应用节点的实际派生字段与计划不一致")
 				}
-				if !equalHY2JSON(n.HY2, target) {
+				if !equalHY2JSON(hy2StripObfs(n.HY2), target) {
 					return errors.New("计划性能内容与已匹配目标摘要不一致")
 				}
 				if _, e = hy2ResourceEvidence(target); e != nil {
@@ -714,7 +869,7 @@ func (a *app) applyHY2Plan(p hy2Plan, revert bool) error {
 		}
 		next := s.Clone()
 		nn, _ := next.Find(p.NodeID)
-		nn.HY2 = hy2Clone(target)
+		nn.HY2 = hy2RestoreObfs(target, n.HY2, false)
 		if e = next.Validate(); e != nil {
 			return e
 		}
@@ -837,6 +992,7 @@ var hy2PerformanceKeys = map[string]bool{
 	"stream_receive_window": true, "connection_receive_window": true,
 	"idle_timeout": true, "keep_alive_period": true, "max_concurrent_streams": true,
 	"initial_packet_size": true, "disable_path_mtu_discovery": true,
+	"server_ports": true, "hop_interval": true,
 }
 
 func hy2FilterPerformance(raw node.M) node.M {
@@ -887,7 +1043,9 @@ func validateHY2Rendered(r hy2Rendered) error {
 	}
 	for endpoint, m := range map[string]node.M{"server": r.Server, "client": r.Client} {
 		for k, v := range m {
-			if !hy2PerformanceKeys[k] || (endpoint == "server" && k == "disable_chrome_parrot") || (endpoint == "client" && k == "ignore_client_bandwidth") {
+			if !hy2PerformanceKeys[k] ||
+				(endpoint == "server" && (k == "disable_chrome_parrot" || k == "server_ports" || k == "hop_interval")) ||
+				(endpoint == "client" && k == "ignore_client_bandwidth") {
 				return errors.New("性能计划实际字段含未支持的设置或私密字段")
 			}
 			switch k {
@@ -911,6 +1069,36 @@ func validateHY2Rendered(r hy2Rendered) error {
 				}
 				if e != nil || d < time.Second || d > upper {
 					return errors.New("性能计划超时派生字段超出范围")
+				}
+			case "hop_interval":
+				s, ok := v.(string)
+				if !ok {
+					return errors.New("性能计划端口跳跃间隔字段无效")
+				}
+				if _, e := node.ParseHY2HopInterval(s); e != nil {
+					return e
+				}
+			case "server_ports":
+				var items []string
+				switch arr := v.(type) {
+				case []string:
+					items = arr
+				case []any:
+					for _, item := range arr {
+						s, ok := item.(string)
+						if !ok {
+							return errors.New("性能计划跳跃端口派生字段无效")
+						}
+						items = append(items, s)
+					}
+				default:
+					return errors.New("性能计划跳跃端口派生字段无效")
+				}
+				if len(items) != 1 {
+					return errors.New("性能计划跳跃端口数量无效")
+				}
+				if _, _, e := node.ParseHY2HopPorts(strings.Replace(items[0], ":", "-", 1)); e != nil {
+					return e
 				}
 			default:
 				var n float64

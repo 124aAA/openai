@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"qingnode/internal/node"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -128,27 +129,52 @@ func (a *app) networkWithHost(args []string, h node.NetworkHost) error {
 	}
 	return nil
 }
+
+func nodeNeedsACMEHTTP01Port80(s node.State, n node.Node) bool {
+	var cert *node.Certificate
+	if n.CertificateID != "" {
+		if res, err := s.FindCertificate(n.CertificateID); err == nil {
+			cert = &res.Certificate
+		}
+	}
+	if cert == nil {
+		cert = n.Certificate
+	}
+	if cert == nil || cert.Mode != "acme" {
+		return false
+	}
+	if cert.ACME == nil {
+		return true
+	}
+	ch := strings.ToLower(strings.TrimSpace(cert.ACME.Challenge))
+	return ch == "" || ch == "http-01"
+}
+
 func (a *app) firewall(args []string) error {
 	if len(args) == 0 {
 		args = []string{"status"}
 	}
 	f := fs("firewall " + args[0])
-	backend := f.String("backend", "ufw", "enable时显式选择ufw或firewalld；不启动全局防火墙")
+	backend := f.String("backend", "ufw", "enable时显式选择ufw、firewalld或nftables；不启动全局防火墙")
 	if e := parse(f, args[1:]); e != nil {
 		return e
 	}
 	if args[0] != "enable" && flagSet(f, "backend") {
 		return errors.New("--backend仅用于firewall enable")
 	}
-	if *backend != "ufw" && *backend != "firewalld" {
-		return errors.New("防火墙后端仅支持ufw或firewalld")
+	if *backend != "ufw" && *backend != "firewalld" && *backend != "nftables" {
+		return errors.New("防火墙后端仅支持ufw、firewalld或nftables")
 	}
 	if a.offline {
 		return errors.New("离线模式不操作本机防火墙")
 	}
+	lookPath := exec.LookPath
+	if a.lookPath != nil {
+		lookPath = a.lookPath
+	}
 	if args[0] == "status" {
 		for _, c := range [][]string{{"ufw", "status", "verbose"}, {"firewall-cmd", "--state"}, {"nft", "list", "tables"}, {"iptables", "-S", "INPUT"}} {
-			if _, e := exec.LookPath(c[0]); e != nil {
+			if _, e := lookPath(c[0]); e != nil {
 				continue
 			}
 			b, e := node.Run(8*time.Second, c[0], c[1:]...)
@@ -157,13 +183,13 @@ func (a *app) firewall(args []string) error {
 				a.message("WARN", c[0]+" 查询未成功")
 			}
 		}
-		fmt.Println("只对显式选择且已运行的UFW/firewalld增加本项目规则；不启用、清空或重载全局防火墙。云安全组须另行检查。")
+		fmt.Println("只对显式选择且已运行的UFW/firewalld或独立nftables表（inet qingnode）维护本项目规则；不启用、清空或重载全局防火墙。云安全组须另行检查。")
 		return a.inspectState(func(s *node.State) error {
 			fmt.Printf("项目自动防火墙模式：%s（空为手动）\n", s.Firewall)
 			for _, n := range s.Nodes {
 				if n.Enabled {
 					fmt.Println(n.Name + " 需要 " + node.PortLabel(n))
-					if n.Certificate != nil && n.Certificate.Mode == "acme" {
+					if nodeNeedsACMEHTTP01Port80(*s, n) {
 						fmt.Println("ACME 还需要 TCP 80；由用户管理该共享端口")
 					}
 				}
@@ -175,7 +201,7 @@ func (a *app) firewall(args []string) error {
 			}
 			for _, e := range s.Egresses {
 				if e.WireGuard != nil && e.WireGuard.ListenPort > 0 {
-					fmt.Printf("用户态WireGuard %s 需要本地%d/udp；只管理自身UFW规则\n", e.ID, e.WireGuard.ListenPort)
+					fmt.Printf("用户态WireGuard %s 需要本地%d/udp；只管理自身规则\n", e.ID, e.WireGuard.ListenPort)
 				}
 			}
 			return nil
@@ -183,7 +209,7 @@ func (a *app) firewall(args []string) error {
 	}
 	if args[0] == "sync" {
 		return a.locked(func(s *node.State) error {
-			if s.Firewall != "ufw" && s.Firewall != "firewalld" {
+			if s.Firewall != "ufw" && s.Firewall != "firewalld" && s.Firewall != "nftables" {
 				return errors.New("尚未启用项目自动防火墙管理")
 			}
 			return (node.Firewall{}).Sync(*s, true)
@@ -208,12 +234,17 @@ func (a *app) selfUpdate(args []string) error {
 	f := fs("self-update")
 	bundle := f.String("bundle", "", "已解压并核验来源的新版发行包目录")
 	repo := f.String("repo", "", "GitHub 仓库 owner/repo；默认 124aAA/openai")
-	v := f.String("version", "", "明确目标 tag，例如 v0.2.7")
+	v := f.String("version", "", "明确目标 tag，例如 v0.4.1")
+	mirror := f.String("github-mirror", "", "可选 HTTPS GitHub 下载镜像前缀（仍强制 SHA-256 校验）")
 	if e := parse(f, args); e != nil {
 		return e
 	}
-	if *bundle != "" && *repo != "" {
-		return errors.New("本地包与 GitHub 下载二选一")
+	cleanMirror, e := node.ValidateGitHubMirror(*mirror)
+	if e != nil {
+		return e
+	}
+	if *bundle != "" && (*repo != "" || cleanMirror != "") {
+		return errors.New("本地包与 GitHub 下载/镜像参数二选一")
 	}
 	installer := "/usr/local/lib/qingnode/install.sh"
 	cmdArgs := []string{"--reinstall"}
@@ -237,8 +268,17 @@ func (a *app) selfUpdate(args []string) error {
 			*repo = "124aAA/openai"
 		}
 		cmdArgs = append(cmdArgs, "--repo", *repo, "--version", *v)
+		if cleanMirror != "" {
+			cmdArgs = append(cmdArgs, "--github-mirror", cleanMirror)
+		}
 	} else {
 		return errors.New("需要 --bundle 新版目录，或 --version v版本；默认下载 124aAA/openai 的发行包")
+	}
+	if a.selfUpdateFn != nil {
+		if *bundle != "" {
+			return a.selfUpdateFn(append([]string{"--bundle", *bundle}, cmdArgs...))
+		}
+		return a.selfUpdateFn(cmdArgs)
 	}
 	if i, e := os.Lstat(installer); e != nil || !i.Mode().IsRegular() {
 		return errors.New("未找到普通文件形式的安装器")
@@ -264,6 +304,9 @@ func (a *app) coreVersions() error {
 		return e
 	}
 	fmt.Println("当前版本：" + current)
+	if vers := node.PinnedCoreVersions(runtime.GOARCH); len(vers) > 0 {
+		fmt.Printf("内置已核验摘要版本：%s（默认 %s）\n", strings.Join(vers, " / "), node.DefaultCore)
+	}
 	r, e := node.LatestStable("SagerNet/sing-box")
 	if e != nil {
 		return e

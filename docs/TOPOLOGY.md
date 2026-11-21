@@ -1,14 +1,14 @@
 # 中转、代理链与 WireGuard 落地
 
-第 05 批继续使用独立官方 sing-box，默认核心 1.14.0，1.14.3 单列验证。没有默认安装 Realm、GOST、系统 WireGuard、Docker 或数据库。实现、实际命令及未验证范围见 [BATCH05.md](BATCH05.md)，版本/构建标签见 [CAPABILITIES.md](CAPABILITIES.md)。
+当前源码（`0.5.0`）继续使用独立官方 sing-box，默认核心 1.14.0，1.14.3 单列验证。没有默认安装 Realm、GOST、系统 WireGuard、Docker 或数据库。第 05 批历史实现、实际命令及未验证范围见 [BATCH05.md](BATCH05.md)，版本/构建标签见 [CAPABILITIES.md](CAPABILITIES.md)。
 
 ## 三种入口
 
 | 对象 | 用途 | 出口选择 |
 | --- | --- | --- |
-| 现有代理节点 `Node` | 客户端连接 REALITY、SS2022、HY2 入口，使用原用户/凭据 | 空 `egress_id` 保持原 direct；可显式绑定远程出口或策略 ID |
+| 现有代理节点 `Node` | 客户端连接全部 9 种代理协议入口，使用原用户/凭据 | 空 `egress_id` 保持原 direct；可显式绑定支持承载对应业务的远程出口或策略 ID |
 | `PortForward` | 本地 TCP、UDP 或两者转发到明确的目标地址/端口 | 独立选择 direct、远程出口或策略，不生成代理用户或分享链接 |
-| `Egress` / `EgressPolicy` | 远程 SOCKS5、REALITY、SS2022、HY2、用户态 WireGuard；固定出口或显式主备 | `detour` 是连接远程出口自身时使用的上游；没有失败时的隐式 direct 替代 |
+| `Egress` / `EgressPolicy` | 远程 `socks5`、`http`（HTTP/HTTPS CONNECT）、`reality`、`ss2022`、`ss-aead`、`hysteria2`、`trojan`、`vless-tls`、`vmess-tls`、`anytls`、`tuic`、用户态 `wireguard`；固定出口或显式主备 | `detour` 是连接远程出口自身时使用的上游；没有失败时的隐式 direct 替代 |
 
 对象 ID 为稳定的 16 位小写十六进制字符串；省略新对象 ID 时生成。名称用于显示和已有对象查询，持久引用使用 ID。远程密码/UUID/WireGuard 密钥与本地 `Users` 分开；普通编辑不生成新凭据。最终客户端导出仍只有入口地址及入口用户，不包含内部落地认证材料。
 
@@ -29,6 +29,8 @@ qingnode route set --id NODE_ID --egress direct --preview
 ```bash
 qingnode egress add --name my-socks --protocol socks5 --server 192.0.2.20 --port 1080 --username REMOTE_USER --password REMOTE_PASSWORD --udp --preview
 qingnode egress add --name my-socks --protocol socks5 --server 192.0.2.20 --port 1080 --username REMOTE_USER --password REMOTE_PASSWORD --udp
+qingnode egress add --name corp-http --protocol http --server 192.0.2.21 --port 8443 --tls --sni proxy.example.com --username REMOTE_USER --password REMOTE_PASSWORD --preview
+qingnode egress add --name remote-vless --protocol vless-tls --server 192.0.2.22 --port 443 --uuid UUID --sni edge.example.com --transport ws --path /ws --ws-max-early-data 2048 --multiplex h2mux --preview
 qingnode egress list
 qingnode egress show --id EGRESS_ID
 qingnode egress edit --id FINAL_EGRESS_ID --via UPSTREAM_EGRESS_ID --preview
@@ -36,13 +38,17 @@ qingnode egress edit --id FINAL_EGRESS_ID --via UPSTREAM_EGRESS_ID
 qingnode egress edit --id FINAL_EGRESS_ID --via direct --preview
 ```
 
-密码参数也可能保留在终端历史/进程参数中；需要避免这些暴露时，使用权限 0600 的严格拓扑 JSON 文件导入。查询和错误信息会脱敏，私有 State、备份及导入文件仍必须保管。
+密码参数也可能保留在终端历史/进程参数中；需要避免这些暴露时，使用交互向导隐藏输入或权限 0600 的严格拓扑 JSON 文件导入。查询和错误信息会脱敏，私有 State、备份及导入文件仍必须保管。
 
-SOCKS5 默认只声明 TCP，`--udp` 是用户对远端能力的明确声明，不是探测成功。绑定代理节点时要求 UDP 能力，因为 REALITY 的 TCP 入站也可能承载 UDP 载荷。SOCKS UDP 同时需要 TCP 控制连接与 UDP 数据；HY2/WireGuard 自身的链上连接需要 UDP，不能放在只有 TCP 的上游后面。三个已有远程代理协议默认声明 UDP，但实际远端仍需验证。
+网络承载与协议参数边界：
+- **TCP / UDP 承载检查**：`socks5` 默认只声明 TCP，`--udp` 是用户对远端能力的明确声明；`http`（HTTP/HTTPS `CONNECT` 代理，支持 `--tls`、`--sni`、`--ca` 及可选用户名/密码）**仅支持 TCP**（禁止声明 `--udp`），只能用于纯 TCP `PortForward` 或作为仅需物理 TCP 拨号的下一跳代理出口的上游 `detour`，不能直接作为需要承载 UDP 业务的 `Node`、UDP `PortForward` 或基于物理 UDP 拨号的 `hysteria2`/`tuic`/`wireguard` 上游。其余 9 种远程代理协议及 `wireguard` 默认声明支持隧道内 TCP+UDP 承载，但实际远端可达性仍需验证。
+- **远程协议参数对齐**：
+  - `reality`：`--uuid --sni --public-key --short-id`，可选 10 种 `--fingerprint` 及 `--transport grpc --service-name ...`（`grpc` 模式自动省略 Vision 流控）。
+  - `ss2022`：支持 `2022-blake3-aes-256-gcm`（默认）、`2022-blake3-aes-128-gcm`、`2022-blake3-chacha20-poly1305`，`--password` 为远端实际单密钥或 `server:user` 组合密钥；`ss-aead` 支持 `aes-256-gcm`、`aes-128-gcm`、`chacha20-ietf-poly1305` UTF-8 密码。
+  - `trojan`、`vless-tls`、`vmess-tls`（可选 `--security`）、`anytls`、`tuic`（`--uuid --password`，固定 ALPN `h3` 且关闭 0-RTT）、`hysteria2`（`--password --sni`，可选 `--obfs-password`、`--hop-ports`、`--hop-interval` 及严格 JSON 的客户端性能字段）均要求有效 TLS 验证（可选 `--ca PEM文件`，严禁跳过证书校验）。
+  - **远程传输与多路复用**：`trojan`、`vless-tls`、`vmess-tls` 远程出口支持 `--transport tcp|ws|grpc|httpupgrade|http`（含 WS Early Data）；`ss2022`、`ss-aead`、`trojan`、`vless-tls`、`vmess-tls` 远程出口支持 `--multiplex h2mux|smux|yamux`。
 
-REALITY 出口参数为 `--uuid --sni --public-key --short-id`，可选 `--fingerprint`；SS2022 只支持 `2022-blake3-aes-256-gcm`，`--password` 使用远端实际组合密钥；HY2 使用 `--password --sni` 和可选 `--ca PEM文件`，不能关闭 TLS 验证。远程 HY2 的出站性能选择用严格 JSON 的 `hysteria2.performance`，复用第 03 批客户端字段，拒绝服务端性能字段。URI 或 Hysteria 原生 YAML 不是任意配置导入口。
-
-`detour` 启用时上游会忽略同层其他 Dial 字段。本批只开放明确的上游引用，不叠加接口绑定、源地址、MPTCP 等参数宣称同时生效；没有链式带宽叠加或会话无损迁移承诺。
+`detour` 启用时上游会忽略同层其他 Dial 字段。本功能只开放明确的上游引用，不叠加接口绑定、源地址、MPTCP 等参数宣称同时生效；没有链式带宽叠加或会话无损迁移承诺。
 
 ## 整批预览和一次应用
 
@@ -101,7 +107,7 @@ MTU 省略/0 保留核心默认 1408；keepalive 0 关闭，需要维持 NAT 映
 
 ## 版本、恢复与循环边界
 
-State 因真实拓扑字段升为 schema 4。旧 1/2/3 只读在内存兼容，旧监听、客户端端口、用户和密钥保留，旧 direct 服务配置语义保持。首次有意义写入保留旧代并写新代；旧二进制拒绝 schema 4，不能删未知字段或改版本号伪装降级。v1/v2 快照继续使用显式迁移入口，recover/rollback 保留事务与失败恢复材料。
+基础拓扑模型自第 05 批 `schema 4` 引入；当前源码将扩展远程 `Egress` 协议、传输层与多路复用字段随 **schema 10** 持久化。旧 `schema 1–9` 只读在内存无损兼容（同时严格拒绝在 `<10` JSON 中夹带新增 `Egress` 协议或字段），旧监听、客户端端口、用户和密钥保留，旧 direct 服务配置语义保持。首次有意义写入保留旧代并写新代；旧二进制拒绝新 schema，不能删未知字段或改版本号伪装降级。v1/v2 快照继续使用显式迁移入口，recover/rollback 保留事务与失败恢复材料。
 
 快照外层重复字段（含大小写和 Unicode 折叠别名）直接拒绝，避免后一个 `format` / `state` 掩盖前方未知版本或完整拓扑。此检查只扫描外层，不删除保存的 `server_config` 内部未知或重复字段；旧单个兼容键仍可读，备份 envelope v1/v2 不升版。错误材料保留原件，不能删键或改 schema 数字来绕过拒绝。
 

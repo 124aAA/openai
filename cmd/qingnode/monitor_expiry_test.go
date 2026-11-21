@@ -59,17 +59,17 @@ func TestMonitorMigrationInventoryCannotSilentlyOmitPrivatePolicy(t *testing.T) 
 	if e := a.monitorStore().SaveConfig(cfg); e != nil {
 		t.Fatal(e)
 	}
-	_, external, e := a.migrationInventory(s)
+	roots, external, e := a.migrationInventory(s)
 	if e != nil {
 		t.Fatal(e)
 	}
 	found := false
-	for _, x := range external {
-		if strings.Contains(x, "监控私有计划") {
+	for _, r := range roots {
+		if r.ID == "monitor" && r.Kind == "monitor-state" {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("complete migration silently omitted independent private monitor policy")
+	if !found || len(external) != 0 {
+		t.Fatalf("monitor root not packaged as complete QNBK3 root: roots=%+v external=%+v", roots, external)
 	}
 }

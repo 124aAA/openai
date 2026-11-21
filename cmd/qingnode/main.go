@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -19,7 +20,7 @@ import (
 	"qingnode/internal/ui"
 )
 
-var version = "0.4.0"
+var version = "0.5.0"
 var revision = "source"
 
 const defaultRoot = "/var/lib/qingnode"
@@ -28,9 +29,15 @@ type app struct {
 	store           *node.Store
 	serviceRunner   node.Runner                                // explicit observation fixture; nil uses actual host init
 	installCoreFn   func(string, string, string, string) error // nil uses the official installer
+	selfUpdateFn    func([]string) error                       // nil invokes the verified installer script
+	lookPath        func(string) (string, error)               // nil uses exec.LookPath
 	wizardCollect   func([]string) error                       // bootstrap-only validated fields, without State or credentials
+	readSecretFn    func(string) ([]byte, error)               // nil uses readTerminalPassword on TTY or buffered reader in tests
+	verifyHTTPSFn   func(string) error                         // nil uses verifySubscriptionHTTPS with system trust
 	offline         bool
 	debug           bool
+	stdinFromOS     bool
+	termWidth       int // >0 overrides terminal column detection in tests
 	in              *bufio.Reader
 	menuPreview     bool // show the actual candidate impact only for interactive tasks
 	menuPreviewDone bool
@@ -176,9 +183,10 @@ func run(args []string) (result error) {
 		}
 		backend = node.SystemBackend{Root: *root}
 	}
-	a := app{store: &node.Store{Root: *root, Backend: backend, GID: gid}, offline: *offline, debug: *debug, in: bufio.NewReader(os.Stdin)}
+	a := app{store: &node.Store{Root: *root, Backend: backend, GID: gid}, offline: *offline, debug: *debug, stdinFromOS: true, in: bufio.NewReader(os.Stdin)}
 	a.store.AfterCommit = a.refreshPublished
 	a.store.BeforeCommit = a.revokeRemovedPublishedDevices
+	a.store.BeforeCoreStop = a.flushTrafficBeforeStop
 	if report != nil {
 		report.wrapApplyHook(a.store)
 	}
@@ -219,8 +227,9 @@ result.json缺失或status非completed不能当通过；返回错误仍可能已
  export       导出 uri / qr / base64 / mihomo / provider / sing-box；--endpoint选择入口
  device       list/show/create/apply/remove/disable/tags；明确绑定设备的节点与凭据
  certificate  list/status/import/update/bind/unbind/remove；稳定证书资源，私有输入与影响预览
- monitor      configure/run/status/history/disable/timer/api/traffic；可选有界监控，默认只观察
+ monitor      configure/run/status/history/disable/timer/api/traffic/ledger；可选有界监控，默认只观察
  expiration   list/set/remove/apply；明确代理凭据到期，与下载令牌独立
+ quota        list/set/remove/apply；持久流量账本配额预警与显式停用
  subscription init/configure/publish/status/issue/rotate/revoke/qr/check/serve；可选只读设备订阅
  render       导出服务器配置；包含私钥，仅保存于安全路径
  check        调用锁定的官方核心检查配置
@@ -243,7 +252,7 @@ result.json缺失或status非completed不能当通过；返回错误仍可能已
  service      start/stop/restart/status/enable/disable/logs；附属install/remove/recover须--preview或--yes
  ports        查看监听端口及进程
  reality-targets  筛选并显示延迟最低的 REALITY 目标，默认前三名；不修改节点
- firewall     status / enable / disable / sync（已启用的 UFW）
+ firewall     status / enable / disable / sync（已启用的 UFW、firewalld 或 nftables）
  network      status / plan / apply / restore / bbr（仅现有内核能力）
  recover      恢复中断的配置或卸载事务
  uninstall    --yes 只移除核心；--purge --yes 清除自身数据
@@ -539,6 +548,8 @@ func (a *app) command(args []string) error {
 		e = a.monitor(rest)
 	case "expiration":
 		e = a.expiration(rest)
+	case "quota":
+		e = a.quota(rest)
 	case "subscription":
 		e = a.subscription(rest)
 	case "enable", "disable", "delete":
@@ -589,21 +600,42 @@ func (a *app) exportSelection(cmd string, args []string, exactIDs bool) error {
 	endpoint := f.String("endpoint", "default", "连接端点ID；默认default")
 	format := f.String("format", "uri", "uri/qr/base64/mihomo/provider/sing-box；设备另支持sing-box-outbounds")
 	out := f.String("out", "", "输出文件（拒绝覆盖已有文件）")
-	clientVersion := f.String("client-version", "", "目标客户端版本；新协议单节点及设备导出sing-box须1.14.0/1.14.3，Mihomo须1.19.30")
+	clientVersion := f.String("client-version", "", "目标客户端版本；sing-box 支持 1.14.x，Mihomo 支持 >=1.19.0")
 	allowLossy := f.Bool("allow-lossy", false, "明确允许目标格式缺失设置；会逐项警告")
+	routing := f.String("routing", "", "客户端完整配置分流预设：global、basic、cn-direct 或 global-secure-dns")
+	tun := f.Bool("tun", false, "为客户端完整配置开启可选 TUN 入站模式")
+	enableController := f.Bool("enable-controller", false, "为客户端完整配置生成仅绑定 127.0.0.1 的本地控制端口与随机密钥")
+	controllerPort := f.Int("controller-port", 9090, "客户端本地控制端口（须配合 --enable-controller，默认 9090）")
 	device := f.String("device", "", "多节点设备Profile稳定ID或名称；必须--out")
 	profileFile := f.String("profile-file", "", "只读临时设备输入，version:1且profiles一项")
 	if e := parse(f, args); e != nil {
 		return e
 	}
+	if flagSet(f, "controller-port") && !*enableController {
+		return errors.New("指定 --controller-port 时须同时开启 --enable-controller")
+	}
 	if *device != "" || *profileFile != "" {
 		if cmd != "export" || flagSet(f, "id") || flagSet(f, "user") || flagSet(f, "endpoint") {
 			return errors.New("设备导出不能混用单节点id/user/endpoint或render")
 		}
-		return a.exportDevice(*device, *profileFile, *format, *clientVersion, *out, *allowLossy)
+		return a.exportDevice(*device, *profileFile, *format, *clientVersion, *out, *allowLossy, func(p *node.DeviceProfile) {
+			if flagSet(f, "routing") {
+				p.Routing = *routing
+			}
+			if flagSet(f, "tun") {
+				p.TUN = *tun
+			}
+			if flagSet(f, "enable-controller") {
+				if *enableController {
+					p.Controller = &node.ClientController{Enabled: true, Port: *controllerPort, Secret: node.Token(16)}
+				} else {
+					p.Controller = nil
+				}
+			}
+		})
 	}
-	if cmd == "render" && flagSet(f, "endpoint") {
-		return errors.New("render生成本地服务端配置，不接受客户端--endpoint")
+	if cmd == "render" && (flagSet(f, "endpoint") || flagSet(f, "routing") || flagSet(f, "tun") || flagSet(f, "enable-controller")) {
+		return errors.New("render生成本地服务端配置，不接受客户端导出参数")
 	}
 	return a.inspectState(func(s *node.State) error {
 		if e := s.Validate(); e != nil {
@@ -632,7 +664,11 @@ func (a *app) exportSelection(cmd string, args []string, exactIDs bool) error {
 			if err != nil {
 				return err
 			}
-			result, err := node.ExportWithCapabilities(selected, u, *format, *clientVersion, nil, *allowLossy)
+			opts := node.ClientOptions{Routing: *routing, TUN: *tun}
+			if *enableController {
+				opts.Controller = &node.ClientController{Enabled: true, Port: *controllerPort, Secret: node.Token(16)}
+			}
+			result, err := node.ExportWithClientOptions(selected, u, *format, *clientVersion, nil, *allowLossy, opts)
 			if err != nil {
 				return err
 			}
@@ -649,7 +685,7 @@ func (a *app) exportSelection(cmd string, args []string, exactIDs bool) error {
 }
 func (a *app) core(args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法：core install|update|check [--version 1.14.x] [--sha256 摘要] [--archive 本地归档]")
+		return errors.New("用法：core install|update|check [--version 1.14.x] [--sha256 摘要] [--archive 本地归档] [--github-mirror https://...]")
 	}
 	cmd := args[0]
 	if cmd == "versions" {
@@ -663,8 +699,16 @@ func (a *app) core(args []string) error {
 	sum := f.String("sha256", "", "非默认版本：官方归档 SHA-256")
 	downgrade := f.Bool("allow-downgrade", false, "明确允许降低核心版本")
 	archive := f.String("archive", "", "离线安装官方 tar.gz")
+	mirror := f.String("github-mirror", "", "可选 HTTPS GitHub 下载镜像前缀（仍强制 SHA-256 校验）")
 	if e := parse(f, args[1:]); e != nil {
 		return e
+	}
+	cleanMirror, e := node.ValidateGitHubMirror(*mirror)
+	if e != nil {
+		return e
+	}
+	if *archive != "" && cleanMirror != "" {
+		return errors.New("离线 --archive 与 --github-mirror 不能同时指定")
 	}
 	explicitVersion := false
 	f.Visit(func(x *flag.Flag) {
@@ -692,17 +736,28 @@ func (a *app) core(args []string) error {
 				return fmt.Errorf("当前 %s；官方最新 %s 尚未适配，保持原版本", s.CoreVersion, *v)
 			}
 			if *sum == "" && *v != node.DefaultCore {
-				*sum = r.CoreDigest()
+				if pinned := node.PinnedCoreArchiveSHA256(*v, runtime.GOARCH); pinned != "" {
+					*sum = pinned
+				} else {
+					*sum = r.CoreDigest()
+				}
 			}
 		}
 		if *sum == "" && *v == s.CoreVersion {
 			*sum = s.CoreArchiveSHA256
 		}
+		if *sum == "" {
+			*sum = node.PinnedCoreArchiveSHA256(*v, runtime.GOARCH)
+		}
 		if node.CompareVersion(*v, s.CoreVersion) < 0 && !*downgrade {
 			return errors.New("目标版本低于当前版本；如确需降级，增加 --allow-downgrade")
 		}
 		fmt.Fprintf(os.Stderr, "当前 sing-box %s → 目标 %s；旧核心与配置代会保留。\n", s.CoreVersion, *v)
-		if e := node.InstallCore(a.store.Root, *v, *sum, *archive); e != nil {
+		if a.installCoreFn != nil {
+			if e := a.installCoreFn(a.store.Root, *v, *sum, *archive); e != nil {
+				return e
+			}
+		} else if e := node.InstallCoreWithMirror(a.store.Root, *v, *sum, *archive, cleanMirror); e != nil {
 			return e
 		}
 		if s.CoreVersion != *v {

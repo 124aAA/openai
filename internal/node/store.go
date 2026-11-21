@@ -49,6 +49,18 @@ type Store struct {
 	// Authorization revocations are fail-closed and intentionally not restored
 	// if the following proxy transaction fails or is rolled back.
 	BeforeCommit func(State) error
+	// BeforeCoreStop is an optional best-effort observation hook invoked with the
+	// running State immediately before restarting an active managed core. Failures
+	// or panics never block configuration commit or recovery.
+	BeforeCoreStop func(State)
+}
+
+func (s *Store) safeBeforeCoreStop(running State) {
+	if s == nil || s.BeforeCoreStop == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.BeforeCoreStop(running)
 }
 type journal struct {
 	Previous  string `json:"previous"`
@@ -459,6 +471,9 @@ func (s *Store) Apply(st State) error {
 		e = s.switchTo(g)
 	}
 	if e == nil && impact.NeedsRestart {
+		if wasActive {
+			s.safeBeforeCoreStop(old)
+		}
 		e = s.activate(st)
 	}
 	if e == nil {
@@ -600,16 +615,7 @@ func decodeJournal(b []byte) (journalV2, error) {
 		return journalV2{}, err
 	}
 	decode := func(v any) error {
-		d := json.NewDecoder(bytes.NewReader(b))
-		d.DisallowUnknownFields()
-		if err := d.Decode(v); err != nil {
-			return err
-		}
-		var extra any
-		if err := d.Decode(&extra); err != io.EOF {
-			return errors.New("恢复记录含多余数据")
-		}
-		return nil
+		return decodeStrictJSON(b, v, stateJSONPolicy)
 	}
 	if _, ok := top["transaction_v2"]; ok {
 		var envelope transactionEnvelope

@@ -98,6 +98,30 @@ sing-box 在非 Chrome 路径将一个接收窗口值同时写入初始和最大
 
 HY2 官方 URI 规范明确将带宽和客户端模式留给用户本机选择；其它客户端不保证理解私加 query 参数。本项目不会把完整配置静默压成一个看似等价的分享链接。[固定 URI 规范](https://github.com/HyNetworks/hysteria-website/blob/aa652ff62c9e0c920c43b9da65a8dae51a9d44f1/docs/docs/developers/URI-Scheme.md)。
 
+## HY2 Salamander 混淆与端口跳跃（Port Hopping）
+
+当前 `0.4.0`（`schema 10`）在 HY2 性能策略之外，支持可选的 `salamander` UDP 混淆与客户端/宿主受管端口跳跃，且与 `hy2 plan/apply/revert` 互不覆盖：
+
+```bash
+# 开启 Salamander 混淆与纯客户端声明模式（external，适合云安全组/外部 NAT 已映射端口段）
+qingnode hy2 set --id 节点ID --obfs-password '独立的UTF8混淆密码' \
+  --hop-ports 20000-30000 --hop-interval 30s --hop-mode external --preview
+
+# 开启本机受管 nftables 双栈端口重定向及 ufw/firewalld 端口段同步
+qingnode hy2 set --id 节点ID --hop-ports 20000-30000 --hop-interval 30s --hop-mode nftables --yes
+
+# 单独清除混淆或端口跳跃
+qingnode hy2 set --id 节点ID --clear-obfs --clear-hop --yes
+```
+
+- **Salamander 混淆（`obfs`）**：类型固定为 `salamander`，使用独立于用户认证的 UTF-8 混淆密码（4–512 字节，禁止控制字符；`hy2 show` 与日志经 `Redact` 自动脱敏）。同步生成 `sing-box` 服务端/客户端 `obfs`、`Mihomo` 的 `obfs: salamander` + `obfs-password`，以及 `hysteria2://` URI 的 `obfs=salamander&obfs-password=...`。开启混淆会增加每包 CPU 开销，不等于自动提速。
+- **端口跳跃范围与导出映射（`hop_ports` / `hop_interval`）**：
+  - 范围要求 `1024 <= start < end <= 65535`、跨度不超过 `20001` 个端口，且不得与节点自身主监听端口 `Port` 或本机其它受管 UDP 端口/跳跃段重叠；`hop_interval` 要求 `5s`–`10m` 的整秒时长。
+  - 客户端导出：`sing-box` 生成 `"server_ports": ["20000:30000"]`（自动省略与之冲突的 `"server_port"`）与可选 `"hop_interval"`；`Mihomo` 生成 `"ports": "20000-30000"` 与 `"hop-interval"`（整数秒）；`hysteria2://` URI 编码 `mport=20000-30000`（若同时设置了标准 URI 无法表达的 `hop_interval`，默认拒绝有损 URI 导出，除非显式传入 `--allow-lossy`）。
+- **服务端受管转发与精确清理边界（`hop_mode`）**：
+  - `external`（默认）：仅在客户端导出声明跳跃端口段，不修改宿主内核转发规则（适用于外部路由器或云防火墙已完成端口段映射）。
+  - `nftables`：仅创建和管理带有明确归属标识的独立表 `table inet qingnode_hy2`（`prerouting` 链 IPv4/IPv6 双栈 `udp dport <start>-<end> redirect to :<listen_port>`），并按需同步放行受管 `ufw`（`start:end/udp` 带 `qingnode:` 注释）或 `firewalld`（`port="start-end" protocol="udp"` 受管清单）规则；**绝不清空全局 `iptables`/`nftables`/`ufw`/`firewalld`**，且在候选应用失败自动恢复（`Recover`）、端口修改、节点停用/删除、回滚（`rollback`）和卸载（`uninstall`）时精确撤回。
+
 ## 宿主参数：先看实际值，再单独应用
 
 ```bash

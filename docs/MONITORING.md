@@ -51,7 +51,7 @@ qingnode monitor disable --yes
 
 动作前重新核对策略、节点状态、当前派生配置、核心摘要及官方配置检查，并持久记录尝试；一轮最多一个共享服务动作。使用 `try-restart` 尊重并发人工stop，不回滚配置、不轮换身份、不修改参数。重启会断开共享核心的既有连接。动作后零载荷预算只核对本机状态，完整认证/TCP/UDP恢复仍待下一正常轮验证；“命令执行成功”不等于“链路已恢复”。
 
-通知支持受控HTTPS webhook或Telegram，须在600权限文件的 `notifications` 对象中明确填写 `enabled`、`kind`、`endpoint`或`token/chat_id`；秘密不接命令行。发送只针对状态变化，有限超时/重试及去重；普通输出和历史不记录通知目标、原始响应或秘密。未配置时不发送通知。`monitor disable --yes`停止后续恢复与通知，正在运行的有限检查可结束。
+通知支持受控 HTTPS `webhook`、`telegram`（支持可选整数 `message_thread_id` 发送至群组指定 Topic）、`bark`、`discord`（Discord Webhook）、`feishu`（飞书自定义机器人，支持可选 `secret` HMAC-SHA256 签名校验）与 `dingtalk`（钉钉自定义机器人，支持可选 `secret` URL 查询串 HMAC-SHA256 加签），须在 `0600` 权限文件的 `notifications` 对象中明确填写 `enabled`、`kind` 及对应 `endpoint`、`token`/`chat_id` 或 `secret`（可选 `host_label` 标注主机标识）；秘密绝不接命令行参数。通知正文统一经 `node.Redact` 与内联键值脱敏（绝不含密码、私钥、Token 或通知 URL），包含主机标识、节点/设备显示名与 16 位稳定 ID、具体异常信号及失败原因、恢复尝试结果，以及受管证书剩余 `< 14` 天的临近过期去重提醒（去重键持久化于 `monitor/alerts.json`）。普通输出和历史不记录通知目标、原始响应或秘密。`monitor disable --yes` 停止后续恢复与通知，正在运行的有限检查可结束。
 
 ```bash
 mkdir -m 700 /root/qingnode-monitor-unit
@@ -60,9 +60,9 @@ qingnode monitor timer --manager systemd --out /root/qingnode-monitor-unit
 qingnode monitor timer --manager openrc --out /root/qingnode-monitor-unit
 ```
 
-这只生成材料，不安装或启用任务。systemd输出service/timer，timer约60秒、service每次只做一轮有限检查；审查后显式安装，停止调度用 `systemctl disable --now qingnode-monitor.timer`。OpenRC输出 `qingnode-monitor` 服务脚本，使用独立 `monitor watch` 按保存的计划间隔串行检查，不修改全局cron；审查后以0755安装到 `/etc/init.d/qingnode-monitor`，再显式设置runlevel和启动。停止当前watch用 `rc-service qingnode-monitor stop`，取消已设置的自启项须按实际runlevel移除。两种平台随后均可用 `qingnode monitor disable --yes` 停用计划；只停计划不等于卸下调度。默认生成命令没有 `--apply-expiry`，恢复权限不因此自动启用。
+这只生成材料，不安装或启用任务。systemd输出service/timer，timer约60秒、service每次只做一轮有限检查；审查后显式安装，停止调度用 `systemctl disable --now qingnode-monitor.timer`。OpenRC输出 `qingnode-monitor` 服务脚本，使用独立 `monitor watch` 按保存的计划间隔串行检查，不修改全局cron；审查后以0755安装到 `/etc/init.d/qingnode-monitor`，再显式设置runlevel和启动。停止当前watch用 `rc-service qingnode-monitor stop`，取消已设置的自启项须按实际runlevel移除。两种平台随后均可用 `qingnode monitor disable --yes` 停用计划；只停计划不等于卸下调度。默认生成命令没有 `--apply-expiry` 或 `--apply-quota`，恢复与停用权限不因此自动启用。
 
-## 核心API和流量含义
+## 核心API、持久化流量账本与配额管理
 
 核心API是官方核心的本机观测接口。先创建权限600文件，例如 `/root/core-api.json`：
 
@@ -75,6 +75,7 @@ qingnode monitor api configure --file /root/core-api.json --preview
 qingnode monitor api configure --file /root/core-api.json --yes
 qingnode monitor api status
 qingnode monitor traffic --samples 3 --interval-ms 1000 --out /root/new-traffic.json
+qingnode monitor ledger
 qingnode monitor api disable --preview
 qingnode monitor api disable --yes
 ```
@@ -83,9 +84,23 @@ qingnode monitor api disable --yes
 
 客户端独立实现标准库gRPC-Web有限读取，禁环境代理和跳转，限制时间、帧和字节。固定来源为官方 [1.14.0 / 0b8995879f29a9b98ee027bc17b75e101445b238](https://github.com/SagerNet/sing-box/tree/0b8995879f29a9b98ee027bc17b75e101445b238) 与 [1.14.3 / 7054cac5124465ffdb145870d7c01885566711b1](https://github.com/SagerNet/sing-box/tree/7054cac5124465ffdb145870d7c01885566711b1)。核对了 `option/api.go`、`daemon/started_service.proto`、`service/api/web_bridge.go`等公开契约；未复制或链接GPL上游源码/生成文件，详细方法与出处见源码 `internal/coreapi/README.md`。
 
-全局上传/下载是当前核心生命周期累计值；首样本建立基线，重启另开生命周期，重复不叠加、计数倒退和断连明确标缺口。本命令不保存跨进程账本。连接列表为reset快照及有限最近关闭历史，更新事件没有序号，丢失/重复/断连无法精确重建用户流量。只用本机明确映射的入口及用户标签归属，未知标签记 `unknown`。因此没有用户配额、计费或用量封禁承诺，不生成虚假 `subscription-userinfo`流量头；下载令牌到期也不代表代理凭据到期。
+除单次采样的 `monitor traffic` 外，启用核心 API 与监控时，系统会在 `<root>/monitor/traffic-ledger.json`（权限 `0600` 原子写入）维护跨进程持久化流量采样账本：结合 `coreapi` 当前生命周期计数与受管核心 `<pid>/<started_ms>` 启动纪元，在 `monitor run` / `monitor watch` 每轮检查以及 `Store` / 服务控制重启或停止核心前（通过有界超时的安全刷新钩子，失败绝不阻塞核心停止或故障恢复）记录全局与按节点/凭据归属的增量，避免受控重启将累计流量清零。若遇到核心异常崩溃导致未刷新换纪元或计数器回退，账本会如实标记 `gap_detected: true`，且固定 `billing_suitable: false`（连接列表仍受核心最近关闭历史上限约束，不做运营商级精确计费承诺）。`qingnode monitor ledger` 以只读方式输出当前账本 JSON。
 
-可选 `monitor traffic --warn-bytes N`比较当前核心生命周期的全局双向累计字节，N为0至2^60之间的整数。本地JSON结果为 `below/reached/unknown`（未到/已到/未知），没有数据时保持未知。它只作软提醒，不停用凭据、不执行硬配额、不写订阅计量；周期外部通知当前只针对状态变化，不针对这个用量阈值发送消息。
+可选流量配额支持按节点+用户（及可选设备绑定）配置软告警阈值（`--warn-bytes`）、硬配额上限（`--hard-bytes`）与 UTC 月度重置日（`--reset-day 1..31`，短月自动钳位至月末；`0` 表示全周期累计）：
+
+```bash
+qingnode quota list
+qingnode quota list --json
+qingnode quota set --node NODE_ID --user USER_ID --device DEVICE_ID --warn-bytes 10737418240 --hard-bytes 53687091200 --reset-day 1 --preview
+qingnode quota set --node NODE_ID --user USER_ID --device DEVICE_ID --warn-bytes 10737418240 --hard-bytes 53687091200 --reset-day 1 --yes
+qingnode quota apply --preview
+qingnode quota apply --yes
+qingnode quota remove --id QUOTA_ID --yes
+```
+
+配额停用与下方 `credential_expiry.go` 安全停用机制完全协同：软阈值仅产生去重通知事件；硬配额仅在显式执行 `qingnode quota apply --yes` 或 `qingnode monitor run --apply-quota`（/ `monitor watch --apply-quota`）时才单事务停用超额凭据（设备范围遇多设备共享凭据整批拒绝，节点最后一条凭据保留身份停监听）；任何只读查询（`quota list`、`monitor ledger`、`status`）与默认不带 `--apply-quota` 的 `monitor run` 永不隐式停用凭据。当设备绑定存在已记录的账本用量或有效硬配额时，发布订阅快照会自动同步 `Subscription-Userinfo: upload=<n>; download=<n>[; total=<n>]; expire=<unix>` 响应头；无账本记录且无配额时仍只输出真实到期时间，不伪造虚假流量字段。
+
+可选 `monitor traffic --warn-bytes N` 仍用于单次前台观测当前核心生命周期的全局双向累计字节（本地 JSON 结果为 `below/reached/unknown`），不修改 State 或账本。
 
 ## 代理凭据到期计划
 
@@ -105,13 +120,13 @@ qingnode expiration remove --id PLAN_ID --yes
 
 实际执行把全部到期项建成一个候选，再用一次事务提交；一项被阻止就不部分提交。运行配置变更沿用共享核心重启，因此现有TCP连接可能全部断开；新认证拒绝与旧会话是否断开是两份测试证据。订阅发布失败和代理已提交分开报告，下载已撤销不能证明代理已停。
 
-`monitor run --apply-expiry`显式允许每轮执行已保存计划；默认 `monitor run`不改State，监控总开关关闭时也不执行。保存的上轮结束时间参与倒退时钟保护，已有停用记录及2020年前/无效时钟同样阻止执行；这不是可信时钟服务，错误地跳到未来仍需管理员核对。裸 `expiration apply`没有独立持久观察时钟，不能承诺检测所有历史时钟回退。定时器若要执行到期计划，须用户另行审查service命令加入该参数。
+`monitor run --apply-expiry`（及 `--apply-quota`）显式允许每轮执行已保存的到期或硬配额计划；默认 `monitor run`不改State，监控总开关关闭时也不执行。保存的上轮结束时间参与倒退时钟保护，已有停用记录及2020年前/无效时钟同样阻止执行；这不是可信时钟服务，错误地跳到未来仍需管理员核对。裸 `expiration apply`没有独立持久观察时钟，不能承诺检测所有历史时钟回退。定时器若要执行到期或配额停用计划，须用户另行审查service命令加入对应参数。
 
 ## 存储、迁移和撤回
 
-第08批新增实际 `observability`与`credential_expirations`字段时将State升为schema7，当时旧1–6仅内存迁移；当前第10批为schema9、兼容旧1–8，首次有意义写入保留原代，旧管理器拒绝新格式。监控计划、秘密、状态和历史仍独立位于受管 `monitor/`，私有目录700、文件600，有限记录/字节并原子保存；它们不是节点配置代。关闭监控不删除历史，不改代理运行/自启。
+当前 `v0.5.0` State 为 `schema 10`（承载客户端分流/TUN、多传输/多路复用、HY2 混淆与端口跳跃、原生 `nftables` 防火墙语义及 `traffic_quotas`），兼容旧 `1..9` 只读内存迁移；首次有意义写入保留原代，旧管理器拒绝新格式。监控计划、通知秘密、状态、历史、告警去重记录（`alerts.json`）与持久化流量账本（`traffic-ledger.json`）独立位于受管 `monitor/`，私有目录 `0700`、文件 `0600`，有限记录/字节并原子保存；它们不是节点配置代。关闭监控不删除历史与账本，不改代理运行/自启。
 
-普通配置备份含State的API设置和到期计划，不含独立监控资产。当前完整迁移尚未打包监控目录；发现目录时列为明确缺项，`backup --full`需显式 `--allow-incomplete`才可生成受限包，不宣称恢复了监控政策、通知秘密或历史。跨机重建监控需独立核对；还原过期计划后不会在查询中自行停用。systemd/OpenRC的实际调度及人工停止保护按BATCH10准确回执记录；公共通知服务、公网/手机、长期运行和ARM原生执行仍另验。
+普通配置备份（`QNBK2`）含 State 的 API 设置、到期计划与流量配额定义，不含独立监控目录。`QNBK3` 完整加密迁移（`backup --full`）现已将受管 `monitor/` 纳入第 4 类类型化根 `monitor-state`（校验普通文件、`0600` 权限、非符号链接与大小上限），开启监控后可直接生成 `complete` 完整迁移包，不再降级为 `limited` 或要求 `--allow-incomplete`。在目标机执行 `restore` 时遵循与订阅相同的显式安全原则：默认将包内监控资产安全暂存至 `<root>/monitor-staged`（`0700`）并在摘要中提示，不覆盖目标机现有活跃 `monitor/`；显式传入 `--restore-monitor` 时恢复至 `<root>/monitor`，且绝不自动安装或启用 `systemd` 定时器或 `OpenRC` 监控守护进程。还原已过期或已超额计划后不会在只读查询中自行停用。公共通知服务外网送达、公网/手机、长期运行和 ARM/macOS 原生硬件执行仍须在对应真实环境另验。
 
 ## 可复验入口与宿主门槛
 

@@ -78,18 +78,15 @@ func firewalldWanted(s State) []string {
 		return nil
 	}
 	seen := map[string]bool{}
-	for _, b := range StateBindings(s) {
-		if b.NodeID == "qingnode-api" {
-			continue
-		}
-		ip := net.ParseIP(b.Address)
+	addRule := func(address, network, portSpec string) {
+		ip := net.ParseIP(address)
 		if ip == nil || ip.IsLoopback() {
-			continue
+			return
 		}
 		families := []string{"ipv6"}
 		if ip.To4() != nil {
 			families = []string{"ipv4"}
-		} else if ip.IsUnspecified() && !strings.HasSuffix(b.Network, "6") {
+		} else if ip.IsUnspecified() && !strings.HasSuffix(network, "6") {
 			families = []string{"ipv4", "ipv6"}
 		}
 		for _, family := range families {
@@ -97,9 +94,18 @@ func firewalldWanted(s State) []string {
 			if !ip.IsUnspecified() {
 				rule += ` destination address="` + ip.String() + `"`
 			}
-			rule += ` port port="` + strconv.Itoa(b.Port) + `" protocol="` + bindingTransport(b.Network) + `" accept`
+			rule += ` port port="` + portSpec + `" protocol="` + bindingTransport(network) + `" accept`
 			seen[rule] = true
 		}
+	}
+	for _, b := range StateBindings(s) {
+		if b.NodeID == "qingnode-api" {
+			continue
+		}
+		addRule(b.Address, b.Network, strconv.Itoa(b.Port))
+	}
+	for _, hop := range RequiredHY2Redirects(s) {
+		addRule(hop.Listen, "udp", fmt.Sprintf("%d-%d", hop.PortStart, hop.PortEnd))
 	}
 	var rules []string
 	for r := range seen {
@@ -134,9 +140,7 @@ func (f Firewall) firewalldLoad() (firewalldOwnership, bool, error) {
 	if me != nil || re != nil || !bytes.Equal(manifest, firewalldXML()) {
 		return r, false, errors.New("firewalld项目文件碰撞、缺失或被外部修改；拒绝接管")
 	}
-	d := json.NewDecoder(bytes.NewReader(receipt))
-	d.DisallowUnknownFields()
-	if e := d.Decode(&r); e != nil || r.Version != 1 || len(r.Rules) > 4096 {
+	if e := decodeStrictJSON(receipt, &r, stateJSONPolicy); e != nil || r.Version != 1 || len(r.Rules) > 4096 {
 		return r, false, errors.New("firewalld所有权记录格式无效")
 	}
 	for _, rule := range r.Rules {

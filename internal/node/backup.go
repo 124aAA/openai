@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -137,8 +136,6 @@ func RestorePlainSnapshot(data []byte) (Snapshot, error) {
 func decodeSnapshot(plain []byte, legacy bool) (Snapshot, error) {
 	var snap Snapshot
 	var e error
-	d := json.NewDecoder(bytes.NewReader(plain))
-	d.DisallowUnknownFields()
 	if legacy {
 		snap.Format = 1
 		snap.State, e = DecodeState(plain)
@@ -146,21 +143,12 @@ func decodeSnapshot(plain []byte, legacy bool) (Snapshot, error) {
 			return snap, e
 		}
 		return snap, snap.State.ValidateForRestore()
-	} else {
-		if e = rejectSnapshotEnvelopeDuplicates(plain); e != nil {
-			return snap, e
-		}
-		e = d.Decode(&snap)
-		if e == nil && snap.Format != 2 {
-			e = errors.New("不支持该快照版本")
-		}
 	}
-	if e != nil {
+	if e = decodeStrictJSON(plain, &snap, envelopeJSONPolicy); e != nil {
 		return snap, e
 	}
-	var extra any
-	if d.Decode(&extra) != io.EOF {
-		return snap, errors.New("备份包含多余数据")
+	if snap.Format != 2 {
+		return snap, errors.New("不支持该快照版本")
 	}
 	var raw struct {
 		State json.RawMessage `json:"state"`
@@ -177,39 +165,5 @@ func decodeSnapshot(plain []byte, legacy bool) (Snapshot, error) {
 // Inspect only the envelope. State has its own strict decoder, while the saved
 // server_config is original recovery evidence and must retain its JSON semantics.
 func rejectSnapshotEnvelopeDuplicates(plain []byte) error {
-	d := json.NewDecoder(bytes.NewReader(plain))
-	first, err := d.Token()
-	if err != nil {
-		return err
-	}
-	if first != json.Delim('{') {
-		return errors.New("备份快照须为JSON对象")
-	}
-	seen := map[string]bool{}
-	for d.More() {
-		token, err := d.Token()
-		if err != nil {
-			return err
-		}
-		name, ok := token.(string)
-		if !ok {
-			return errors.New("备份快照字段无效")
-		}
-		key := stateFieldKey(name)
-		if seen[key] {
-			return errors.New("备份快照对象含重复字段")
-		}
-		seen[key] = true
-		var value json.RawMessage
-		if err = d.Decode(&value); err != nil {
-			return err
-		}
-	}
-	if _, err = d.Token(); err != nil {
-		return err
-	}
-	if _, err = d.Token(); err != io.EOF {
-		return errors.New("备份包含多余数据")
-	}
-	return nil
+	return validateStrictJSON(plain, envelopeJSONPolicy)
 }

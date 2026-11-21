@@ -61,6 +61,7 @@ func (a *app) backup(cmd string, args []string) error {
 	quiesce := f.Bool("quiesce", false, "明确允许为一致快照短暂停止本项目代理，完成后恢复原运行状态")
 	limited := f.Bool("allow-incomplete", false, "明确允许带外部/缺失资产清单的受限迁移包；不称完整")
 	restoreSubscriptions := f.Bool("restore-subscriptions", false, "明确恢复包中的订阅下载权限；可能重新允许包中当时有效的令牌")
+	restoreMonitor := f.Bool("restore-monitor", false, "明确恢复包中的监控私有配置、状态与流量账本到受管monitor目录；不自动启用定时器或守护进程")
 	subDir := f.String("subscription-directory", "", "恢复订阅时本机专用发布目录；不沿用归档绝对路径")
 	subGroup := f.Int("subscription-group", -1, "恢复订阅服务在目标机的实际组ID；默认当前进程组")
 	recoverMigration := f.Bool("recover-migration", false, "显式恢复中断的完整迁移资产与原服务状态，需要--yes")
@@ -99,8 +100,8 @@ func (a *app) backup(cmd string, args []string) error {
 	if *plain && cmd != "restore" {
 		return errors.New("--snapshot 仅用于恢复卸载快照")
 	}
-	if cmd == "backup" && *restoreSubscriptions {
-		return errors.New("--restore-subscriptions仅用于恢复")
+	if cmd == "backup" && (*restoreSubscriptions || *restoreMonitor) {
+		return errors.New("--restore-subscriptions与--restore-monitor仅用于恢复")
 	}
 	if *full && *plain {
 		return errors.New("完整迁移包不能作为卸载明文快照")
@@ -125,7 +126,7 @@ func (a *app) backup(cmd string, args []string) error {
 			return err
 		}
 		if node.IsMigrationBackup(b) {
-			return a.restoreFull(b, p, *preview, *quiesce, *limited, *restoreSubscriptions, *subDir, *subGroup, *manual)
+			return a.restoreFull(b, p, *preview, *quiesce, *limited, *restoreSubscriptions, *restoreMonitor, *subDir, *subGroup, *manual)
 		}
 		if *full {
 			return errors.New("--full恢复要求QNBK3迁移包；QNBK1/2请使用普通恢复")
@@ -251,10 +252,17 @@ func (a *app) migrationInventory(st node.State) ([]node.MigrationRoot, []string,
 		return nil, nil, err
 	}
 	external = append(external, deploymentGaps...)
-	// Independent notification secrets and recovery policy are not part of the
-	// v1 QNBK3 typed roots. Never label a package complete while omitting them.
-	if _, err := os.Lstat(filepath.Join(a.store.Root, "monitor")); err == nil {
-		external = append(external, "监控私有计划与通知授权未打包：在目标机重新审查configure和timer；历史为本机观测，不自动移用恢复策略")
+	monDir := filepath.Join(a.store.Root, "monitor")
+	if _, err := os.Lstat(monDir); err == nil {
+		marker, mErr := os.ReadFile(filepath.Join(monDir, ".qingnode-monitor"))
+		if mErr != nil || string(marker) != "qingnode-monitor-v1\n" {
+			return nil, nil, errors.New("监控目录缺少有效自有标记，未创建完整迁移包")
+		}
+		owner, oErr := migrationSourceOwner(monDir)
+		if oErr != nil {
+			return nil, nil, oErr
+		}
+		roots = append(roots, node.MigrationRoot{ID: "monitor", Kind: "monitor-state", Source: monDir, GroupID: -1, OwnerID: owner})
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, err
 	}
@@ -361,6 +369,7 @@ func (a *app) withStoppedMigration(st node.State, allow bool, fn func() error) (
 	}()
 	if wasActive {
 		a.message("INFO", "为一致资产快照短暂停止本项目代理；完成后恢复原运行状态，自启状态不变")
+		a.flushTrafficBeforeStop(st)
 		if err = a.store.Backend.Stop(); err != nil {
 			return err
 		}
@@ -401,7 +410,20 @@ func (a *app) captureFull(st node.State, snap node.Snapshot, allowStop, allowLim
 		}
 		return m, e
 	}
+	hasMonitor := false
+	for _, r := range roots {
+		if r.ID == "monitor" {
+			hasMonitor = true
+		}
+	}
 	e = a.withStoppedMigration(st, allowStop, func() error {
+		if hasMonitor {
+			unlockMon, lockErr := a.monitorStore().AcquireAllLocks()
+			if lockErr != nil {
+				return lockErr
+			}
+			defer unlockMon()
+		}
 		var err error
 		m, err = node.CaptureMigration(snap, roots, external, true)
 		if err == nil && m.Mode == "limited" && !allowLimited {
@@ -567,7 +589,7 @@ func (a *app) migrationACMEOwner() (int, error) {
 	return uid, nil
 }
 
-func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restoreSubscriptions bool, subDirectory string, subGroup int, manual bool) error {
+func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restoreSubscriptions, restoreMonitor bool, subDirectory string, subGroup int, manual bool) error {
 	m, e := node.RestoreMigration(b, p)
 	if e != nil {
 		return e
@@ -596,6 +618,7 @@ func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restore
 		}
 		targets := node.MigrationTargets{}
 		hasSubscriptions := false
+		hasMonitor := false
 		for _, r := range m.Roots {
 			switch r.ID {
 			case "acme":
@@ -606,6 +629,13 @@ func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restore
 				targets[r.ID] = node.MigrationTarget{Path: filepath.Join(a.store.Root, "acme"), GroupID: a.store.GID, OwnerID: uid}
 			case "publisher":
 				targets[r.ID] = node.MigrationTarget{Path: filepath.Join(a.store.Root, publisherConfigName), GroupID: -1, OwnerID: os.Geteuid()}
+			case "monitor":
+				hasMonitor = true
+				monTarget := filepath.Join(a.store.Root, "monitor-staged")
+				if restoreMonitor {
+					monTarget = filepath.Join(a.store.Root, "monitor")
+				}
+				targets[r.ID] = node.MigrationTarget{Path: monTarget, GroupID: -1, OwnerID: os.Geteuid()}
 			case "subscription":
 				hasSubscriptions = true
 				if subDirectory == "" {
@@ -640,6 +670,13 @@ func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restore
 			fmt.Printf("节点 %d；本机服务管理器按当前管理器定义；核心版本 %s 必须已从可信发行安装并通过摘要核验。\n", len(m.Snapshot.State.Nodes), m.Snapshot.State.CoreVersion)
 			if hasSubscriptions {
 				fmt.Println("含订阅权限：实际恢复必须--restore-subscriptions；可能重新授权包中当时有效的下载令牌，原始链接不在本包中。")
+			}
+			if hasMonitor {
+				if restoreMonitor {
+					fmt.Println("含监控资产：已指定--restore-monitor，将恢复私有监控配置、状态与流量账本至受管monitor目录；绝不自动启用systemd定时器或OpenRC守护进程。")
+				} else {
+					fmt.Printf("含监控资产：默认安全暂存至 %s 供审查，不覆盖目标机活跃monitor策略；如需直接恢复监控配置与账本请加--restore-monitor，且不会自动启用定时器或守护进程。\n", filepath.Join(a.store.Root, "monitor-staged"))
+				}
 			}
 			fmt.Println("提交前加密保存原资产；运行服务需--quiesce明确短停；跨主机DNS/公网地址切换由用户分端完成。保留包中监听/连接端点，需改地址请先在离线目标预检后使用现有批量编辑。")
 			return nil
@@ -710,6 +747,13 @@ func (a *app) restoreFull(b []byte, p string, preview, quiesce, limited, restore
 				err = errors.Join(err, a.store.Backend.Stop())
 			}
 			if err == nil {
+				if hasMonitor {
+					if restoreMonitor {
+						a.message("INFO", "已恢复监控配置、状态与流量账本至 "+filepath.Join(a.store.Root, "monitor")+"；未自动启用systemd定时器或OpenRC监控守护进程")
+					} else {
+						a.message("INFO", "包内监控配置与流量账本已安全暂存至 "+filepath.Join(a.store.Root, "monitor-staged")+"（权限0700）；如需直接恢复至monitor目录可使用 --restore-monitor，定时器/守护进程均不自动启用")
+					}
+				}
 				a.message("SUCCESS", "完整迁移已提交；证书资产与用户身份保留，公网DNS/端点切换尚需外部验证")
 			}
 			return err

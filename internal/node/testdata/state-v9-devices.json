@@ -1,0 +1,41 @@
+{
+  "schema": 9,
+  "core_version": "1.14.0",
+  "firewall": "firewalld",
+  "nodes": [
+    {
+      "id": "1111111111111111",
+      "name": "v9-ss2022",
+      "protocol": "ss2022",
+      "host": "entry.example.test",
+      "listen": "127.0.0.1",
+      "port": 24443,
+      "enabled": true,
+      "users": [
+        {
+          "id": "2222222222222222",
+          "name": "alice",
+          "password": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        }
+      ],
+      "shadowsocks": {
+        "method": "2022-blake3-aes-256-gcm",
+        "server_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      }
+    }
+  ],
+  "devices": [
+    {
+      "id": "5555555555555555",
+      "name": "legacy-phone",
+      "bindings": [
+        {
+          "node_id": "1111111111111111",
+          "user_id": "2222222222222222"
+        }
+      ],
+      "strategy": "manual",
+      "routing": "basic"
+    }
+  ]
+}

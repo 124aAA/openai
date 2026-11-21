@@ -155,9 +155,218 @@ func TestProtocolExpansionPreservesLegacyHY2CanonicalBytes(t *testing.T) {
 	if err != nil || string(p.Outbound) != legacy {
 		t.Fatalf("legacy canonical bytes changed: %v, %s", err, p.Outbound)
 	}
-	for _, key := range []string{"idle_session", "min_idle_session", "congestion_control", "udp_relay_mode", "zero_rtt_handshake", "heartbeat", "alpn"} {
+	for _, key := range []string{"idle_session", "min_idle_session", "congestion_control", "udp_relay_mode", "zero_rtt_handshake", "heartbeat", "alpn", "security", "alter_id", "global_padding", "authenticated_length", "packet_encoding", "transport"} {
 		if strings.Contains(string(p.Outbound), key) {
 			t.Fatal("new omitted field changed legacy canonical form", key)
 		}
+	}
+}
+
+func v040Outbound(kind, transportKind string) map[string]any {
+	const testUUID = "5d40abb5-41bc-4f04-95ed-6f1e5b80a25f"
+	tls := map[string]any{"enabled": true, "server_name": "fixture.example"}
+	var o map[string]any
+	switch kind {
+	case "vless-tls":
+		o = map[string]any{
+			"type":            "vless",
+			"tag":             "proxy",
+			"server":          "127.0.0.1",
+			"server_port":     1443,
+			"uuid":            testUUID,
+			"packet_encoding": "xudp",
+			"tls":             tls,
+		}
+	case "vmess-tls":
+		o = map[string]any{
+			"type":                 "vmess",
+			"tag":                  "proxy",
+			"server":               "127.0.0.1",
+			"server_port":          1443,
+			"uuid":                 testUUID,
+			"security":             "auto",
+			"alter_id":             0,
+			"global_padding":       true,
+			"authenticated_length": true,
+			"packet_encoding":      "xudp",
+			"tls":                  tls,
+		}
+	case "trojan":
+		o = expansionOutbound("trojan")
+		tls = o["tls"].(map[string]any)
+	}
+	switch transportKind {
+	case "ws":
+		tls["alpn"] = []string{"http/1.1"}
+		o["transport"] = map[string]any{"type": "ws", "path": "/ws", "headers": map[string]any{"Host": "cdn.fixture.example"}}
+	case "grpc":
+		tls["alpn"] = []string{"h2"}
+		o["transport"] = map[string]any{"type": "grpc", "service_name": "grpc_svc.1"}
+	case "httpupgrade":
+		tls["alpn"] = []string{"http/1.1"}
+		o["transport"] = map[string]any{"type": "httpupgrade", "path": "/upgrade", "host": "cdn.fixture.example"}
+	}
+	return o
+}
+
+func TestProtocolV040TransportAndTLSProfiles(t *testing.T) {
+	for _, version := range []string{"1.14.0", "1.14.3"} {
+		for _, kind := range []string{"vless-tls", "vmess-tls", "trojan"} {
+			for _, tr := range []string{"tcp", "ws", "grpc", "httpupgrade"} {
+				t.Run(version+"/"+kind+"/"+tr, func(t *testing.T) {
+					o := v040Outbound(kind, tr)
+					p, err := NewProfile("stable-id", version, graphTestRaw(t, o))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if kind == "vmess-tls" && !bytes.Contains(p.Outbound, []byte(`"alter_id":0`)) {
+						t.Fatal("explicit zero alter_id was omitted")
+					}
+					if _, err := sandboxConfig(p, 2080, "local", "local-only-password"); err != nil {
+						t.Fatal(err)
+					}
+					goOut := v040Outbound(kind, tr)
+					goOut["tag"], goOut["detour"] = "remote", "first"
+					first := graphTestSOCKS("first", "")
+					first["network"] = "tcp"
+					gp, err := NewGraphProfile("id", version, "remote", []json.RawMessage{graphTestRaw(t, first), graphTestRaw(t, goOut)}, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !gp.SupportsNetwork("tcp") || !gp.SupportsNetwork("udp") {
+						t.Fatalf("%s/%s did not report TCP+UDP over TCP SOCKS detour", kind, tr)
+					}
+				})
+			}
+		}
+	}
+
+	var parsedVLESSTLS outbound
+	_ = json.Unmarshal(graphTestRaw(t, v040Outbound("vless-tls", "ws")), &parsedVLESSTLS)
+	if probeCoreKind(parsedVLESSTLS) != "vless-tls" || checkProbeCoreCapabilities("1.14.3", nil, []string{probeCoreKind(parsedVLESSTLS), "vmess"}) != nil {
+		t.Fatal("standard TLS VLESS/VMess unexpectedly required with_utls")
+	}
+
+	rejectCases := map[string]struct {
+		base   func() map[string]any
+		mutate func(map[string]any)
+	}{
+		"vless-tls vision flow without reality": {
+			func() map[string]any { return v040Outbound("vless-tls", "tcp") },
+			func(o map[string]any) { o["flow"] = "xtls-rprx-vision" },
+		},
+		"vless-tls zero uuid": {
+			func() map[string]any { return v040Outbound("vless-tls", "tcp") },
+			func(o map[string]any) { o["uuid"] = "00000000-0000-0000-0000-000000000000" },
+		},
+		"vless-tls utls": {
+			func() map[string]any { return v040Outbound("vless-tls", "tcp") },
+			func(o map[string]any) {
+				o["tls"].(map[string]any)["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
+			},
+		},
+		"vless-tls unknown packet_encoding": {
+			func() map[string]any { return v040Outbound("vless-tls", "tcp") },
+			func(o map[string]any) { o["packet_encoding"] = "packetaddr-unknown" },
+		},
+		"reality with transport": {
+			func() map[string]any {
+				return map[string]any{
+					"type": "vless", "tag": "proxy", "server": "127.0.0.1", "server_port": 1443,
+					"uuid": "5d40abb5-41bc-4f04-95ed-6f1e5b80a25f", "flow": "xtls-rprx-vision",
+					"tls": map[string]any{
+						"enabled": true, "server_name": "fixture.example",
+						"utls":    map[string]any{"enabled": true, "fingerprint": "chrome"},
+						"reality": map[string]any{"enabled": true, "public_key": "pub", "short_id": "0102"},
+					},
+				}
+			},
+			func(o map[string]any) { o["transport"] = map[string]any{"type": "ws", "path": "/ws"} },
+		},
+		"vmess non-zero alter_id": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { o["alter_id"] = 1 },
+		},
+		"vmess security none": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { o["security"] = "none" },
+		},
+		"vmess security zero": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { o["security"] = "zero" },
+		},
+		"vmess global_padding false": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { o["global_padding"] = false },
+		},
+		"vmess authenticated_length false": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { o["authenticated_length"] = false },
+		},
+		"vmess without tls": {
+			func() map[string]any { return v040Outbound("vmess-tls", "tcp") },
+			func(o map[string]any) { delete(o, "tls") },
+		},
+		"trojan with vmess alter_id": {
+			func() map[string]any { return v040Outbound("trojan", "tcp") },
+			func(o map[string]any) { o["alter_id"] = 0 },
+		},
+		"trojan tcp with http/1.1 alpn": {
+			func() map[string]any { return v040Outbound("trojan", "tcp") },
+			func(o map[string]any) { o["tls"].(map[string]any)["alpn"] = []string{"http/1.1"} },
+		},
+		"ws with h2 alpn": {
+			func() map[string]any { return v040Outbound("vless-tls", "ws") },
+			func(o map[string]any) { o["tls"].(map[string]any)["alpn"] = []string{"h2"} },
+		},
+		"grpc with http/1.1 alpn": {
+			func() map[string]any { return v040Outbound("vmess-tls", "grpc") },
+			func(o map[string]any) { o["tls"].(map[string]any)["alpn"] = []string{"http/1.1"} },
+		},
+		"ws lowercase host header key": {
+			func() map[string]any { return v040Outbound("trojan", "ws") },
+			func(o map[string]any) {
+				o["transport"].(map[string]any)["headers"] = map[string]any{"host": "cdn.fixture.example"}
+			},
+		},
+		"ws extra header": {
+			func() map[string]any { return v040Outbound("trojan", "ws") },
+			func(o map[string]any) {
+				o["transport"].(map[string]any)["headers"] = map[string]any{"Host": "cdn.fixture.example", "X-Forwarded-For": "1.2.3.4"}
+			},
+		},
+		"ws query in path": {
+			func() map[string]any { return v040Outbound("trojan", "ws") },
+			func(o map[string]any) { o["transport"].(map[string]any)["path"] = "/ws?ed=2048" },
+		},
+		"httpupgrade empty host": {
+			func() map[string]any { return v040Outbound("vless-tls", "httpupgrade") },
+			func(o map[string]any) { o["transport"].(map[string]any)["host"] = "" },
+		},
+		"grpc invalid service_name": {
+			func() map[string]any { return v040Outbound("vmess-tls", "grpc") },
+			func(o map[string]any) { o["transport"].(map[string]any)["service_name"] = "/invalid" },
+		},
+		"anytls with ws transport": {
+			func() map[string]any { return expansionOutbound("anytls") },
+			func(o map[string]any) { o["transport"] = map[string]any{"type": "ws", "path": "/ws"} },
+		},
+		"transport null": {
+			func() map[string]any { return v040Outbound("trojan", "tcp") },
+			func(o map[string]any) { o["transport"] = nil },
+		},
+	}
+	for name, tc := range rejectCases {
+		t.Run(name, func(t *testing.T) {
+			o := tc.base()
+			tc.mutate(o)
+			if _, err := NewProfile("id", "1.14.3", graphTestRaw(t, o)); err == nil {
+				t.Fatal("unsafe portable profile accepted")
+			}
+			o["tag"] = "remote"
+			if _, err := NewGraphProfile("id", "1.14.3", "remote", []json.RawMessage{graphTestRaw(t, o)}, nil); err == nil {
+				t.Fatal("unsafe graph profile accepted")
+			}
+		})
 	}
 }

@@ -20,20 +20,35 @@ type DeviceBinding struct {
 	EndpointID string `json:"endpoint_id,omitempty"`
 }
 
+type ClientController struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Port    int    `json:"port,omitempty"`
+	Secret  string `json:"secret,omitempty"`
+}
+
+type ClientOptions struct {
+	Routing    string            `json:"routing,omitempty"`
+	TUN        bool              `json:"tun,omitempty"`
+	Controller *ClientController `json:"controller,omitempty"`
+}
+
 type DeviceProfile struct {
-	SubscriptionFormats []string        `json:"subscription_formats,omitempty"`
-	ID                  string          `json:"id"`
-	Name                string          `json:"name"`
-	Disabled            bool            `json:"disabled,omitempty"`
-	Bindings            []DeviceBinding `json:"bindings"`
-	NodeTags            []string        `json:"node_tags,omitempty"`
-	Strategy            string          `json:"strategy,omitempty"`
-	AllowDegradedAuto   bool            `json:"allow_degraded_auto,omitempty"`
-	Routing             string          `json:"routing,omitempty"`
-	TestURL             string          `json:"test_url,omitempty"`
-	IntervalSeconds     int             `json:"interval_seconds,omitempty"`
-	ToleranceMS         int             `json:"tolerance_ms,omitempty"`
-	TimeoutMS           int             `json:"timeout_ms,omitempty"`
+	SubscriptionFormats       []string          `json:"subscription_formats,omitempty"`
+	DefaultSubscriptionFormat string            `json:"default_subscription_format,omitempty"`
+	ID                        string            `json:"id"`
+	Name                      string            `json:"name"`
+	Disabled                  bool              `json:"disabled,omitempty"`
+	Bindings                  []DeviceBinding   `json:"bindings"`
+	NodeTags                  []string          `json:"node_tags,omitempty"`
+	Strategy                  string            `json:"strategy,omitempty"`
+	AllowDegradedAuto         bool              `json:"allow_degraded_auto,omitempty"`
+	Routing                   string            `json:"routing,omitempty"`
+	TUN                       bool              `json:"tun,omitempty"`
+	Controller                *ClientController `json:"controller,omitempty"`
+	TestURL                   string            `json:"test_url,omitempty"`
+	IntervalSeconds           int               `json:"interval_seconds,omitempty"`
+	ToleranceMS               int               `json:"tolerance_ms,omitempty"`
+	TimeoutMS                 int               `json:"timeout_ms,omitempty"`
 }
 
 func deviceStrategy(p DeviceProfile) string {
@@ -48,6 +63,41 @@ func deviceRouting(p DeviceProfile) string {
 		return "global"
 	}
 	return p.Routing
+}
+
+func clientRouting(routing string) string {
+	if routing == "" {
+		return "global"
+	}
+	return routing
+}
+
+func ValidateClientController(c *ClientController) error {
+	if c == nil {
+		return nil
+	}
+	if !c.Enabled {
+		if c.Port != 0 || c.Secret != "" {
+			return errors.New("未启用客户端本地控制端口时请清除端口与密钥")
+		}
+		return nil
+	}
+	if c.Port < 0 || c.Port > 65535 || c.Port == 2080 || c.Port == 7890 {
+		return errors.New("客户端本地控制端口须为 1–65535（0 默认 9090），且不能与本地代理端口 2080/7890 冲突")
+	}
+	if safeTLSCredential(User{Password: c.Secret}) != nil {
+		return errors.New("客户端本地控制密钥须为 16–512 字节的有效 UTF-8，且不含控制字符")
+	}
+	return nil
+}
+
+func ValidateClientOptions(opts ClientOptions) error {
+	switch clientRouting(opts.Routing) {
+	case "global", "basic", "cn-direct", "global-secure-dns":
+	default:
+		return errors.New("客户端分流预设仅支持 global、basic、cn-direct 或 global-secure-dns")
+	}
+	return ValidateClientController(opts.Controller)
 }
 
 func deviceEndpoint(id string) string {
@@ -94,6 +144,16 @@ func ValidateDeviceProfile(st State, p DeviceProfile) error {
 		}
 		formats[format] = true
 	}
+	if p.DefaultSubscriptionFormat != "" {
+		switch p.DefaultSubscriptionFormat {
+		case "uri", "base64", "sing-box", "mihomo", "provider":
+		default:
+			return errors.New("设备默认订阅格式不支持")
+		}
+		if len(formats) > 0 && !formats[p.DefaultSubscriptionFormat] {
+			return errors.New("设备默认订阅格式必须包含在 subscription_formats 启用列表中")
+		}
+	}
 	if !idRE.MatchString(p.ID) || !cleanName(p.Name) {
 		return errors.New("设备 ID 须为 16 位小写十六进制，名称须为 1–160 字节且不含控制字符")
 	}
@@ -103,10 +163,8 @@ func ValidateDeviceProfile(st State, p DeviceProfile) error {
 	if err := ValidateNodeTags(p.NodeTags); err != nil {
 		return err
 	}
-	switch deviceRouting(p) {
-	case "global", "basic":
-	default:
-		return errors.New("设备分流只支持 global 或 basic")
+	if err := ValidateClientOptions(ClientOptions{Routing: p.Routing, TUN: p.TUN, Controller: p.Controller}); err != nil {
+		return err
 	}
 	switch deviceStrategy(p) {
 	case "manual":

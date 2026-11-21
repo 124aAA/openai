@@ -2,6 +2,9 @@ package node
 
 import (
 	"errors"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -110,7 +113,39 @@ func tuicInbound(n Node, root string) M {
 	return out
 }
 
-func tuicURI(Node, User) string { return "" }
+func TUICClientURIUnsupported(p *TUICOptions) bool {
+	return p != nil && p.ClientHeartbeat != ""
+}
+
+func tuicURI(n Node, u User) string {
+	if n.Certificate == nil {
+		return ""
+	}
+	cc := "cubic"
+	relay := "native"
+	if n.TUIC != nil {
+		if n.TUIC.ClientCongestionControl != "" {
+			cc = n.TUIC.ClientCongestionControl
+		}
+		if n.TUIC.UDPRelayMode != "" {
+			relay = n.TUIC.UDPRelayMode
+		}
+	}
+	q := url.Values{
+		"sni":                {n.Certificate.ServerName},
+		"alpn":               {"h3"},
+		"congestion_control": {cc},
+		"udp_relay_mode":     {relay},
+	}
+	x := url.URL{
+		Scheme:   "tuic",
+		User:     url.UserPassword(u.UUID, u.Password),
+		Host:     net.JoinHostPort(n.Host, strconv.Itoa(EffectiveConnectPort(n))),
+		RawQuery: q.Encode(),
+		Fragment: n.Name + " / " + u.Name,
+	}
+	return x.String()
+}
 
 func tuicOutbound(n Node, u User) M {
 	tls := tlsOutbound(n)

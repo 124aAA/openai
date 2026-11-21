@@ -65,3 +65,23 @@ func TestPrivateOutputNewFileAndUnsafeParent(t *testing.T) {
 		t.Fatal("untrusted writable output parent accepted")
 	}
 }
+
+func TestParsePrivateOutputUnmappedOverflowUID(t *testing.T) {
+	if _, ok := parsePrivateOutputUnmappedOverflowUID("65534\n", "         0          0 4294967295\n"); ok {
+		t.Fatal("init_user_ns must never treat nobody/overflowuid as root ancestor")
+	}
+	if _, ok := parsePrivateOutputUnmappedOverflowUID("65534\n", "         0     100000      65536\n"); ok {
+		t.Fatal("root-mapped userns must require uid 0")
+	}
+	if _, ok := parsePrivateOutputUnmappedOverflowUID("65534\n", "      1000     100000      65536\n"); ok {
+		t.Fatal("userns mapping overflowuid must reject overflowuid")
+	}
+	if _, ok := parsePrivateOutputUnmappedOverflowUID("65534\n", "malformed"); ok {
+		t.Fatal("malformed uid_map must fail closed")
+	}
+	uid, ok := parsePrivateOutputUnmappedOverflowUID("65534\n", "      1000       1000          1\n")
+	if !ok || uid != 65534 {
+		t.Fatalf("got (%d, %v), want (65534, true)", uid, ok)
+	}
+}
+

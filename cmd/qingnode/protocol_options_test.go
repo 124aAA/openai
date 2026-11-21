@@ -98,9 +98,8 @@ func TestProtocolsListSeparatesClientExportAndServerEgress(t *testing.T) {
 	if result.Version != 1 || result.CoreBinaryVerified || len(result.Protocols) != len(node.Protocols()) {
 		t.Fatalf("unexpected CLI capability response: %s", output)
 	}
-	remote := map[string]bool{"reality": true, "ss2022": true, "hysteria2": true}
 	for _, capability := range result.Protocols {
-		if !capability.Server || !capability.Outbound || !capability.ClientOutbound || capability.ServerEgress != remote[capability.Protocol] {
+		if !capability.Server || !capability.Outbound || !capability.ClientOutbound || !capability.ServerEgress {
 			t.Fatalf("CLI conflated client export with server Egress: %+v", capability)
 		}
 	}

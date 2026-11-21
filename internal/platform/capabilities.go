@@ -190,7 +190,7 @@ func ProbeHost(o HostProbeOptions) HostCapabilities {
 	switch r.Distro {
 	case "debian", "ubuntu":
 		r.PackageManager = "apt-get"
-	case "rocky":
+	case "rocky", "almalinux", "ol", "centos":
 		r.PackageManager = "dnf"
 	case "alpine":
 		r.PackageManager = "apk"
@@ -200,6 +200,9 @@ func ProbeHost(o HostProbeOptions) HostCapabilities {
 	}
 	if plan, e := DependenciesFor(r.Distro, r.DistroVersion, r.GOARCH); e == nil {
 		r.InstallTarget = plan.Target
+		if plan.SupportTier == "compatible-family" {
+			r.Notes = append(r.Notes, "当前发行版属于同体系兼容支持（compatible-family），非CI固定镜像实测基线。")
+		}
 	} else {
 		r.InstallTarget = "unsupported: " + e.Error()
 	}

@@ -479,3 +479,167 @@ func TestOfficialCoreProbeSandboxCancellationCrashAndConcurrentCleanup(t *testin
 		t.Fatalf("probe left private resources: %v", entries)
 	}
 }
+
+func TestAllNineProtocolsAndTransportsProbeProfileAndLoopback(t *testing.T) {
+	cert, key := makeCert(t)
+	pair, e := tls.X509KeyPair([]byte(cert), []byte(key))
+	if e != nil {
+		t.Fatal(e)
+	}
+	handshake := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("reality handshake"))
+	}))
+	handshake.EnableHTTP2 = true
+	handshake.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS13}
+	handshake.StartTLS()
+	defer handshake.Close()
+
+	reality, e := NewReality("localhost", handshake.Listener.Addr().String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	makeTLS := func() *Certificate {
+		return &Certificate{Mode: "pem", ServerName: "localhost", CertPEM: cert, KeyPEM: key}
+	}
+
+	usedPorts := map[int]bool{}
+	allocPort := func() int {
+		for {
+			p := freePort(t)
+			if !usedPorts[p] {
+				usedPorts[p] = true
+				return p
+			}
+		}
+	}
+	ss2022 := ssFixture()
+	ss2022.ID, ss2022.Name, ss2022.Host, ss2022.Listen, ss2022.Port = Token(8), "p-ss2022", "127.0.0.1", "127.0.0.1", allocPort()
+	s := NewState()
+	baseNodes := []Node{
+		{ID: Token(8), Name: "p-reality", Protocol: "reality", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "reality")}, Reality: reality},
+		ss2022,
+		{ID: Token(8), Name: "p-hysteria2", Protocol: "hysteria2", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "hysteria2")}, Certificate: makeTLS()},
+		{ID: Token(8), Name: "p-anytls", Protocol: "anytls", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "anytls")}, Certificate: makeTLS()},
+		{ID: Token(8), Name: "p-trojan", Protocol: "trojan", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "trojan")}, Certificate: makeTLS()},
+		{ID: Token(8), Name: "p-ss-aead", Protocol: "ss-aead", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "ss-aead")}, Shadowsocks: &Shadowsocks{Method: "aes-256-gcm"}},
+		{ID: Token(8), Name: "p-tuic", Protocol: "tuic", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "tuic")}, Certificate: makeTLS()},
+		{ID: Token(8), Name: "p-vless-tls", Protocol: "vless-tls", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "vless-tls")}, Certificate: makeTLS()},
+		{ID: Token(8), Name: "p-vmess-tls", Protocol: "vmess-tls", Host: "127.0.0.1", Listen: "127.0.0.1", Port: allocPort(), Enabled: true, Users: []User{NewUser("u", "vmess-tls")}, Certificate: makeTLS()},
+	}
+	for _, proto := range []string{"vless-tls", "vmess-tls", "trojan"} {
+		for _, tr := range []*TransportOptions{
+			{Type: "ws", Path: "/ws", Host: "localhost"},
+			{Type: "grpc", ServiceName: "grpc"},
+			{Type: "httpupgrade", Path: "/upgrade", Host: "localhost"},
+		} {
+			trCopy := *tr
+			baseNodes = append(baseNodes, Node{
+				ID:          Token(8),
+				Name:        "p-" + proto + "-" + tr.Type,
+				Protocol:    proto,
+				Host:        "127.0.0.1",
+				Listen:      "127.0.0.1",
+				Port:        allocPort(),
+				Enabled:     true,
+				Users:       []User{NewUser("u", proto)},
+				Certificate: makeTLS(),
+				Transport:   &trCopy,
+			})
+		}
+	}
+	s.Nodes = baseNodes
+	if err := s.Validate(); err != nil {
+		t.Fatalf("9-protocol + transport state validation failed: %v", err)
+	}
+
+	profiles := make(map[string]probe.Profile, len(s.Nodes))
+	for _, n := range s.Nodes {
+		t.Run("profile/"+n.Name, func(t *testing.T) {
+			out := Outbound(n, n.Users[0])
+			if n.Certificate != nil {
+				out["tls"].(M)["certificate"] = []string{cert}
+			}
+			encoded, err := json.Marshal(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := probe.NewProfile(n.ID, s.CoreVersion, encoded)
+			if err != nil {
+				t.Fatalf("NewProfile(%s) failed: %v\noutbound=%s", n.Name, err, encoded)
+			}
+			if _, err := probe.SandboxConfig(p, 12080); err != nil {
+				t.Fatalf("SandboxConfig(%s) failed: %v", n.Name, err)
+			}
+			profiles[n.ID] = p
+		})
+	}
+
+	bin := os.Getenv("SING_BOX_BIN")
+	if bin == "" {
+		return
+	}
+
+	originRequests := &atomic.Int32{}
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
+		_, _ = w.Write([]byte("loopback-v040-ok"))
+	}))
+	origin.TLS = &tls.Config{Certificates: []tls.Certificate{pair}}
+	origin.StartTLS()
+	defer origin.Close()
+	udp, udpRequests := probeTestUDP(t, true)
+
+	serverCfg, err := Server(s, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopServer := probeTestCore(t, bin, serverCfg)
+	defer stopServer()
+
+	coreBytes, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coreHash := sha256.Sum256(coreBytes)
+
+	for _, n := range s.Nodes {
+		t.Run("loopback/"+n.Name, func(t *testing.T) {
+			p := profiles[n.ID]
+			sandbox, err := probe.StartSandbox(context.Background(), p, probe.SandboxOptions{
+				CoreBinary: bin,
+				SHA256:     hex.EncodeToString(coreHash[:]),
+				TempParent: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("StartSandbox(%s) failed: %v", n.Name, err)
+			}
+			defer sandbox.Close()
+			_, portStr, _ := net.SplitHostPort(sandbox.Address)
+			port, _ := strconv.Atoi(portStr)
+			beforeOrigin, beforeUDP := originRequests.Load(), udpRequests.Load()
+			r, err := probe.Run(context.Background(), probe.Options{
+				Path:             "client-proxy",
+				Mode:             "light",
+				TargetURL:        origin.URL,
+				Family:           "auto",
+				Timeout:          5 * time.Second,
+				MaxBytes:         4096,
+				Samples:          1,
+				Concurrency:      1,
+				Initiator:        "controlled loopback v0.4.0 matrix",
+				NodeID:           n.ID,
+				UDPAddress:       udp,
+				UDPProxyAddress:  sandbox.Address,
+				UDPProxyUsername: sandbox.Username,
+				UDPProxyPassword: sandbox.Password,
+				UDPTimeout:       500 * time.Millisecond,
+			}, probe.Dependencies{Transport: probeTransport(t, port, cert, sandbox.Username, sandbox.Password)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Status != "completed" || r.UDP == nil || r.UDP.Status != "passed" || originRequests.Load() <= beforeOrigin || udpRequests.Load() <= beforeUDP {
+				t.Fatalf("loopback probe failed for %s: %#v", n.Name, r)
+			}
+		})
+	}
+}

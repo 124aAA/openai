@@ -186,6 +186,63 @@ func validateBindingSet(bindings []LocalBinding) error {
 	return nil
 }
 
+func udpListenAddressesOverlap(addrA, netA, addrB, netB string) bool {
+	a, errA := netip.ParseAddr(addrA)
+	b, errB := netip.ParseAddr(addrB)
+	if errA != nil || errB != nil {
+		return true
+	}
+	a, b = a.Unmap(), b.Unmap()
+	aDual := a.Is6() && a.IsUnspecified() && !strings.HasSuffix(netA, "6") && !strings.HasSuffix(netA, "4")
+	bDual := b.Is6() && b.IsUnspecified() && !strings.HasSuffix(netB, "6") && !strings.HasSuffix(netB, "4")
+	if aDual || bDual {
+		return true
+	}
+	if a.Is4() != b.Is4() {
+		return false
+	}
+	return a == b || a.IsUnspecified() || b.IsUnspecified()
+}
+
+func validateHY2HopPortConflicts(st State) error {
+	bindings := StateBindings(st)
+	type hopSpan struct {
+		id, name, listen string
+		start, end       int
+	}
+	var spans []hopSpan
+	for _, n := range st.Nodes {
+		if n.Protocol != "hysteria2" || n.HY2 == nil || n.HY2.HopPorts == "" {
+			continue
+		}
+		start, end, err := ParseHY2HopPorts(n.HY2.HopPorts)
+		if err != nil {
+			return err
+		}
+		if n.Port >= start && n.Port <= end {
+			return fmt.Errorf("节点 %s 的 Hysteria2 跳跃端口段 %s 不能包含节点自身监听端口 %d", n.Name, n.HY2.HopPorts, n.Port)
+		}
+		if !n.Enabled {
+			continue
+		}
+		for _, b := range bindings {
+			if b.NodeID == n.ID || bindingTransport(b.Network) != "udp" {
+				continue
+			}
+			if b.Port >= start && b.Port <= end && udpListenAddressesOverlap(n.Listen, "udp", b.Address, b.Network) {
+				return fmt.Errorf("节点 %s 的 Hysteria2 跳跃端口段 %s 与受管 UDP 端口 %d 冲突", n.Name, n.HY2.HopPorts, b.Port)
+			}
+		}
+		for _, prev := range spans {
+			if start <= prev.end && prev.start <= end && udpListenAddressesOverlap(n.Listen, "udp", prev.listen, "udp") {
+				return fmt.Errorf("节点 %s 与 %s 的 Hysteria2 跳跃端口段重叠", prev.name, n.Name)
+			}
+		}
+		spans = append(spans, hopSpan{id: n.ID, name: n.Name, listen: n.Listen, start: start, end: end})
+	}
+	return nil
+}
+
 // The fixed sing-box 1.14 listener explicitly adds "4" only for the native
 // IPv4 wildcard. Other literals use the unsuffixed network. In particular,
 // IPv4-mapped unspecified addresses must not silently become tcp4/udp4.

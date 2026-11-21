@@ -197,8 +197,9 @@ elif name=='logrotate': pass
 elif name=='curl':
  urls=[x for x in a if x.startswith('https://')]
  tag=os.environ['QN_RELEASE_TAG']
- prefix='https://github.com/124aAA/openai/releases/download/'+tag+'/'
- latest='https://github.com/124aAA/openai/releases/latest/download/SHA256SUMS'
+ origin=os.environ.get('QN_EXPECTED_MIRROR', 'https://github.com').rstrip('/')
+ prefix=origin+'/124aAA/openai/releases/download/'+tag+'/'
+ latest=origin+'/124aAA/openai/releases/latest/download/SHA256SUMS'
  if len(urls)!=1 or (urls[0]!=latest and not urls[0].startswith(prefix)) or not (r/'release').is_dir():
   print('curl: (6) simulated DNS/download failure',file=sys.stderr); sys.exit(6)
  asset='SHA256SUMS' if urls[0]==latest else urls[0][len(prefix):]
@@ -850,7 +851,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(f.state.exists())
 
     def test_release_accepts_named_new_docs_and_rejects_unknown_docs_or_links(self):
-        names = ('GETTING_STARTED.md', 'FAQ.md', 'DEVELOPMENT.md', 'CAPABILITIES.md',
+        names = ('GETTING_STARTED.md', 'GUIDE.md', 'FAQ.md', 'DEVELOPMENT.md', 'CAPABILITIES.md',
                  'BATCH_01.md', 'NETWORK_TESTS.md', 'BATCH_02.md', 'NETWORK_PERFORMANCE.md', 'BATCH_03.md',
                  'ENDPOINTS.md', 'BATCH04.md', 'TOPOLOGY.md', 'BATCH05.md', 'SUBSCRIPTIONS.md', 'BATCH06.md', 'CERTIFICATES.md', 'MIGRATION.md', 'BATCH07.md', 'MONITORING.md', 'BATCH08.md', 'PROTOCOLS.md', 'BATCH09.md', 'PLATFORMS.md', 'BATCH10.md', 'WORKFLOWS.md', 'BATCH11.md')
         for online in (False, True):
@@ -1170,7 +1171,7 @@ class InstallerTests(unittest.TestCase):
     def test_architecture_selection_and_unknown_platform_fail_before_install(self):
         f = self.fixture('rocky', '9.7'); f.env['QN_ARCH'] = 'riscv64'
         f.install(ok=False); self.assertFalse(f.state.exists())
-        for distro, version in [('rocky', '8.10'), ('alpine', '3.20.0'), ('alpine', '3.25.0')]:
+        for distro, version in [('rocky', '8.10'), ('debian', '10'), ('alpine', '3.19.0'), ('alpine', '3.25.0')]:
             f = self.fixture(distro, version)
             self.assertIn('未适配的系统', f.install(ok=False))
             self.assertFalse(f.state.exists())
@@ -1451,6 +1452,33 @@ class InstallerTests(unittest.TestCase):
                 f.install(ok=valid)
                 self.assertEqual(valid, f.state.exists())
                 self.assertTrue(f.host()['passwd'])
+
+    def test_compatible_distros_and_github_mirror(self):
+        for distro, version in [('almalinux', '9.4'), ('almalinux', '10.0'),
+                                ('rocky', '10.0'), ('ol', '9.4'), ('centos', '9'),
+                                ('debian', '11'), ('alpine', '3.20.3')]:
+            with self.subTest(distro=distro, version=version):
+                f = self.fixture(distro, version)
+                out = f.install()
+                self.assertIn('[8/8]', out)
+                self.assertTrue(f.host()['active'])
+
+        # Valid HTTPS --github-mirror rewrites download origin while enforcing SHA256SUMS
+        f = self.fixture()
+        f.remote_release()
+        f.env['QN_EXPECTED_MIRROR'] = 'https://ghproxy.example.test'
+        out = f.run('--auto', '--github-mirror', 'https://ghproxy.example.test/', online=True)
+        self.assertIn('[8/8]', out)
+        calls = (f.root/'commands.log').read_text()
+        self.assertIn('https://ghproxy.example.test/124aAA/openai/releases/download/'+RELEASE_TAG+'/', calls)
+
+        # Non-HTTPS --github-mirror is rejected before any host changes or curl calls
+        f_bad = self.fixture()
+        f_bad.remote_release()
+        bad_out = f_bad.run('--auto', '--github-mirror', 'http://insecure.example.test', online=True, ok=False)
+        self.assertIn('https://', bad_out)
+        self.assertFalse(f_bad.state.exists())
+        self.assertFalse(f_bad.bin.exists())
 
 
 if __name__ == '__main__':

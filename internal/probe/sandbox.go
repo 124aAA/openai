@@ -65,13 +65,70 @@ func sandboxConfig(p Profile, port int, username, password string) ([]byte, erro
 	}, "", "  ")
 }
 
+func probeCoreKind(o outbound) string {
+	if o.Type == "vless" && (o.TLS == nil || o.TLS.UTLS == nil || !o.TLS.UTLS.Enabled) {
+		return "vless-tls"
+	}
+	return o.Type
+}
+
 func verifyProbeCore(ctx context.Context, p Profile, opts SandboxOptions) (string, error) {
 	var o outbound
 	_ = json.Unmarshal(p.Outbound, &o)
-	return verifyProbeCoreTypes(ctx, []string{o.Type}, opts)
+	return verifyProbeCoreTypes(ctx, []string{probeCoreKind(o)}, opts)
+}
+
+type verifiedCoreCacheEntry struct {
+	path    string
+	sha256  string
+	info    os.FileInfo
+	version string
+	tags    map[string]bool
+}
+
+var (
+	verifiedCoreMu    sync.Mutex
+	verifiedCoreCache []verifiedCoreCacheEntry
+)
+
+func lookupVerifiedCore(path, sha string, info os.FileInfo) (string, map[string]bool, bool) {
+	verifiedCoreMu.Lock()
+	defer verifiedCoreMu.Unlock()
+	for _, entry := range verifiedCoreCache {
+		if entry.path == path && entry.sha256 == sha && entry.info.Size() == info.Size() && entry.info.ModTime().Equal(info.ModTime()) && os.SameFile(entry.info, info) {
+			cloned := make(map[string]bool, len(entry.tags))
+			for k, v := range entry.tags {
+				cloned[k] = v
+			}
+			return entry.version, cloned, true
+		}
+	}
+	return "", nil, false
+}
+
+func storeVerifiedCore(path, sha string, info os.FileInfo, version string, tags map[string]bool) {
+	cloned := make(map[string]bool, len(tags))
+	for k, v := range tags {
+		cloned[k] = v
+	}
+	verifiedCoreMu.Lock()
+	defer verifiedCoreMu.Unlock()
+	for idx, entry := range verifiedCoreCache {
+		if entry.path == path && entry.sha256 == sha {
+			verifiedCoreCache[idx] = verifiedCoreCacheEntry{path: path, sha256: sha, info: info, version: version, tags: cloned}
+			return
+		}
+	}
+	if len(verifiedCoreCache) >= 16 {
+		verifiedCoreCache = verifiedCoreCache[1:]
+	}
+	verifiedCoreCache = append(verifiedCoreCache, verifiedCoreCacheEntry{path: path, sha256: sha, info: info, version: version, tags: cloned})
 }
 
 func verifyProbeCoreTypes(ctx context.Context, kinds []string, opts SandboxOptions) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !filepath.IsAbs(opts.CoreBinary) || len(opts.SHA256) != 64 || strings.Trim(opts.SHA256, "0123456789abcdef") != "" {
 		return "", errors.New("client core needs an absolute path and trusted lowercase binary SHA-256")
 	}
@@ -79,9 +136,20 @@ func verifyProbeCoreTypes(ctx context.Context, kinds []string, opts SandboxOptio
 	if err != nil || !i.Mode().IsRegular() || i.Size() > 256<<20 {
 		return "", errors.New("client core must be a regular executable file")
 	}
+	if version, tags, ok := lookupVerifiedCore(opts.CoreBinary, opts.SHA256, i); ok {
+		if err := checkProbeCoreCapabilities(version, tags, kinds); err != nil {
+			return "", err
+		}
+		return version, nil
+	}
 	f, err := os.Open(opts.CoreBinary)
 	if err != nil {
 		return "", err
+	}
+	opened, statErr := f.Stat()
+	if statErr != nil || !os.SameFile(i, opened) || !opened.Mode().IsRegular() || opened.Size() != i.Size() {
+		f.Close()
+		return "", errors.New("client core changed while opening")
 	}
 	h := sha256.New()
 	buf := make([]byte, 64<<10)
@@ -102,9 +170,13 @@ func verifyProbeCoreTypes(ctx context.Context, kinds []string, opts SandboxOptio
 			break
 		}
 	}
+	afterHash, afterErr := f.Stat()
 	f.Close()
 	if err != nil {
 		return "", err
+	}
+	if afterErr != nil || afterHash.Size() != opened.Size() || !afterHash.ModTime().Equal(opened.ModTime()) {
+		return "", errors.New("client core changed while hashing")
 	}
 	if hex.EncodeToString(h.Sum(nil)) != opts.SHA256 {
 		return "", errors.New("client core SHA-256 does not match")
@@ -130,6 +202,9 @@ func verifyProbeCoreTypes(ctx context.Context, kinds []string, opts SandboxOptio
 				tags[t] = true
 			}
 		}
+	}
+	if afterVer, stErr := os.Lstat(opts.CoreBinary); stErr == nil && os.SameFile(afterHash, afterVer) && afterVer.Size() == afterHash.Size() && afterVer.ModTime().Equal(afterHash.ModTime()) {
+		storeVerifiedCore(opts.CoreBinary, opts.SHA256, afterVer, version, tags)
 	}
 	if err := checkProbeCoreCapabilities(version, tags, kinds); err != nil {
 		return "", err

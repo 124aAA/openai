@@ -18,6 +18,9 @@ func trojanInbound(n Node, root string) M {
 	if tr := transportInbound(n); tr != nil {
 		out["transport"] = tr
 	}
+	if mux := multiplexInbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
 	return out
 }
 
@@ -33,11 +36,15 @@ func trojanOutbound(n Node, u User) M {
 	if tr := transportOutbound(n); tr != nil {
 		out["transport"] = tr
 	}
+	if mux := multiplexOutbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
 	return out
 }
 
 func trojanMihomo(n Node, u User) M {
 	out := M{"type": "trojan", "password": u.Password, "udp": true, "skip-cert-verify": false, "sni": n.Certificate.ServerName, "network": "tcp"}
 	applyTransportMihomo(out, n)
+	applyMultiplexMihomo(out, n.Multiplex)
 	return out
 }

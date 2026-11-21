@@ -145,7 +145,9 @@ func readOwned(path string, max int64, private bool) ([]byte, error) {
 }
 
 func (s *Store) writeOwned(name string, b []byte, max int64) error {
-	if name != "status.json" && name != "history.json" && name != "config.json" {
+	switch name {
+	case "status.json", "history.json", "config.json", "traffic-ledger.json", "alerts.json":
+	default:
 		return errors.New("拒绝写入非监控自有文件")
 	}
 	if int64(len(b)) > max {
@@ -225,6 +227,34 @@ func (s *Store) LoadStatus() (Snapshot, error) {
 	return v, nil
 }
 
+func validEvent(e Event) bool {
+	if !validID(e.JobID) || !validStatus(e.From) || !validStatus(e.To) || len(e.Notification) > 32 {
+		return false
+	}
+	switch e.Kind {
+	case "status-change", "recovery", "cert-expiring", "quota-warning", "quota-disabled":
+	default:
+		return false
+	}
+	if len(e.Host) > 128 || len(e.TargetName) > 160 || len(e.TargetID) > 128 || len(e.Reason) > 256 || len(e.RecoveryResult) > 128 || len(e.Signals) > 9 {
+		return false
+	}
+	for _, field := range []string{e.Host, e.TargetName, e.TargetID, e.Reason, e.RecoveryResult} {
+		if strings.ContainsAny(field, "\r\n\x00") {
+			return false
+		}
+	}
+	for _, sig := range e.Signals {
+		if sig == "" || len(sig) > 128 || strings.ContainsAny(sig, "\r\n\x00") {
+			return false
+		}
+	}
+	if e.CertDaysLeft != nil && (*e.CertDaysLeft < -36500 || *e.CertDaysLeft > 36500) {
+		return false
+	}
+	return true
+}
+
 func validateSnapshot(v Snapshot) error {
 	if v.Version != 1 || len(v.Jobs) > MaxJobs || len(v.Events) > 1024 || len(v.Actions) > 20 {
 		return errors.New("监控状态版本或对象数量超过上限")
@@ -252,7 +282,7 @@ func validateSnapshot(v Snapshot) error {
 		}
 	}
 	for _, e := range v.Events {
-		if !validID(e.JobID) || !validStatus(e.From) || !validStatus(e.To) || (e.Kind != "status-change" && e.Kind != "recovery") || len(e.Notification) > 32 {
+		if !validEvent(e) {
 			return errors.New("监控事件记录无效")
 		}
 	}
@@ -411,9 +441,16 @@ func (s *Store) cleanupInterruptedWrites() error {
 			continue
 		}
 		maxBytes := int64(MaxStatusBytes)
-		if name == ".monitor-write-history.json" {
+		switch name {
+		case ".monitor-write-history.json":
 			maxBytes = MaxHistoryBytes
-		} else if name != ".monitor-write-status.json" {
+		case ".monitor-write-status.json":
+			maxBytes = MaxStatusBytes
+		case ".monitor-write-traffic-ledger.json":
+			maxBytes = MaxLedgerBytes
+		case ".monitor-write-alerts.json":
+			maxBytes = MaxAlertsBytes
+		default:
 			return errors.New("发现无法确认归属的监控临时文件，拒绝删除")
 		}
 		if err = s.removeOwnedTemporary(filepath.Join(s.Root, name), maxBytes); err != nil {

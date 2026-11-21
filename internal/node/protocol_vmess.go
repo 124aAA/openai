@@ -24,6 +24,9 @@ func vmessTLSInbound(n Node, root string) M {
 	if tr := transportInbound(n); tr != nil {
 		out["transport"] = tr
 	}
+	if mux := multiplexInbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
 	return out
 }
 
@@ -48,16 +51,32 @@ func vmessTLSURI(n Node, u User) string {
 // VMessV2RayNURI returns the V2RayN v2 JSON Base64 sharing URI for clients
 // that expect the legacy JSON-encoded vmess:// link.
 func VMessV2RayNURI(n Node, u User) string {
+	return VMessV2RayNURIWithName(n, u, n.Name+" / "+u.Name)
+}
+
+func VMessV2RayNURIWithName(n Node, u User, ps string) string {
 	netType := EffectiveTransport(n)
 	path := ""
 	host := ""
 	alpn := ""
 	if n.Transport != nil {
 		switch netType {
-		case "ws", "httpupgrade":
+		case "ws":
+			path = n.Transport.Path
+			if n.Transport.MaxEarlyData > 0 {
+				path += "?ed=" + strconv.Itoa(n.Transport.MaxEarlyData)
+			}
+			host = n.Transport.Host
+			alpn = "http/1.1"
+		case "httpupgrade":
 			path = n.Transport.Path
 			host = n.Transport.Host
 			alpn = "http/1.1"
+		case "http":
+			netType = "h2"
+			path = n.Transport.Path
+			host = n.Transport.Host
+			alpn = "h2"
 		case "grpc":
 			path = n.Transport.ServiceName
 			alpn = "h2"
@@ -69,7 +88,7 @@ func VMessV2RayNURI(n Node, u User) string {
 	}
 	payload := map[string]string{
 		"v":    "2",
-		"ps":   n.Name + " / " + u.Name,
+		"ps":   ps,
 		"add":  n.Host,
 		"port": strconv.Itoa(EffectiveConnectPort(n)),
 		"id":   u.UUID,
@@ -101,6 +120,9 @@ func vmessTLSOutbound(n Node, u User) M {
 	if tr := transportOutbound(n); tr != nil {
 		out["transport"] = tr
 	}
+	if mux := multiplexOutbound(n.Multiplex); mux != nil {
+		out["multiplex"] = mux
+	}
 	return out
 }
 
@@ -117,5 +139,6 @@ func vmessTLSMihomo(n Node, u User) M {
 		"network":          "tcp",
 	}
 	applyTransportMihomo(out, n)
+	applyMultiplexMihomo(out, n.Multiplex)
 	return out
 }

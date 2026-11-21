@@ -25,12 +25,12 @@ MAX_ASSET = 128 * 1024 * 1024
 MAX_JSON = 4 * 1024 * 1024
 GO_VERSION = "go1.27.1"
 DOCS = {"ARCHITECTURE.md", "TEST_REPORT.md", "RELEASE_NOTES.md", "AUDIT_STAGE2.md",
-        "GETTING_STARTED.md", "FAQ.md", "DEVELOPMENT.md", "CAPABILITIES.md",
+        "GETTING_STARTED.md", "GUIDE.md", "FAQ.md", "DEVELOPMENT.md", "CAPABILITIES.md",
         "BATCH_01.md", "NETWORK_TESTS.md", "BATCH_02.md", "NETWORK_PERFORMANCE.md", "BATCH_03.md",
         "ENDPOINTS.md", "BATCH04.md", "TOPOLOGY.md", "BATCH05.md", "SUBSCRIPTIONS.md", "BATCH06.md", "CERTIFICATES.md", "MIGRATION.md", "BATCH07.md", "MONITORING.md", "BATCH08.md", "PROTOCOLS.md", "BATCH09.md", "PLATFORMS.md", "BATCH10.md", "WORKFLOWS.md", "BATCH11.md"}
 PACKAGE_FILES = {"qingnode", "install.sh", "README.md", "LICENSE", "THIRD_PARTY.md",
                  "SHA256SUMS"} | {"docs/" + name for name in DOCS}
-PROBE_TARGETS = ("linux-amd64", "linux-arm64", "windows-amd64")
+PROBE_TARGETS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 PROBE_DOCS = {"NETWORK_TESTS.md", "BATCH_02.md", "NETWORK_PERFORMANCE.md", "BATCH_03.md",
               "ENDPOINTS.md", "BATCH04.md", "TOPOLOGY.md", "BATCH05.md", "SUBSCRIPTIONS.md",
               "BATCH06.md", "CERTIFICATES.md", "MIGRATION.md", "BATCH07.md", "MONITORING.md",
@@ -39,11 +39,17 @@ PROBE_DOCS = {"NETWORK_TESTS.md", "BATCH_02.md", "NETWORK_PERFORMANCE.md", "BATC
 GATE_STEPS = {
     "Validate release target", "Static analysis and Go tests",
     "Service-user permissions", "Installer transaction tests",
-    "Release guard offline tests", "Maintenance stream observer regression", "Fetch pinned official test tools",
-    "Official parser and transport tests", "Controlled topology and WireGuard namespace transport", "Build two Linux architectures",
+    "Release guard offline tests", "Maintenance stream observer regression",
+    "Disposable platform acceptance fixture contracts",
+    "Fetch pinned official test tools",
+    "Official parser and transport tests",
+    "Controlled TCP and UDP NAT endpoint transport",
+    "Controlled topology and WireGuard namespace transport", "Build two Linux architectures",
     "Cross-batch migration and subscription acceptance",
     "Build portable network test tool", "Terminal and machine interface acceptance",
-    "Real systemd lifecycle on disposable runner", "Bind release assets",
+    "Real systemd lifecycle on disposable runner",
+    "Extended platform lifecycle on real systemd",
+    "Bind release assets",
     "Upload verified candidate assets",
     "Upload portable network test artifacts",
 }
@@ -208,6 +214,11 @@ def probe_archive_info(path, target):
         require(offset <= len(binary) - 26 and binary[offset:offset+4] == b"PE\0\0" and
                 int.from_bytes(binary[offset+4:offset+6], "little") == 0x8664 and
                 int.from_bytes(binary[offset+24:offset+26], "little") == 0x20b, "probe Windows architecture mismatch")
+    elif target.startswith("darwin-"):
+        require(len(binary) >= 32 and int.from_bytes(binary[0:4], "little") == 0xfeedfacf and
+                int.from_bytes(binary[12:16], "little") == 2 and
+                int.from_bytes(binary[4:8], "little") == {"darwin-amd64": 0x01000007, "darwin-arm64": 0x0100000c}[target],
+                "probe macOS architecture mismatch")
     else:
         require(len(binary) >= 20 and binary.startswith(b"\x7fELF\x02\x01") and
                 int.from_bytes(binary[18:20], "little") == {"linux-amd64": 62, "linux-arm64": 183}[target],
@@ -253,7 +264,7 @@ def prepare(dist, version, sha, repo):
 def validate_local(dist, version, sha, repo):
     manifest = expected_manifest(dist, version, sha, repo)
     names = set(manifest["archives"]) | {"SHA256SUMS", "RELEASE.json"}
-    require({p.name for p in dist.iterdir()} == names, "release must contain exactly seven verified assets")
+    require({p.name for p in dist.iterdir()} == names, "release must contain exactly nine verified assets")
     require(read_file(dist / "RELEASE.json", MAX_JSON) == canonical(manifest), "release manifest identity or digest mismatch")
     sums = parse_sums(read_file(dist / "SHA256SUMS", MAX_JSON))
     require(set(sums) == names - {"SHA256SUMS"}, "outer checksum contract mismatch")
@@ -426,7 +437,7 @@ def publish(api, dist, version, sha, repo, ref, run_id, attempt, notes):
         existing = verify_remote_assets(api, release, assets, allow_missing=release["draft"])
         if not release["draft"]:
             validate_target(api, version, sha, ref)
-            print("Existing formal Release has the exact commit and all seven verified assets; no changes made.")
+            print("Existing formal Release has the exact commit and all nine verified assets; no changes made.")
             return release
     else:
         if api.tag_commit(version) is None:
@@ -451,7 +462,7 @@ def publish(api, dist, version, sha, repo, ref, run_id, attempt, notes):
     validate_release_identity(release, version, sha, manifest)
     verify_remote_assets(api, release, assets)
     validate_target(api, version, sha, ref)
-    print("Formal release published with the exact commit and all seven verified assets.")
+    print("Formal release published with the exact commit and all nine verified assets.")
     return release
 
 

@@ -104,11 +104,17 @@ func Outbound(n Node, u User) M {
 	out := p.Outbound(n, u)
 	out["tag"] = "proxy"
 	out["server"] = n.Host
-	out["server_port"] = EffectiveConnectPort(n)
+	if _, hasHopPorts := out["server_ports"]; !hasHopPorts {
+		out["server_port"] = EffectiveConnectPort(n)
+	}
 	return out
 }
 func Client(n Node, u User, port int) M {
-	return M{"log": M{"level": "warn"}, "dns": M{"servers": []any{M{"type": "local", "tag": "system"}}}, "inbounds": []any{M{"type": "mixed", "tag": "local", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": []any{Outbound(n, u)}, "route": M{"final": "proxy", "default_domain_resolver": "system"}}
+	doc, _ := ClientWithOptions(n, u, port, ClientOptions{})
+	return doc
+}
+func ClientWithOptions(n Node, u User, port int, opts ClientOptions) (M, error) {
+	return buildSingBoxClientDoc([]any{Outbound(n, u)}, "proxy", port, opts)
 }
 func MihomoProxy(n Node, u User) M {
 	p, ok := Protocol(n.Protocol)
@@ -140,12 +146,23 @@ func Export(n Node, u User, format string) ([]byte, error) {
 }
 
 func exportUnchecked(n Node, u User, format string) ([]byte, error) {
+	return exportUncheckedWithOptions(n, u, format, ClientOptions{})
+}
+
+func exportUncheckedWithOptions(n Node, u User, format string, opts ClientOptions) ([]byte, error) {
+	if err := ValidateClientOptions(opts); err != nil {
+		return nil, err
+	}
+	hasClientOptions := clientRouting(opts.Routing) != "global" || opts.TUN || (opts.Controller != nil && opts.Controller.Enabled)
+	if hasClientOptions && format != "sing-box" && format != "mihomo" {
+		return nil, errors.New("客户端分流预设、TUN 入站与本地控制端口仅适用于 sing-box 或 mihomo 完整配置")
+	}
 	if err := ValidateHY2ClientCertificate(n, format); err != nil {
 		return nil, err
 	}
 	if p, ok := Protocol(n.Protocol); !ok {
 		return nil, errors.New("不支持该协议")
-	} else if n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls" {
+	} else if p.MinSchema >= 8 {
 		if err := p.Validate(n); err != nil {
 			return nil, err
 		}
@@ -173,13 +190,22 @@ func exportUnchecked(n Node, u User, format string) ([]byte, error) {
 		}
 		return []byte(q.ToSmallString(false)), nil
 	case "sing-box":
-		return json.MarshalIndent(Client(n, u, 2080), "", "  ")
+		doc, e := ClientWithOptions(n, u, 2080, opts)
+		if e != nil {
+			return nil, e
+		}
+		return json.MarshalIndent(doc, "", "  ")
 	case "mihomo":
 		p := MihomoProxy(n, u)
-		return yaml.Marshal(M{"mixed-port": 7890, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "warning", "proxies": []any{p}, "proxy-groups": []any{M{"name": "PROXY", "type": "select", "proxies": []string{p["name"].(string)}}}, "rules": []string{"MATCH,PROXY"}})
+		group := M{"name": "PROXY", "type": "select", "proxies": []string{p["name"].(string)}}
+		doc, e := buildMihomoClientDoc([]any{p}, group, 7890, opts)
+		if e != nil {
+			return nil, e
+		}
+		return yaml.Marshal(doc)
 	case "provider":
 		return yaml.Marshal(M{"proxies": []any{MihomoProxy(n, u)}})
 	default:
-		return nil, fmt.Errorf("未知格式 %q；支持 %s", format, strings.Join([]string{"uri", "qr", "base64", "mihomo", "provider", "sing-box"}, ", "))
+		return nil, fmt.Errorf("未知格式 %q；支持 %s", format, strings.Join([]string{"uri", "vmess-v2rayn", "qr", "base64", "mihomo", "provider", "sing-box"}, ", "))
 	}
 }

@@ -1,13 +1,15 @@
 # 发行版、架构与服务托管
 
-第10批继续使用Bash引导、静态Go管理器、独立官方sing-box和本机init，不安装面板、Docker或数据库。平台适配代码和实际验收分别登记；实现候选不等于全平台支持承诺。准确提交、命令和失败见[BATCH10.md](BATCH10.md)。
+`v0.5.0` 继续使用 Bash 引导、静态 Go 管理器、独立官方 `sing-box` 和本机 init，不安装面板、Docker 或数据库。安装器与 `capabilities` 明确区分**已实测基线（`baseline`）**与**同源兼容家族（`compatible-family`）**；实现兼容映射不等于宣称所有衍生发行版均已完成逐版本真机 VM 验收。历史第 10 批准确提交、命令和失败见 [BATCH10.md](BATCH10.md)。
 
-| 目标 | 服务/包管理 | 代码路径 | 当前实机证据 |
+| 目标 | 层级（`support_tier`） | 服务/包管理 | 代码路径与当前实机/离线证据边界 |
 | --- | --- | --- | --- |
-| Debian 12/13，Ubuntu 22.04/24.04/26.04 | systemd / apt-get | 保留既有事务和核心unit | Ubuntu24.04.5 amd64 source18完整流程及产品附属安装/移除/中断恢复通过（aux18-ubuntu）；b024d58另通过核心双启动与Host报告；其余列出版本本批未实测 |
-| Rocky Linux 9，验收选9.8 | systemd / dnf | 新增受限依赖映射、SELinux检查与可选firewalld | Rocky9.8 amd64 source18完整流程及新附属事务通过（aux18-rocky）；Enforcing、6条运行/持久规则与精确卸载保留外部资产通过；b024d58另通过核心双启动与Host报告，外部包过滤路径未测 |
-| Alpine 3.24，验收选3.24.2 | OpenRC / apk | 新增supervise-daemon、用户/权限和兼容库 | Alpine3.24.2 amd64 / OpenRC0.63.2-r0 source18完整流程及新附属事务通过（aux18-alpine）；真实musl非root443、NoNewPrivs=1、HY2证书通过；b024d58另通过核心双启动与Host报告 |
-| amd64 / arm64 | 对应官方核心和管理器 | 架构、ELF、版本、构建标签分别核对 | ARM64管理器交叉编译通过；两版官方ARM核心摘要/ELF已只读核对，未执行ARM程序、解析或原生服务/流量 |
+| Debian 12/13，Ubuntu 22.04/24.04/26.04 | `baseline` | systemd / apt-get | 保留既有事务和核心 unit；Ubuntu 24.04.5 amd64 曾通过完整流程及双启动验收，Debian 11 作为 `compatible-family` 复用同一 apt/systemd 边界 |
+| Rocky Linux 9（及同源 AlmaLinux 9/10、Rocky 10、Oracle Linux 9、CentOS Stream 9） | Rocky 9 为 `baseline`，其余为 `compatible-family` | systemd / dnf | 受限依赖映射、SELinux enforcing 保持与可选 `firewalld` / `nftables`；Rocky 9.8 amd64 曾通过完整流程，其余同源家族已覆盖安装器/包映射单测，真机 VM 须单列 |
+| Alpine 3.24（及同源 Alpine 3.20..3.23） | 3.24 为 `baseline`，3.20..3.23 为 `compatible-family` | OpenRC / apk | `supervise-daemon`、用户/权限与 `gcompat` 兼容库；Alpine 3.24.2 amd64 曾通过完整生命周期与非 root 443 验收，3.20..3.23 已覆盖安装器与宿主识别单测 |
+| Linux `amd64` / `arm64`（`qingnode` + `qingprobe`），Windows `amd64` 与 macOS `darwin-amd64` / `darwin-arm64`（仅 `qingprobe`） | 9 项正式发行资产 | 管理器与客户端诊断助手分离 | ELF / PE / 64 位 Mach-O 头、构建标签、`SHA256SUMS` 与 `RELEASE.json` 全部离线核验；macOS `qingprobe` 使用 `lsof -nP` 解析受管监听端口，原生 macOS / ARM64 硬件运行须在对应宿主另验 |
+
+在线安装、管理器自更新与官方核心下载均支持可选 `--github-mirror https://...`（如 `install.sh --github-mirror https://...`、`qingnode core install --github-mirror https://...`、`qingnode self-update --github-mirror https://...`），仅接受合法的 `https://` 前缀重写 `github.com` 下载地址，并 100% 保留 `SHA256SUMS`、`RELEASE.json` 与内置 `PinnedCoreArchiveSHA256` 强校验；非 HTTPS 地址或被篡改归档在修改宿主前立即拒绝。
 
 ## 先看本机能力
 
@@ -16,7 +18,7 @@ qingnode capabilities --json --skip-loopback
 qingnode capabilities
 ```
 
-报告保留版本1原有字段，新增 `host`：发行版/版本、安装候选、包管理器、PID1、服务工具是否存在与控制器是否可用、SELinux、防火墙和虚拟化。原 `runtime` 本机字段仍报告内存、有效权限、TUN、sysctl、目录写权限、IPv4/IPv6绑定与小包回环；未知保留null，能力不等于真实链路通过。查询不安装包、不修复事务、不启动服务、不改内核参数。普通容器只有systemctl/rc-service命令时仍可能不可用。
+报告保留版本1原有字段，`host` 报告发行版/版本、安装候选与 `support_tier`（`baseline` / `compatible-family`）、包管理器、PID1、服务工具是否存在与控制器是否可用、SELinux、防火墙（含 `ufw`、`firewalld`、`nftables`）和虚拟化。原 `runtime` 本机字段仍报告内存、有效权限、TUN、sysctl、目录写权限、IPv4/IPv6绑定与小包回环；未知保留null，能力不等于真实链路通过。查询不安装包、不修复事务、不启动服务、不改内核参数。普通容器只有systemctl/rc-service命令时仍可能不可用。
 
 早先ubuntu5/rocky4/alpine15的Host发行版/版本字段实际为空，不能以这些报告宣称识别通过。source14（b024d58）修复系统标准os-release链接及回退；Ubuntu/Rocky boot4、Alpine boot5已另行两次真实启动，报告与实际系统字段一致，准确回执见BATCH10。只允许标准别名，不读取任意外部链接。
 
@@ -76,14 +78,18 @@ qingnode service recover --name qingnode-monitor --yes
 
 ```bash
 qingnode firewall status
+qingnode firewall enable --backend ufw
 qingnode firewall enable --backend firewalld
+qingnode firewall enable --backend nftables
 qingnode firewall sync
 qingnode firewall disable
 ```
 
-旧 `firewall enable` 仍选择UFW。firewalld须已经运行，只支持单个默认活动zone；多zone策略保留手动管理。以明确IPv4/IPv6、目的地址、TCP/UDP、端口的rich-rule分别写运行和持久状态并读回，不执行全局reload、flush或runtime-to-permanent。项目XML、私有所有权/恢复材料及锁用于精确清理；同形外部规则、文件碰撞和外部删改拒绝接管。管理员同时更改同形规则无法与本项目事务实现跨进程原子性，修改防火墙时应避免并行操作。切换UFW/firewalld需先显式停用旧项目模式。
+旧 `firewall enable` 默认仍选择 UFW。三种可选受管后端均严守归属隔离，绝不启用、清空或重载全局防火墙策略，切换后端前须先 `firewall disable` 停用旧模式：
+- **UFW / firewalld**：要求对应守护进程已启用运行；firewalld 仅支持单默认活动 zone，以明确 IPv4/IPv6、目的地址、TCP/UDP、端口（及 HY2 端口段）的 rich-rule 分别写运行和持久状态并读回，不执行全局 reload、flush 或 runtime-to-permanent。
+- **原生 `nftables`（`--backend nftables`）**：专为默认无 UFW/firewalld 的纯净 Debian、Alpine 等环境提供，仅创建并维护独立自有表 `table inet qingnode`（`chain input` 固定 `policy accept`，每条放行规则带 `comment "qingnode:<id>:<proto>"` 归属注释，自动覆盖双栈/单栈监听、端口中转、WireGuard 监听与 HY2 端口跳跃段，且与 HY2 重定向表 `table inet qingnode_hy2` 互不冲突）。若发现同名 `table inet qingnode` 含有非本项目链或外部规则，立即拒绝覆盖；节点端口变更采用先并集放行、新监听就绪后再精确收敛的两阶段事务，配置回滚、`firewall disable` 与完整卸载均精确清理 `table inet qingnode`，绝不执行 `flush ruleset`。
 
-Rocky保留SELinux enforcing，不自动关闭或放宽全局策略。安装器检查本机SELinux工具并对本项目路径应用系统已有标签；不能解决的策略拒绝启动并保留旧版本。对应enforcing与真实firewalld验收必须单列，模拟命令不作证据。
+Rocky / AlmaLinux / Oracle Linux / CentOS Stream 保留 SELinux enforcing，不自动关闭或放宽全局策略。安装器检查本机 SELinux 工具并对本项目路径应用系统已有标签；不能解决的策略拒绝启动并保留旧版本。对应 enforcing 与真实内核 `nft` / `firewalld` 验收必须单列，模拟命令不作真机内核证据。
 
 ## 核心ABI、恢复与验收
 
@@ -91,7 +97,7 @@ Rocky保留SELinux enforcing，不自动关闭或放宽全局策略。安装器�
 
 本批还实际读取两版官方ARM64归档：ELF64小端、EM_AARCH64，加载器为`/lib/ld-linux-aarch64.so.1`，依赖libdl/libpthread/libc。构建信息中的CGO_ENABLED=0不能推翻实际ELF依赖。摘要与来源见BATCH10；这只证明产物选择和文件结构，Alpine ARM64的ABI执行、配置解析、开机启动和TCP/UDP仍未验收。
 
-State因新firewalld语义升为9；旧1–8只在内存迁移并保留恢复原件，旧格式不能夹带firewalld。QNBK1/2及QNBK3 typed v1继续读取；来源服务管理器可记录openrc，恢复按目标平台重新生成定义，不执行备份中的服务脚本。身份与协议行为保持，不能删字段或降schema伪装向后兼容。
+当前 `v0.5.0` State 为 `schema 10`（兼容 `1..9` 只读内存迁移并保留恢复原件，旧 `<=9` 格式不能夹带 `nftables` 防火墙或 `traffic_quotas`）。QNBK1/2 及 QNBK3 typed v1 继续读取；来源服务管理器可记录 openrc，恢复按目标平台重新生成定义，不执行备份中的服务脚本。身份与协议行为保持，不能删字段或降 schema 伪装向后兼容。
 
 `scripts/acceptance-platform.sh --disposable`只允许可重建空白环境，真实执行安装、非root低端口TCP/UDP、持续流改名、重装、停止/自启保持、备份恢复、核心更新/回退与卸载。原systemd门禁不删除。容器用于包映射/配置/文件故障，VM用于init/权限/生命周期，原生ARM和公网单列。命令、证据及尚未完成范围见[BATCH10.md](BATCH10.md)。
 

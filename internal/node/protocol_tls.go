@@ -41,6 +41,9 @@ func validateTLSNode(n Node, checkExternalFiles bool) error {
 	if err := validateTransport(n); err != nil {
 		return err
 	}
+	if err := validateNodeMultiplex(n); err != nil {
+		return err
+	}
 	for _, u := range n.Users {
 		if err := safeTLSCredential(u); err != nil {
 			return err

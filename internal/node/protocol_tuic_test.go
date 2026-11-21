@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -48,8 +49,22 @@ func TestTUICCredentialsAndConservativeDefaults(t *testing.T) {
 	if !uuidRE.MatchString(generated.UUID) || generated.UUID[14] != '4' || len(generated.Password) != 48 || generated.Password == u.Password {
 		t.Fatal("TUIC did not generate a fresh UUID and independent password")
 	}
-	if tuicURI(n, u) != "" {
-		t.Fatal("TUIC invented an unchecked sharing URI")
+	uSpecial := u
+	uSpecial.Password = "p@ss:w/rd?#"
+	nCustom := n
+	nCustom.TUIC = &TUICOptions{ClientCongestionControl: "bbr", UDPRelayMode: "quic"}
+	rawURI := tuicURI(nCustom, uSpecial)
+	parsed, err := url.Parse(rawURI)
+	if err != nil || parsed.Scheme != "tuic" || parsed.User.Username() != uSpecial.UUID {
+		t.Fatalf("unexpected NEP-408 TUIC URI: %q (%v)", rawURI, err)
+	}
+	pw, ok := parsed.User.Password()
+	if !ok || pw != uSpecial.Password {
+		t.Fatalf("TUIC URI password round-trip failed: %q", pw)
+	}
+	q := parsed.Query()
+	if q.Get("alpn") != "h3" || q.Get("congestion_control") != "bbr" || q.Get("udp_relay_mode") != "quic" || q.Get("sni") != "localhost" {
+		t.Fatalf("TUIC URI NEP-408 query mismatch: %v", q)
 	}
 }
 

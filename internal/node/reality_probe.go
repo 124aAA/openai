@@ -27,11 +27,35 @@ var realityExcludedPrefixes = func() []netip.Prefix {
 	return result
 }()
 
+var realitySharedPlatformSuffixes = []string{
+	"fastly.net",
+	"fastlylb.net",
+	"cloudfront.net",
+	"vercel.app",
+	"vercel-dns.com",
+	"now.sh",
+	"netlify.app",
+	"netlify.com",
+	"github.io",
+	"githubusercontent.com",
+	"herokuapp.com",
+	"onrender.com",
+	"fly.dev",
+	"up.railway.app",
+	"azurewebsites.net",
+	"azurestaticapps.net",
+}
+
 func excludedRealityHost(host string) error {
 	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	for _, suffix := range []string{"cloudflare.com", "cloudflare.net", "cloudflare-dns.com", "cloudflareclient.com", "one.one.one.one", "workers.dev", "pages.dev", "cfargotunnel.com", "r2.dev", "r2.cloudflarestorage.com"} {
 		if host == suffix || strings.HasSuffix(host, "."+suffix) {
 			return fmt.Errorf("REALITY 目标 %s 已排除：Cloudflare/共享代理服务可能被借道消耗流量", host)
+		}
+	}
+	for _, suffix := range realitySharedPlatformSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return fmt.Errorf("REALITY 目标 %s 已排除：共享多租户 CDN/PaaS（%s）存在借道与证书/SNI 共用风险", host, suffix)
 		}
 	}
 	if ip, e := netip.ParseAddr(host); e == nil {
@@ -142,8 +166,12 @@ func probeReality(ctx context.Context, r *Reality, resolve func(context.Context,
 	if e = c.HandshakeContext(ctx); e != nil {
 		return 0, fmt.Errorf("目标 TLS 握手失败（检查网络、SNI、证书）：%w", e)
 	}
-	if c.ConnectionState().NegotiatedProtocol != "h2" {
+	state := c.ConnectionState()
+	if state.NegotiatedProtocol != "h2" {
 		return 0, errors.New("目标未协商 HTTP/2")
+	}
+	if state.CurveID != tls.X25519 && state.CurveID != tls.X25519MLKEM768 {
+		return 0, fmt.Errorf("目标未协商 X25519 密钥交换（实际 %s）", state.CurveID)
 	}
 	return time.Since(started), nil
 }

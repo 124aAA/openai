@@ -124,17 +124,13 @@ func TestProtocolExpansionDeviceFullExportsExplicitSecretsIPv6AndNAT(t *testing.
 	if !reflect.DeepEqual(s, before) || URI(s.Nodes[4], s.Nodes[4].Users[0]) != legacyURI {
 		t.Fatal("read-only collection changed State or SS2022 byte semantics")
 	}
+	// Standard TUIC nodes now export NEP-408 tuic:// URIs; client-only
+	// ClientHeartbeat has no NEP-408 query parameter and refuses URI/base64 export.
+	withHeartbeat := s.Clone()
+	withHeartbeat.Nodes[3].TUIC = &TUICOptions{ClientHeartbeat: "1500ms"}
 	for _, format := range []string{"uri", "base64"} {
-		if _, err := ExportDeviceProfile(s, p, format, "", true); err == nil {
-			t.Fatal("TUIC silently disappeared or received an invented URI")
-		}
-	}
-	// The remaining four protocols have verified basic URI formats. Credentials
-	// and labels use the same selected IDs, including SS2022's composite key.
-	p.Bindings = nil
-	for _, b := range before.Devices[0].Bindings {
-		if b.NodeID != s.Nodes[3].ID {
-			p.Bindings = append(p.Bindings, b)
+		if _, err := ExportDeviceProfile(withHeartbeat, p, format, "", true); err == nil {
+			t.Fatal("TUIC ClientHeartbeat silently disappeared in NEP-408 URI")
 		}
 	}
 	r, err := ExportDeviceProfile(s, p, "uri", "", false)
@@ -142,13 +138,19 @@ func TestProtocolExpansionDeviceFullExportsExplicitSecretsIPv6AndNAT(t *testing.
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(r.Content)), "\n")
-	if len(lines) != 4 {
-		t.Fatal("URI collection dropped a selected credential")
+	if len(lines) != 5 {
+		t.Fatalf("URI collection dropped a selected credential: got %d", len(lines))
 	}
 	for _, line := range lines {
 		u, err := url.Parse(line)
 		if err != nil || u.Hostname() != "2001:0db8:0000::9" || !strings.HasPrefix(u.Port(), "3100") || !strings.Contains(u.Fragment, "中文") {
 			t.Fatal("URI endpoint or Unicode label failed", err)
+		}
+		if u.Scheme == "tuic" {
+			q := u.Query()
+			if q.Get("alpn") != "h3" || q.Get("congestion_control") != "cubic" || q.Get("udp_relay_mode") != "native" {
+				t.Fatalf("TUIC NEP-408 query mismatch: %v", q)
+			}
 		}
 		if u.Scheme == "ss" && u.User.Username() != SS2022Method {
 			auth, err := base64.RawURLEncoding.DecodeString(u.User.Username())
@@ -159,6 +161,14 @@ func TestProtocolExpansionDeviceFullExportsExplicitSecretsIPv6AndNAT(t *testing.
 				t.Fatal("classic SS inherited SS2022 composite credentials")
 			}
 		}
+	}
+	b64Res, err := ExportDeviceProfile(s, p, "base64", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawLines, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b64Res.Content)))
+	if err != nil || len(strings.Split(strings.TrimSpace(string(rawLines)), "\n")) != 5 {
+		t.Fatalf("base64 collection failed: %v", err)
 	}
 }
 
@@ -193,10 +203,9 @@ func TestProtocolExpansionCapabilityTransportTagsAndClientVersionGates(t *testin
 }
 
 func TestProtocolCapabilitySeparatesServerEgressFromClientOutbound(t *testing.T) {
-	remote := map[string]bool{"reality": true, "ss2022": true, "hysteria2": true}
 	for _, name := range Protocols() {
 		capability, ok := ProtocolCapabilities(name)
-		if !ok || !capability.Server || !capability.ClientOutbound || !capability.Outbound || capability.ServerEgress != remote[name] {
+		if !ok || !capability.Server || !capability.ClientOutbound || !capability.Outbound || !capability.ServerEgress {
 			t.Fatalf("incorrect inbound, client export or remote Egress capability for %s: %+v", name, capability)
 		}
 		data, err := json.Marshal(capability)
@@ -207,7 +216,7 @@ func TestProtocolCapabilitySeparatesServerEgressFromClientOutbound(t *testing.T)
 		if err = json.Unmarshal(data, &fields); err != nil {
 			t.Fatal(err)
 		}
-		if fields["server_egress"] != remote[name] || fields["client_outbound"] != true || fields["outbound"] != true {
+		if fields["server_egress"] != true || fields["client_outbound"] != true || fields["outbound"] != true {
 			t.Fatalf("ambiguous serialized capability for %s: %s", name, data)
 		}
 	}

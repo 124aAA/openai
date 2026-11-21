@@ -1,17 +1,13 @@
 package node
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
-	"unicode"
 )
 
-// DecodeState upgrades schema 1–8 in memory only. A meaningful write creates
-// a schema 9 generation and retains the original generation unchanged.
+// DecodeState upgrades schema 1–9 in memory only. A meaningful write creates
+// a schema 10 generation and retains the original generation unchanged.
 // Future schemas must add an explicit decoder and migration here;
 // unknown fields must never be discarded to make a newer state look compatible.
 // Decoding has no filesystem or service effects. Validate remains a separate step
@@ -31,18 +27,15 @@ func DecodeState(data []byte) (State, error) {
 		return st, err
 	}
 	switch header.Schema {
-	case 1, 2, 3, 4, 5, 6, 7, 8, Schema:
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&st); err != nil {
+	case 1, 2, 3, 4, 5, 6, 7, 8, 9, Schema:
+		if err := unmarshalStrictStruct(data, &st); err != nil {
 			return st, err
 		}
-		var extra any
-		if decoder.Decode(&extra) != io.EOF {
-			return st, errors.New("状态文件含多余数据")
-		}
 		if header.Schema < Schema {
-			if st.Firewall == "firewalld" {
+			if header.Schema < 10 && st.Firewall == "nftables" {
+				return st, errors.New("旧状态不能声明nftables受管模式；请使用版本10")
+			}
+			if header.Schema < 9 && st.Firewall == "firewalld" {
 				return st, errors.New("旧状态不能声明firewalld受管模式；请使用版本9")
 			}
 			// Presence, including explicit null, must match its schema. Do not
@@ -52,26 +45,31 @@ func DecodeState(data []byte) (State, error) {
 				return st, err
 			}
 			for key := range raw {
-				if header.Schema < 7 && (strings.EqualFold(key, "observability") || strings.EqualFold(key, "credential_expirations")) {
+				if header.Schema < 7 && (stateFieldEqual(key, "observability") || stateFieldEqual(key, "credential_expirations")) {
 					return st, errors.New("旧状态不能包含观测或到期设置；请使用版本7")
 				}
-				if header.Schema < 6 && strings.EqualFold(key, "certificates") {
+				if header.Schema < 6 && stateFieldEqual(key, "certificates") {
 					return st, errors.New("旧状态不能包含证书资源；请使用版本6")
 				}
-				if header.Schema < 5 && strings.EqualFold(key, "devices") {
+				if header.Schema < 5 && stateFieldEqual(key, "devices") {
 					return st, errors.New("旧状态不能包含设备扩展；请使用版本5")
 				}
-				if header.Schema == 1 && strings.EqualFold(key, "dns") {
+				if header.Schema == 1 && stateFieldEqual(key, "dns") {
 					return st, errors.New("状态版本1不能包含DNS扩展；请使用版本2")
 				}
-				if header.Schema < 4 && (strings.EqualFold(key, "egresses") || strings.EqualFold(key, "egress_policies") || strings.EqualFold(key, "forwards")) {
+				if header.Schema < 4 && (stateFieldEqual(key, "egresses") || stateFieldEqual(key, "egress_policies") || stateFieldEqual(key, "forwards")) {
 					return st, fmt.Errorf("状态版本%d不能包含拓扑扩展；请使用版本4", header.Schema)
+				}
+			}
+			if header.Schema < 10 {
+				if err := rejectLegacyPre10Raw(raw); err != nil {
+					return st, err
 				}
 			}
 			for key, rawNodes := range raw {
 				// encoding/json accepts case-insensitive struct field names. Inspect
 				// the same spellings here so Nodes cannot hide a null extension.
-				if !strings.EqualFold(key, "nodes") {
+				if !stateFieldEqual(key, "nodes") {
 					continue
 				}
 				var nodes []map[string]json.RawMessage
@@ -80,22 +78,22 @@ func DecodeState(data []byte) (State, error) {
 				}
 				for _, n := range nodes {
 					for key, value := range n {
-						if header.Schema < 8 && (strings.EqualFold(key, "anytls") || strings.EqualFold(key, "tuic") || strings.EqualFold(key, "transport")) {
+						if header.Schema < 8 && (stateFieldEqual(key, "anytls") || stateFieldEqual(key, "tuic") || stateFieldEqual(key, "transport")) {
 							return st, errors.New("旧状态不能包含新协议设置；请使用版本8")
 						}
-						if header.Schema < 8 && strings.EqualFold(key, "protocol") {
+						if header.Schema < 8 && stateFieldEqual(key, "protocol") {
 							var protocol string
 							_ = json.Unmarshal(value, &protocol)
-							if protocol == "anytls" || protocol == "trojan" || protocol == "ss-aead" || protocol == "tuic" || protocol == "vless-tls" || protocol == "vmess-tls" {
+							if p, ok := Protocol(protocol); ok && p.MinSchema >= 8 {
 								return st, errors.New("旧状态不能声明新协议；请使用版本8")
 							}
 						}
 					}
 					for key := range n {
-						if header.Schema < 6 && strings.EqualFold(key, "certificate_id") {
+						if header.Schema < 6 && stateFieldEqual(key, "certificate_id") {
 							return st, errors.New("旧状态不能包含证书引用；请使用版本6")
 						}
-						if strings.EqualFold(key, "certificate") {
+						if stateFieldEqual(key, "certificate") {
 							if header.Schema >= 6 {
 								return st, errors.New("版本6及以上节点仅允许certificate_id")
 							}
@@ -104,21 +102,21 @@ func DecodeState(data []byte) (State, error) {
 								return st, err
 							}
 							for field := range certificate {
-								if strings.EqualFold(field, "acme") || strings.EqualFold(field, "certificate_path") || strings.EqualFold(field, "key_path") {
+								if stateFieldEqual(field, "acme") || stateFieldEqual(field, "certificate_path") || stateFieldEqual(field, "key_path") {
 									return st, errors.New("旧状态不能包含新证书设置；请使用版本6")
 								}
 							}
 						}
-						if header.Schema < 5 && strings.EqualFold(key, "tags") {
+						if header.Schema < 5 && stateFieldEqual(key, "tags") {
 							return st, errors.New("旧状态不能包含节点标签；请使用版本5")
 						}
-						if header.Schema == 1 && strings.EqualFold(key, "hysteria2") {
+						if header.Schema == 1 && stateFieldEqual(key, "hysteria2") {
 							return st, errors.New("状态版本1不能包含Hysteria2性能扩展；请使用版本2")
 						}
-						if header.Schema < 3 && (strings.EqualFold(key, "connect_port") || strings.EqualFold(key, "additional_endpoints")) {
+						if header.Schema < 3 && (stateFieldEqual(key, "connect_port") || stateFieldEqual(key, "additional_endpoints")) {
 							return st, fmt.Errorf("状态版本%d不能包含连接端点扩展；请使用版本3", header.Schema)
 						}
-						if header.Schema < 4 && strings.EqualFold(key, "egress_id") {
+						if header.Schema < 4 && stateFieldEqual(key, "egress_id") {
 							return st, fmt.Errorf("状态版本%d不能包含出口引用；请使用版本4", header.Schema)
 						}
 					}
@@ -128,12 +126,12 @@ func DecodeState(data []byte) (State, error) {
 			var raw map[string]json.RawMessage
 			_ = json.Unmarshal(data, &raw)
 			for key, value := range raw {
-				if strings.EqualFold(key, "nodes") {
+				if stateFieldEqual(key, "nodes") {
 					var nodes []map[string]json.RawMessage
 					_ = json.Unmarshal(value, &nodes)
 					for _, n := range nodes {
 						for field := range n {
-							if strings.EqualFold(field, "certificate") {
+							if stateFieldEqual(field, "certificate") {
 								return st, errors.New("版本6节点仅允许certificate_id，私钥须存放证书资源")
 							}
 						}
@@ -147,15 +145,290 @@ func DecodeState(data []byte) (State, error) {
 	}
 }
 
+func legacyRealityFingerprint(fp string) bool {
+	switch fp {
+	case "", "chrome", "firefox", "safari", "ios", "edge":
+		return true
+	default:
+		return false
+	}
+}
+
+func rejectLegacyPre10TransportRaw(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var tr map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		return err
+	}
+	for field, value := range tr {
+		if stateFieldEqual(field, "max_early_data") || stateFieldEqual(field, "early_data_header_name") {
+			return errors.New("旧状态不能包含版本10 WebSocket Early Data 设置；请使用版本10")
+		}
+		if stateFieldEqual(field, "type") {
+			var kind string
+			_ = json.Unmarshal(value, &kind)
+			if kind == "http" {
+				return errors.New("旧状态不能包含版本10 HTTP/2 传输设置；请使用版本10")
+			}
+		}
+	}
+	return nil
+}
+
+func rejectLegacyPre10HY2PerfRaw(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var hy2 map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &hy2); err != nil {
+		return err
+	}
+	for field := range hy2 {
+		if stateFieldEqual(field, "obfs") || stateFieldEqual(field, "hop_ports") || stateFieldEqual(field, "hop_interval") || stateFieldEqual(field, "hop_mode") {
+			return errors.New("旧状态不能包含版本10 Hysteria2 混淆或端口跳跃设置；请使用版本10")
+		}
+	}
+	return nil
+}
+
+func rejectLegacyPre10Raw(raw map[string]json.RawMessage) error {
+	for key := range raw {
+		if stateFieldEqual(key, "traffic_quotas") {
+			return errors.New("旧状态不能包含版本10流量配额设置；请使用版本10")
+		}
+	}
+	for key, rawDevices := range raw {
+		if !stateFieldEqual(key, "devices") {
+			continue
+		}
+		var devices []map[string]json.RawMessage
+		if err := json.Unmarshal(rawDevices, &devices); err != nil {
+			return err
+		}
+		for _, d := range devices {
+			for field, value := range d {
+				if stateFieldEqual(field, "default_subscription_format") || stateFieldEqual(field, "tun") || stateFieldEqual(field, "controller") {
+					return errors.New("旧状态不能包含版本10设备导出或默认订阅设置；请使用版本10")
+				}
+				if stateFieldEqual(field, "routing") {
+					var routing string
+					_ = json.Unmarshal(value, &routing)
+					if routing == "cn-direct" || routing == "global-secure-dns" {
+						return errors.New("旧状态不能声明新分流预设；请使用版本10")
+					}
+				}
+			}
+		}
+	}
+	for key, rawNodes := range raw {
+		if !stateFieldEqual(key, "nodes") {
+			continue
+		}
+		var nodes []map[string]json.RawMessage
+		if err := json.Unmarshal(rawNodes, &nodes); err != nil {
+			return err
+		}
+		for _, n := range nodes {
+			var protocol string
+			for field, value := range n {
+				if stateFieldEqual(field, "protocol") {
+					_ = json.Unmarshal(value, &protocol)
+				}
+			}
+			for field, value := range n {
+				if stateFieldEqual(field, "multiplex") {
+					return errors.New("旧状态不能包含版本10多路复用设置；请使用版本10")
+				}
+				if stateFieldEqual(field, "transport") {
+					if protocol == "reality" {
+						return errors.New("旧状态不能包含版本10 REALITY传输扩展；请使用版本10")
+					}
+					if err := rejectLegacyPre10TransportRaw(value); err != nil {
+						return err
+					}
+				}
+				if stateFieldEqual(field, "hysteria2") {
+					if err := rejectLegacyPre10HY2PerfRaw(value); err != nil {
+						return err
+					}
+				}
+				if stateFieldEqual(field, "reality") && string(value) != "null" {
+					var r map[string]json.RawMessage
+					if err := json.Unmarshal(value, &r); err != nil {
+						return err
+					}
+					for rf, rv := range r {
+						if stateFieldEqual(rf, "short_ids") {
+							return errors.New("旧状态不能包含版本10 REALITY多short_id设置；请使用版本10")
+						}
+						if stateFieldEqual(rf, "fingerprint") {
+							var fp string
+							_ = json.Unmarshal(rv, &fp)
+							if !legacyRealityFingerprint(fp) {
+								return errors.New("旧状态不能包含版本10新增REALITY指纹；请使用版本10")
+							}
+						}
+					}
+				}
+				if protocol == "ss2022" && stateFieldEqual(field, "shadowsocks") && string(value) != "null" {
+					var ss map[string]json.RawMessage
+					if err := json.Unmarshal(value, &ss); err != nil {
+						return err
+					}
+					for sf, sv := range ss {
+						if stateFieldEqual(sf, "method") {
+							var m string
+							_ = json.Unmarshal(sv, &m)
+							if m != "" && m != SS2022Method {
+								return errors.New("旧状态不能包含版本10新增SS2022加密方法；请使用版本10")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for key, rawEgresses := range raw {
+		if !stateFieldEqual(key, "egresses") || string(rawEgresses) == "null" {
+			continue
+		}
+		var egresses []map[string]json.RawMessage
+		if err := json.Unmarshal(rawEgresses, &egresses); err != nil {
+			return err
+		}
+		for _, e := range egresses {
+			var protocol string
+			for field, value := range e {
+				if stateFieldEqual(field, "protocol") {
+					_ = json.Unmarshal(value, &protocol)
+				}
+			}
+			if spec, ok := egressProtocol(protocol); ok && spec.MinSchema >= 10 {
+				return errors.New("旧状态不能声明版本10新增远程出口协议；请使用版本10")
+			}
+			for field, value := range e {
+				for _, v10Field := range []string{"transport", "multiplex", "http", "trojan", "vless", "vmess", "anytls", "tuic"} {
+					if stateFieldEqual(field, v10Field) {
+						return errors.New("旧状态不能包含版本10远程出口扩展字段；请使用版本10")
+					}
+				}
+				if stateFieldEqual(field, "reality") && string(value) != "null" {
+					var r map[string]json.RawMessage
+					if err := json.Unmarshal(value, &r); err != nil {
+						return err
+					}
+					for rf, rv := range r {
+						if stateFieldEqual(rf, "fingerprint") {
+							var fp string
+							_ = json.Unmarshal(rv, &fp)
+							if !legacyRealityFingerprint(fp) {
+								return errors.New("旧状态不能包含版本10新增远程REALITY指纹；请使用版本10")
+							}
+						}
+					}
+				}
+				if protocol == "ss2022" && stateFieldEqual(field, "shadowsocks") && string(value) != "null" {
+					var ss map[string]json.RawMessage
+					if err := json.Unmarshal(value, &ss); err != nil {
+						return err
+					}
+					for sf, sv := range ss {
+						if stateFieldEqual(sf, "method") {
+							var m string
+							_ = json.Unmarshal(sv, &m)
+							if m != "" && m != SS2022Method {
+								return errors.New("旧状态不能包含版本10新增远程SS2022加密方法；请使用版本10")
+							}
+						}
+					}
+				}
+				if stateFieldEqual(field, "hysteria2") && string(value) != "null" {
+					var hy map[string]json.RawMessage
+					if err := json.Unmarshal(value, &hy); err != nil {
+						return err
+					}
+					for hf, hv := range hy {
+						if stateFieldEqual(hf, "performance") {
+							if err := rejectLegacyPre10HY2PerfRaw(hv); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func rejectLegacyPre10State(st State) error {
+	if st.Firewall == "nftables" {
+		return errors.New("旧状态不能声明nftables受管模式")
+	}
+	if st.TrafficQuotas != nil {
+		return errors.New("旧状态不能包含版本10流量配额设置")
+	}
+	for _, d := range st.Devices {
+		if d.DefaultSubscriptionFormat != "" || d.TUN || d.Controller != nil || d.Routing == "cn-direct" || d.Routing == "global-secure-dns" {
+			return errors.New("旧状态不能包含版本10设备导出或分流设置")
+		}
+	}
+	for _, n := range st.Nodes {
+		if n.Multiplex != nil {
+			return errors.New("旧状态不能包含版本10多路复用设置")
+		}
+		if n.Transport != nil {
+			if n.Protocol == "reality" || n.Transport.Type == "http" || n.Transport.MaxEarlyData != 0 || n.Transport.EarlyDataHeaderName != "" {
+				return errors.New("旧状态不能包含版本10传输扩展设置")
+			}
+		}
+		if n.HY2 != nil && (n.HY2.Obfs != nil || n.HY2.HopPorts != "" || n.HY2.HopInterval != "" || n.HY2.HopMode != "") {
+			return errors.New("旧状态不能包含版本10 Hysteria2 混淆或端口跳跃设置")
+		}
+		if n.Reality != nil && (len(n.Reality.ShortIDs) > 0 || !legacyRealityFingerprint(n.Reality.Fingerprint)) {
+			return errors.New("旧状态不能包含版本10 REALITY 扩展设置")
+		}
+		if n.Protocol == "ss2022" && n.Shadowsocks != nil && n.Shadowsocks.Method != "" && n.Shadowsocks.Method != SS2022Method {
+			return errors.New("旧状态不能包含版本10 SS2022 新增加密方法")
+		}
+	}
+	for _, e := range st.Egresses {
+		if spec, ok := egressProtocol(e.Protocol); ok && spec.MinSchema >= 10 {
+			return errors.New("旧状态不能声明版本10新增远程出口协议")
+		}
+		if e.Transport != nil || e.Multiplex != nil || e.HTTP != nil || e.Trojan != nil || e.VLESS != nil || e.VMess != nil || e.AnyTLS != nil || e.TUIC != nil {
+			return errors.New("旧状态不能包含版本10远程出口扩展设置")
+		}
+		if e.Reality != nil && !legacyRealityFingerprint(e.Reality.Fingerprint) {
+			return errors.New("旧状态不能包含版本10远程REALITY新增指纹")
+		}
+		if e.Protocol == "ss2022" && e.Shadowsocks != nil && e.Shadowsocks.Method != "" && e.Shadowsocks.Method != SS2022Method {
+			return errors.New("旧状态不能包含版本10远程SS2022新增加密方法")
+		}
+		if e.HY2 != nil && e.HY2.Performance != nil && (e.HY2.Performance.Obfs != nil || e.HY2.Performance.HopPorts != "" || e.HY2.Performance.HopInterval != "" || e.HY2.Performance.HopMode != "") {
+			return errors.New("旧状态不能包含版本10远程Hysteria2混淆或端口跳跃设置")
+		}
+	}
+	return nil
+}
+
 // MigrateState is deterministic and has no disk, identity or runtime effects.
 // The caller must retain original bytes when persisting a newly migrated state.
 func MigrateState(st State) (State, error) {
+	if st.Schema < 10 {
+		if err := rejectLegacyPre10State(st); err != nil {
+			return State{}, err
+		}
+	}
 	if st.Schema < 9 && st.Firewall == "firewalld" {
 		return State{}, errors.New("旧状态不能声明firewalld受管模式")
 	}
 	if st.Schema < 8 {
 		for _, n := range st.Nodes {
-			if n.AnyTLS != nil || n.TUIC != nil || n.Transport != nil || n.Protocol == "anytls" || n.Protocol == "trojan" || n.Protocol == "ss-aead" || n.Protocol == "tuic" || n.Protocol == "vless-tls" || n.Protocol == "vmess-tls" {
+			p, ok := Protocol(n.Protocol)
+			if n.AnyTLS != nil || n.TUIC != nil || n.Transport != nil || (ok && p.MinSchema >= 8) {
 				return State{}, errors.New("旧状态不能包含新协议字段或类型")
 			}
 		}
@@ -163,7 +436,7 @@ func MigrateState(st State) (State, error) {
 	switch st.Schema {
 	case Schema:
 		return CanonicalCertificates(st)
-	case 7, 8:
+	case 7, 8, 9:
 		st = st.Clone()
 		st.Schema = Schema
 		return CanonicalCertificates(st)
@@ -221,75 +494,6 @@ func MigrateState(st State) (State, error) {
 	}
 }
 
-// encoding/json otherwise accepts the last spelling of a duplicate field.
-// Case folding matches its struct-field behavior and prevents hidden schema or
-// secret replacement. This is validation only and never rewrites source bytes.
 func rejectStateDuplicateFields(data []byte) error {
-	d := json.NewDecoder(bytes.NewReader(data))
-	var value func() error
-	value = func() error {
-		t, err := d.Token()
-		if err != nil {
-			return err
-		}
-		if delim, ok := t.(json.Delim); ok {
-			switch delim {
-			case '{':
-				seen := map[string]bool{}
-				for d.More() {
-					key, err := d.Token()
-					if err != nil {
-						return err
-					}
-					name, ok := key.(string)
-					if !ok {
-						return errors.New("状态对象字段无效")
-					}
-					name = stateFieldKey(name)
-					if seen[name] {
-						return errors.New("状态对象含重复字段")
-					}
-					seen[name] = true
-					if err = value(); err != nil {
-						return err
-					}
-				}
-			case '[':
-				for d.More() {
-					if err = value(); err != nil {
-						return err
-					}
-				}
-			default:
-				return errors.New("状态JSON结构无效")
-			}
-			_, err = d.Token()
-			return err
-		}
-		return nil
-	}
-	if err := value(); err != nil {
-		return err
-	}
-	if _, err := d.Token(); err != io.EOF {
-		return errors.New("状态文件含多余数据")
-	}
-	return nil
-}
-
-// encoding/json compares struct field names using Unicode SimpleFold, which
-// includes aliases such as long s and Kelvin sign. Lowercasing alone misses
-// those duplicate spellings. A canonical member of each fold cycle gives the
-// same equivalence relation in linear key length; no normalization or scan of
-// previously seen keys is needed.
-func stateFieldKey(name string) string {
-	return strings.Map(func(r rune) rune {
-		canonical := r
-		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
-			if next < canonical {
-				canonical = next
-			}
-		}
-		return canonical
-	}, name)
+	return validateStrictJSON(data, stateJSONPolicy)
 }

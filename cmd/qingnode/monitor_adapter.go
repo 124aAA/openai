@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,8 +25,30 @@ import (
 )
 
 type monitorAdapter struct {
-	app   *app
-	state node.State
+	app    *app
+	state  node.State
+	coreMu sync.Mutex
+	cores  map[string]probe.SandboxOptions
+}
+
+func (m *monitorAdapter) resolveCore(p probe.Profile) (probe.SandboxOptions, error) {
+	m.coreMu.Lock()
+	if c, ok := m.cores[p.CoreVersion]; ok {
+		m.coreMu.Unlock()
+		return c, nil
+	}
+	m.coreMu.Unlock()
+	c, err := m.app.probeDefaultCore(p)
+	if err != nil {
+		return probe.SandboxOptions{}, err
+	}
+	m.coreMu.Lock()
+	if m.cores == nil {
+		m.cores = map[string]probe.SandboxOptions{}
+	}
+	m.cores[p.CoreVersion] = c
+	m.coreMu.Unlock()
+	return c, nil
 }
 type monitorService struct {
 	active, sub string
@@ -278,7 +301,7 @@ func (m *monitorAdapter) measure(ctx context.Context, j monitor.Job, b monitor.B
 		}
 		opts.ConfigSHA256, opts.ServerPathSHA256 = p.ConfigSHA256, p.ServerPathSHA256
 		o.ConfigSHA256, o.ServerPathSHA256 = p.ConfigSHA256, p.ServerPathSHA256
-		core, err := m.app.probeDefaultCore(p)
+		core, err := m.resolveCore(p)
 		if err != nil {
 			set(monitor.Authentication, monitor.Unknown, "client-proxy", "trusted_core_unavailable")
 			return
@@ -295,7 +318,7 @@ func (m *monitorAdapter) measure(ctx context.Context, j monitor.Job, b monitor.B
 			udpPreflight = "egress_does_not_support_udp"
 			set(monitor.UDP, monitor.Failed, "client-proxy", "egress_does_not_support_udp")
 		}
-		core, err := m.app.probeDefaultCore(probe.Profile{CoreVersion: m.state.CoreVersion})
+		core, err := m.resolveCore(probe.Profile{CoreVersion: m.state.CoreVersion})
 		if err != nil {
 			set(monitor.Authentication, monitor.Unknown, "client-proxy", "trusted_core_unavailable")
 			return
@@ -475,6 +498,11 @@ func (m *monitorAdapter) Act(ctx context.Context, j monitor.Job, action string) 
 		newPolicy, _ := json.Marshal(latest)
 		if e != nil || ctx.Err() != nil || !latest.Enabled || latest.Recovery.Mode != "restart" || !bytes.Equal(oldPolicy, newPolicy) {
 			return monitor.RedactedError("recovery_policy_revoked")
+		}
+		if !m.app.offline && current.Observability != nil && current.Observability.Enabled {
+			if sample, sErr := captureLedgerSample(ctx, current, m.app.store.Backend, true); sErr == nil {
+				_, _ = m.app.monitorStore().RecordTrafficSampleUnlocked(sample)
+			}
 		}
 		if e = monitorManager(ctx).TryRestart("qingnode"); e != nil {
 			return monitor.RedactedError("service_try_restart_failed")

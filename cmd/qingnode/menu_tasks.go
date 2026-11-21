@@ -52,6 +52,18 @@ func (a *app) previewMenuMutation(candidate node.State) error {
 			}
 		}
 	}
+	for _, fwd := range impact.Forwards {
+		if !fwd.Changed && !fwd.ServerRuntime && !fwd.Display && !fwd.HostEffects {
+			continue
+		}
+		fmt.Fprintf(w, "端口中转：%s（%s）\n", node.Redact(fwd.Name, candidate), fwd.ID)
+	}
+	for _, dev := range impact.Devices {
+		if !dev.Changed && !dev.ClientExport && !dev.Display {
+			continue
+		}
+		fmt.Fprintf(w, "设备配置：%s（%s）\n", node.Redact(dev.Name, candidate), dev.ID)
+	}
 	if a.offline {
 		fmt.Fprintln(w, "离线环境只保存配置；上面的运行变化未在宿主执行。")
 	}
@@ -100,22 +112,9 @@ func (a *app) exportTaskMenu() error {
 		case "1":
 			return a.menuCommand([]string{"device", "list"})
 		case "2":
-			n, err := a.selectNode()
-			if err != nil {
-				return err
-			}
-			u, err := a.selectUser(n)
-			if err != nil {
-				return err
-			}
-			name, err := a.menuRequired("设备名称")
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(ui.HumanWriter(os.Stderr), "本设备仅绑定所选节点和凭据，默认手动选择；自动/主备策略请在完整Profile中明确配置。")
-			return a.menuCommand([]string{"device", "create", "--name", name, "--binding", n.ID + ":" + u, "--strategy", "manual"})
+			return a.deviceCreateWizard()
 		case "3":
-			id, err := a.menuRequired("设备ID或名称（先用1查看）")
+			p, err := a.selectDevice()
 			if err != nil {
 				return err
 			}
@@ -123,43 +122,40 @@ func (a *app) exportTaskMenu() error {
 			if err != nil {
 				return err
 			}
-			version := "1.14.0"
+			defaultVer := "1.14.0"
 			if format == "mihomo" {
-				version = "1.19.30"
+				defaultVer = "1.19.30"
 			} else if format != "sing-box" {
 				return errors.New("这里仅导出sing-box或mihomo完整配置")
+			}
+			version, err := a.wizardPrompt("目标客户端版本", defaultVer)
+			if err != nil {
+				return err
 			}
 			out, err := a.menuRequired("新私有配置文件路径")
 			if err != nil {
 				return err
 			}
-			return a.menuCommand([]string{"export", "--device", id, "--format", format, "--client-version", version, "--out", out})
+			return a.menuCommand([]string{"export", "--device", p.ID, "--format", format, "--client-version", version, "--out", out})
 		case "4":
 			return a.menuCommand([]string{"subscription", "status"})
 		case "5":
-			fmt.Fprintln(ui.HumanWriter(os.Stderr), "须先按订阅指南初始化独立发布目录并部署可信HTTPS；这里不会接管80/443。令牌只写所选设备的私有文件，不显示在普通状态页。")
-			id, err := a.menuRequired("设备ID或名称")
-			if err != nil {
-				return err
-			}
-			origin, err := a.menuRequired("已有可信HTTPS源地址")
-			if err != nil {
-				return err
-			}
-			out, err := a.menuRequired("新令牌私有文件路径")
-			if err != nil {
-				return err
-			}
-			return a.menuCommand([]string{"subscription", "issue", "--device", id, "--base-url", origin, "--out", out})
+			return a.subscriptionIssueWizard()
 		case "6":
-			id, err := a.menuRequired("仅撤销此设备下载权限：设备ID或名称")
+			p, err := a.selectDevice()
 			if err != nil {
 				return err
 			}
 			if !a.confirm("将拒绝此设备后续下载，已下载的代理凭据仍有效。输入yes继续") {
 				return errMenuCanceled
 			}
-			return a.menuCommand([]string{"subscription", "revoke", "--device", id, "--yes"})
+			return a.menuCommand([]string{"subscription", "revoke", "--device", p.ID, "--yes"})
+		case "7":
+			file, err := a.menuRequired("权限600的设备配置批量JSON文件")
+			if err != nil {
+				return err
+			}
+			return a.menuCommand([]string{"device", "apply", "--file", file})
 		}
 		return menuInvalid()
 	})
@@ -216,27 +212,25 @@ func (a *app) certificateTaskMenu() error {
 		case "1":
 			return a.menuCommand([]string{"certificate", "list"})
 		case "2":
-			id, err := a.menuRequired("证书资源ID或名称")
+			c, err := a.selectCertificate()
 			if err != nil {
 				return err
 			}
-			return a.menuCommand([]string{"certificate", "status", "--id", id})
+			return a.menuCommand([]string{"certificate", "status", "--id", c.ID})
 		case "3":
+			return a.certificateCreateWizard()
+		case "4":
+			return a.certificateUpdateWizard()
+		case "5":
+			return a.certificateBindWizard()
+		case "6":
+			return a.certificateUnbindOrRemoveWizard()
+		case "7":
 			file, err := a.menuRequired("权限600的证书资源JSON文件（私钥不从命令行输入）")
 			if err != nil {
 				return err
 			}
 			return a.menuCommand([]string{"certificate", "import", "--file", file})
-		case "4":
-			n, err := a.selectNode()
-			if err != nil {
-				return err
-			}
-			id, err := a.menuRequired("已有证书资源ID或名称")
-			if err != nil {
-				return err
-			}
-			return a.menuCommand([]string{"certificate", "bind", "--id", id, "--node", n.ID})
 		}
 		return menuInvalid()
 	})
@@ -251,12 +245,7 @@ func (a *app) advancedTaskMenu() error {
 			}
 			return a.menuCommand([]string{"endpoint", "material", "--id", n.ID})
 		case "2":
-			for _, command := range [][]string{{"egress", "list"}, {"forward", "list"}, {"egress", "policy", "list"}, {"list"}} {
-				if err := a.menuCommand(command); err != nil {
-					return err
-				}
-			}
-			return nil
+			return a.topologyTaskMenu()
 		case "3":
 			file, err := a.menuRequired("私有、类型化拓扑JSON文件")
 			if err != nil {

@@ -179,16 +179,11 @@ func auxiliaryReadPrivate(path string) ([]byte, error) {
 func auxiliaryDecode(b []byte, value any) error {
 	// The shared bounded envelope walker rejects duplicate/aliased keys, null,
 	// excessive nesting and trailing JSON before encoding/json can pick a winner.
-	if err := rejectMigrationJSON(b); err != nil {
+	if err := validateStrictJSON(b, migrationJSONPolicy); err != nil {
 		return errors.New("附属服务恢复材料含重复、歧义或无效JSON字段")
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
+	if err := unmarshalStrictStruct(b, value); err != nil {
 		return errors.New("附属服务恢复材料格式不受支持")
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return errors.New("附属服务恢复材料包含多余条目")
 	}
 	return nil
 }

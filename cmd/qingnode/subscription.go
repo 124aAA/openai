@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/skip2/go-qrcode"
+	"qingnode/internal/monitor"
 	"qingnode/internal/node"
 	"qingnode/internal/subscription"
 )
@@ -58,11 +59,11 @@ func decodePublisherConfig(raw []byte) (publisherConfig, error) {
 		}
 		seen[f] = true
 	}
-	if c.SingBoxVersion != "1.14.0" && c.SingBoxVersion != "1.14.3" {
-		return c, errors.New("订阅sing-box版本仅核验1.14.0/1.14.3")
+	if !node.SupportedVersion(c.SingBoxVersion) {
+		return c, errors.New("订阅sing-box版本仅支持1.14.x")
 	}
-	if c.MihomoVersion != "1.19.30" {
-		return c, errors.New("订阅Mihomo版本仅核验1.19.30")
+	if !node.SupportedMihomoVersion(c.MihomoVersion) {
+		return c, errors.New("订阅Mihomo版本须为>=1.19.0")
 	}
 	return c, nil
 }
@@ -87,10 +88,130 @@ func (a *app) publisherConfig() (publisherConfig, bool, error) {
 	return c, true, e
 }
 
+func effectiveSubscriptionExpiryUnix(st node.State, p node.DeviceProfile, tokenExpires time.Time) int64 {
+	earliest := tokenExpires.Unix()
+	foundEarlier := false
+	for _, ce := range st.CredentialExpirations {
+		if ce.DisabledAt != "" {
+			continue
+		}
+		matched := ce.DeviceID == p.ID
+		if !matched && ce.DeviceID == "" {
+			for _, b := range p.Bindings {
+				if b.NodeID == ce.NodeID && b.UserID == ce.UserID {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			continue
+		}
+		if at, err := node.ParseExpirationTime(ce.ExpiresAt); err == nil {
+			if u := at.Unix(); u > 0 && u < earliest {
+				earliest = u
+				foundEarlier = true
+			}
+		}
+	}
+	if !foundEarlier {
+		return 0
+	}
+	return earliest
+}
+
+func deviceSubscriptionUsage(st node.State, p node.DeviceProfile, ledger *monitor.TrafficLedger, now time.Time) (*int64, *int64, *int64) {
+	resetDay := 0
+	var hardCap int64
+	hasQuota := false
+	for _, q := range st.TrafficQuotas {
+		if q.DisabledAt != "" {
+			continue
+		}
+		if q.NodeID == "" && q.DeviceID == p.ID {
+			hasQuota = true
+			resetDay = q.ResetDay
+			if q.HardBytes > 0 {
+				hardCap = q.HardBytes
+			}
+			break
+		}
+	}
+	if !hasQuota {
+		for _, q := range st.TrafficQuotas {
+			if q.DisabledAt != "" {
+				continue
+			}
+			matched := q.DeviceID == p.ID
+			if !matched && q.DeviceID == "" && q.NodeID != "" {
+				for _, b := range p.Bindings {
+					if b.NodeID == q.NodeID && b.UserID == q.UserID {
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+			hasQuota = true
+			resetDay = q.ResetDay
+			if q.HardBytes > 0 && (hardCap == 0 || q.HardBytes < hardCap) {
+				hardCap = q.HardBytes
+			}
+		}
+	}
+
+	var sumUp, sumDown int64
+	hasLedgerEntry := false
+	if ledger != nil {
+		seen := map[string]bool{}
+		for _, b := range p.Bindings {
+			k := b.NodeID + "/" + b.UserID
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if pair, ok := ledger.UsageFor(b.NodeID, b.UserID, resetDay, now); ok {
+				hasLedgerEntry = true
+				sumUp += pair.Upload
+				sumDown += pair.Download
+			}
+		}
+	}
+	if !hasLedgerEntry && !hasQuota {
+		return nil, nil, nil
+	}
+	up := sumUp
+	down := sumDown
+	var total *int64
+	if hardCap > 0 {
+		capCopy := hardCap
+		total = &capCopy
+	}
+	return &up, &down, total
+}
+
+func (a *app) loadOptionalTrafficLedger() *monitor.TrafficLedger {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	ledger, err := a.monitorStore().LoadTrafficLedger()
+	if err != nil {
+		return nil
+	}
+	return &ledger
+}
+
 func publicationForState(st node.State, c publisherConfig, old subscription.Snapshot) (subscription.Snapshot, error) {
+	return publicationForStateWithLedger(st, c, old, nil)
+}
+
+func publicationForStateWithLedger(st node.State, c publisherConfig, old subscription.Snapshot, ledger *monitor.TrafficLedger) (subscription.Snapshot, error) {
 	next := old
 	next.Records = append([]subscription.Record{}, old.Records...)
-	next.GeneratedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	next.GeneratedAt = now
 	for i := range next.Records {
 		r := &next.Records[i]
 		// Published identities are exact stable IDs, never human-name selectors.
@@ -103,6 +224,12 @@ func publicationForState(st node.State, c publisherConfig, old subscription.Snap
 		}
 		if p == nil || p.Disabled || r.Revoked {
 			r.Revoked = true
+			r.DeviceName = ""
+			r.DefaultFormat = ""
+			r.EffectiveExpireUnix = 0
+			r.UploadBytes = nil
+			r.DownloadBytes = nil
+			r.TotalBytes = nil
 			r.Outputs = map[string]subscription.Payload{}
 			continue
 		}
@@ -138,6 +265,16 @@ func publicationForState(st node.State, c publisherConfig, old subscription.Snap
 			ct, _ := subscription.ContentType(format)
 			r.Outputs[format] = subscription.Payload{ContentType: ct, Content: out.Content}
 		}
+		r.DeviceName = p.Name
+		r.DefaultFormat = ""
+		if p.DefaultSubscriptionFormat != "" {
+			if _, ok := r.Outputs[p.DefaultSubscriptionFormat]; !ok {
+				return next, fmt.Errorf("设备%s的默认订阅格式%s未在已发布格式中启用", p.ID, p.DefaultSubscriptionFormat)
+			}
+			r.DefaultFormat = p.DefaultSubscriptionFormat
+		}
+		r.EffectiveExpireUnix = effectiveSubscriptionExpiryUnix(st, *p, r.ExpiresAt)
+		r.UploadBytes, r.DownloadBytes, r.TotalBytes = deviceSubscriptionUsage(st, *p, ledger, now)
 	}
 	return next, subscription.Validate(next)
 }
@@ -153,7 +290,7 @@ func (a *app) refreshPublished(st node.State) error {
 	if e != nil {
 		return e
 	}
-	next, e := publicationForState(st, c, old)
+	next, e := publicationForStateWithLedger(st, c, old, a.loadOptionalTrafficLedger())
 	if e != nil {
 		return e
 	}
@@ -173,6 +310,12 @@ func (a *app) revokePublishedDevice(id string) error {
 	for i := range s.Records {
 		if s.Records[i].DeviceID == id && !s.Records[i].Revoked {
 			s.Records[i].Revoked = true
+			s.Records[i].DeviceName = ""
+			s.Records[i].DefaultFormat = ""
+			s.Records[i].EffectiveExpireUnix = 0
+			s.Records[i].UploadBytes = nil
+			s.Records[i].DownloadBytes = nil
+			s.Records[i].TotalBytes = nil
 			s.Records[i].Outputs = map[string]subscription.Payload{}
 			changed = true
 		}
@@ -205,6 +348,12 @@ func (a *app) revokeRemovedPublishedDevices(next node.State) error {
 		r := &s.Records[i]
 		if !r.Revoked && !active[r.DeviceID] {
 			r.Revoked = true
+			r.DeviceName = ""
+			r.DefaultFormat = ""
+			r.EffectiveExpireUnix = 0
+			r.UploadBytes = nil
+			r.DownloadBytes = nil
+			r.TotalBytes = nil
 			r.Outputs = map[string]subscription.Payload{}
 			changed = true
 		}
@@ -221,12 +370,13 @@ type subscriptionLink struct {
 	URL    string `json:"url"`
 }
 type tokenMaterial struct {
-	Version   int                `json:"version"`
-	DeviceID  string             `json:"device_id"`
-	TokenID   string             `json:"token_id"`
-	Token     string             `json:"token"`
-	ExpiresAt time.Time          `json:"expires_at"`
-	Links     []subscriptionLink `json:"links"`
+	Version    int                `json:"version"`
+	DeviceID   string             `json:"device_id"`
+	TokenID    string             `json:"token_id"`
+	Token      string             `json:"token"`
+	ExpiresAt  time.Time          `json:"expires_at"`
+	UnifiedURL string             `json:"unified_url,omitempty"`
+	Links      []subscriptionLink `json:"links"`
 }
 
 func parseSubscriptionOrigin(raw string) (*url.URL, error) {
@@ -251,6 +401,17 @@ func validateTokenMaterial(m tokenMaterial, now time.Time) error {
 	}
 	if m.Version != 1 || !hexValue(m.DeviceID, 16) || !hexValue(m.TokenID, 16) || !hexValue(m.Token, 64) || !now.Before(m.ExpiresAt) || m.ExpiresAt.After(now.Add(366*24*time.Hour)) || len(m.Links) > 5 {
 		return errors.New("令牌私有材料的身份、秘密或到期时间无效；请检查原签发文件")
+	}
+	if m.UnifiedURL != "" {
+		u, err := url.Parse(m.UnifiedURL)
+		if err != nil || u.RawPath != "" || u.Path != "/s/"+m.Token {
+			return errors.New("统一订阅链接路径与本设备秘密不符")
+		}
+		origin := *u
+		origin.Path = ""
+		if _, err = parseSubscriptionOrigin(origin.String()); err != nil {
+			return errors.New("统一订阅链接须为有效HTTPS源地址与精确下载路径")
+		}
 	}
 	seen := map[string]bool{}
 	for _, link := range m.Links {
@@ -418,7 +579,7 @@ func (a *app) subscription(args []string) error {
 			if e != nil {
 				return e
 			}
-			next, e := publicationForState(st, c, old)
+			next, e := publicationForStateWithLedger(st, c, old, a.loadOptionalTrafficLedger())
 			if e != nil {
 				return e
 			}
@@ -491,10 +652,19 @@ func (a *app) subscription(args []string) error {
 			return errors.New("令牌到期须晚于现在且不超过366天")
 		}
 		if *baseURL != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			defer cancel()
-			if e := verifySubscriptionHTTPS(ctx, *baseURL); e != nil {
+			if _, e := parseSubscriptionOrigin(*baseURL); e != nil {
 				return e
+			}
+			if a.verifyHTTPSFn != nil {
+				if e := a.verifyHTTPSFn(*baseURL); e != nil {
+					return e
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				defer cancel()
+				if e := verifySubscriptionHTTPS(ctx, *baseURL); e != nil {
+					return e
+				}
 			}
 		}
 		if e := a.probeOutput(*out); e != nil {
@@ -551,13 +721,14 @@ func (a *app) subscription(args []string) error {
 			}
 			r := subscription.Record{DeviceID: p.ID, TokenID: node.Token(8), TokenSHA256: hash, IssuedAt: now, ExpiresAt: expiry, Outputs: map[string]subscription.Payload{}}
 			next.Records = append(next.Records, r)
-			next, e = publicationForState(st, c, next)
+			next, e = publicationForStateWithLedger(st, c, next, a.loadOptionalTrafficLedger())
 			if e != nil {
 				return e
 			}
 			material := tokenMaterial{Version: 1, DeviceID: p.ID, TokenID: r.TokenID, Token: raw, ExpiresAt: expiry, Links: []subscriptionLink{}}
 			if *baseURL != "" {
 				u, _ := parseSubscriptionOrigin(*baseURL)
+				material.UnifiedURL = u.String() + "/s/" + raw
 				for _, format := range c.Formats {
 					if _, published := next.Records[len(next.Records)-1].Outputs[format]; !published {
 						continue
@@ -652,25 +823,33 @@ func (a *app) subscription(args []string) error {
 		if e = validateTokenMaterial(m, time.Now()); e != nil {
 			return e
 		}
-		for _, link := range m.Links {
-			if link.Format != *format {
-				continue
+		targetURL := ""
+		if *format == "auto" || *format == "unified" {
+			targetURL = m.UnifiedURL
+		} else {
+			for _, link := range m.Links {
+				if link.Format == *format {
+					targetURL = link.URL
+					break
+				}
 			}
-			q, e := qrcode.New(link.URL, qrcode.Medium)
-			if e != nil {
-				return errors.New("订阅链接过长，无法生成二维码")
-			}
-			if e = a.probeOutput(*out); e != nil {
-				return e
-			}
-			p, e := pinNewOutput(*out)
-			if e != nil {
-				return e
-			}
-			defer p.root.Close()
-			return p.write([]byte(q.ToSmallString(false)))
 		}
-		return errors.New("私有材料中没有该格式的HTTPS链接；本地原始令牌不能冒充已部署订阅")
+		if targetURL == "" {
+			return errors.New("私有材料中没有该格式的HTTPS链接；本地原始令牌不能冒充已部署订阅")
+		}
+		q, e := qrcode.New(targetURL, qrcode.Medium)
+		if e != nil {
+			return errors.New("订阅链接过长，无法生成二维码")
+		}
+		if e = a.probeOutput(*out); e != nil {
+			return e
+		}
+		p, e := pinNewOutput(*out)
+		if e != nil {
+			return e
+		}
+		defer p.root.Close()
+		return p.write([]byte(q.ToSmallString(false)))
 	default:
 		return errors.New("未知subscription操作")
 	}

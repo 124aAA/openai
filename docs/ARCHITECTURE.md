@@ -1,12 +1,28 @@
-# QingNode 0.3.1 架构
+# QingNode 0.5.x 架构
 
-当前菜单直接连接创建、节点管理、导出、状态诊断、备份更新、服务管理；证书、设备订阅和复杂网络配置收在高级设置。菜单复用原 CLI 和配置事务，不另建状态来源或协议配置器。创建后的可选导出复用同一节点导出向导，不自动显示认证。State 保持 9，默认官方核心保持 1.14.0；没有新增协议、持久字段或界面依赖。短流程和脚本契约见[上手指南](GETTING_STARTED.md)、[工作流程](WORKFLOWS.md)。历史第11批验证见[BATCH11.md](BATCH11.md)，不替代后续修改的验证。
+QingNode 是面向 Linux VPS 的轻量代理节点管理器，保持 **Bash 安装引导 + 静态 Go 管理器（`CGO_ENABLED=0`，零新增第三方依赖）+ 官方 `sing-box` 核心 + 本机 `systemd` / `OpenRC`** 主干，不引入常驻 Web 面板、Docker 或外部数据库。
 
-第10批将宿主探测、包依赖、服务生命周期/定义、计划任务和防火墙效果集中到小型适配边界：`internal/platform`与既有node后端。systemd原unit保留，OpenRC使用标准supervise-daemon，订阅/监控共享服务管理接口。当前State9只因新的firewalld值升级，旧1–8只在内存迁移；协议与身份不改变。实现/实际平台证据见[PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。下方各前批描述保留历史范围。
+## 当前 `0.5.x` 九协议、传输与运维架构总览
 
-未发行第09批新增AnyTLS/Trojan/传统SS AEAD/TUIC，当时State为schema8，旧1–7只在内存兼容；适配器、监听/业务能力登记与共享TLS证书投影接入现有事务。该批代码d0fd58a的定向25/25项、独立能力补测与五步构建通过；完整回归的准确提交与保留失败另列，详见[PROTOCOLS.md](PROTOCOLS.md)、[BATCH09.md](BATCH09.md)。各前批格式和结果保留历史范围，当前State以上方第10批为准。
-
-架构仍为轻量Bash/Go/sing-box与本机systemd/OpenRC。第08批结束时State因观测API与凭据到期字段变为schema7，当时旧1–6只读内存兼容；第09批当时为schema8，第10批当前为schema9、兼容旧1–8。默认配置备份保持 QNBK1/2 可读，完整迁移另用 QNBK3 typed v1。前批实现与证据见 [BATCH_01.md](BATCH_01.md)、[BATCH_02.md](BATCH_02.md)、[BATCH_03.md](BATCH_03.md)、[BATCH04.md](BATCH04.md)、[BATCH05.md](BATCH05.md)、[BATCH06.md](BATCH06.md)；当前证书/迁移接口见 [CERTIFICATES.md](CERTIFICATES.md)、[MIGRATION.md](MIGRATION.md)，监控/到期接口见[MONITORING.md](MONITORING.md)；第07批实际执行见[BATCH07.md](BATCH07.md)，第08批准确源码与环境边界见[BATCH08.md](BATCH08.md)。版本/客户端/平台边界见 [CAPABILITIES.md](CAPABILITIES.md)；v0.2.8 历史证据不代替当前实测。
+- **9 种底层协议、应用层传输与多路复用矩阵**：
+  1. `reality`（VLESS + REALITY，支持 Vision `tcp` 与 `grpc`，多 `short_id` 平滑轮换与 10 种 uTLS 指纹）
+  2. `ss2022`（Shadowsocks 2022，支持 `256-gcm`/`128-gcm`/`chacha20-poly1305` 三种方法与多用户独立密钥，可选 TCP `multiplex`）
+  3. `hysteria2`（UDP / QUIC，需 TLS 证书，支持 `salamander` 混淆密码与端口跳跃）
+  4. `anytls`（TCP 承载，需 TLS 证书，可选空闲连接池策略）
+  5. `trojan`（标准 TLS，支持 `tcp` / `ws` 含 Early Data / `grpc` / `httpupgrade` / `http`(`h2`) 及可选 TCP `multiplex`）
+  6. `ss-aead`（传统 Shadowsocks AEAD，独立用户口令，可选 TCP `multiplex`）
+  7. `tuic`（TUIC v5，UDP / QUIC，需 TLS 证书，支持标准 NEP-408 `tuic://` 链接与完整配置导出）
+  8. `vless-tls`（VLESS + 标准 TLS，支持 `tcp` / `ws` / `grpc` / `httpupgrade` / `http`(`h2`) 及可选 TCP `multiplex`）
+  9. `vmess-tls`（VMess AEAD `alterId=0` + 标准 TLS，支持 `tcp` / `ws` / `grpc` / `httpupgrade` / `http`(`h2`)、可选 TCP `multiplex` 与 `--format vmess-v2rayn` 兼容导出）
+  - 安装器与交互菜单统一提供 `1..9` 协议编号及常用传输组合简写（见 [上手指南](GETTING_STARTED.md) 与 [协议说明](PROTOCOLS.md)）。
+- **状态格式、官方核心与受管防火墙隔离模型**：
+  - `State` 当前为 `schema = 10`（`internal/node/state_format.go`），对旧 `1..9` 保持内存无损只读升级兼容（既有节点派生配置零差异，严格拒绝旧 schema 夹带新字段），普通查询不写盘、不恢复事务。默认配置备份保持 `QNBK1`/`QNBK2` 可读，完整资产迁移 `QNBK3` 现覆盖 `certs`、`acme`、`subscriptions` 与 `monitor` 四类类型化受管根（见 [迁移说明](MIGRATION.md)）。
+  - 默认核心保持官方 `sing-box 1.14.0`，内置已核验的 `1.14.0` 与 `1.14.3` 官方 `amd64`/`arm64` 归档 `SHA-256` 摘要；安装器、核心下载与 `self-update` 均支持可选 HTTPS `--github-mirror`（保留 100% SHA-256 强校验）。
+  - 宿主自动防火墙支持 `ufw`、`firewalld` 与原生 `nftables`（仅维护独立自有表 `table inet qingnode`，`policy accept`；HY2 端口跳跃单独使用 `table inet qingnode_hy2`，绝不调用 `flush ruleset`）。
+- **全协议探测、监控流量账本、配额通知与落盘 X.509 观测**：
+  - `internal/probe`（含 Linux/macOS/Windows 独立 `qingprobe` 助手）与 `cmd/qingnode/monitor_adapter.go` 覆盖全部 9 种协议、5 种传输、TCP `multiplex` 与 HY2 端口段，并按文件元数据 `(dev, ino, mtime, size)` 缓存单轮核心摘要与构建标签校验。
+  - `internal/monitor/ledger.go` 在 `<root>/monitor/traffic-ledger.json`（`0600`）结合 `<pid>/<started_ms>` 纪元与 `Store.BeforeCoreStop` 安全刷新钩子跨重启记录流量增量（异常缺口标 `gap_detected`），配合 `TrafficQuota` 支持软告警、硬配额显式停用（`--apply-quota`）及订阅 `Subscription-Userinfo` 同步；`notify.go` 支持 `webhook`、`telegram`（含 `message_thread_id`）、`bark`、`discord`、`feishu` 与 `dingtalk`（HMAC-SHA256 加签）。
+  - 证书状态只读检查优先解析实际落盘 X.509 证书链与剩余有效天数（`< 14` 天触发去重提醒），跨 `systemd` 与 `OpenRC` 通用（见 [证书说明](CERTIFICATES.md)、[监控说明](MONITORING.md)、[能力边界](CAPABILITIES.md)）。
 
 ## 保留的主干
 
@@ -18,45 +34,44 @@ install.sh：下载校验、账户/文件安装
   → menu*.go：收集输入、选择目标、显示结果
   → 节点/维护命令：构造业务操作
   → Store：读取 State、持锁修改、配置代切换与失败回滚
-  → 协议适配器：生成 sing-box 配置并校验
+  → 协议与传输适配器：生成 sing-box 配置并校验
   → 系统服务后端：由 systemd/OpenRC 托管官方 sing-box
 ```
 
-查询走 Inspect，不因进入菜单而恢复事务；修改走现有 Apply 路径。保留 Bash、Go、JSON 持久化和轻量服务运行模式，不引入必装 Docker、面板或数据库服务；格式变化使用明确 schema。
+查询走 `Inspect` / `InspectExisting`，不因进入菜单或查看状态而恢复事务；修改走现有 `Apply` 持锁候选校验、原子切换与回滚路径。
 
 | 模块 | 职责 |
 | --- | --- |
-| install.sh | 系统识别、依赖、发行包校验、账户与文件安装、捕获失败回滚 |
-| cmd/qingnode/main.go | 参数分派、全局选项、核心安装/更新 |
-| nodes.go / devices.go 等业务命令 | 节点与凭据生命周期，复用模型、Store 和协议实现 |
-| menu.go / menu_tasks.go / menu_guidance.go | 输入、选择、反馈与按需协议指导；直达高频业务命令，不独立保存状态 |
-| menu_preview.go / batch.go | 同一持锁候选的派生影响预览，复用Store.Preview与Apply；不重新生成身份 |
+| install.sh | 系统识别（基线与同源兼容家族）、`--github-mirror`、依赖、发行包白名单校验、账户与文件安装、捕获失败回滚 |
+| cmd/qingnode/main.go | 参数分派、全局选项、核心安装/更新、配额与监控子命令入口 |
+| nodes.go / devices.go / expiry.go | 节点、多节点设备 Profile（分流/TUN/控制器）、凭据到期与流量配额生命周期 |
+| menu.go / menu_tasks.go / menu_wizards.go | 交互菜单、证书/中转/出口/多节点订阅表单向导、同锁候选影响预览、防火墙后端探测与协议指导 |
 | status_report.go / cli_output.go | 版本1公共状态/帮助/版本与脱敏错误；JSON保持独立机器格式，不输出State认证 |
-| doctor_report.go / ports_report.go / query_reports.go | 独立版本1诊断、受限监听及公开对象声明；未知、未测与失败不归为通过；不拼接普通文字到JSON |
+| diagnostics.go / query_reports.go | 独立版本1诊断、受限监听及公开对象声明；未知、未测与失败不归为通过；不拼接普通文字到JSON |
 | execution_report.go | 全局可选私有执行回执，实际观察Apply确认与派生发布回调；开始/结束分文件、原子不覆盖发布，不复制stdout、参数或State；错误不等于未提交 |
 | terminal_password.go / internal/ui/terminal*.go | 实际TTY宽度、受限文本清理和隐藏口令读取；中断恢复原termios |
-| diagnostics.go / operations.go | 状态、诊断、日志、服务及卸载 |
-| dashboard*.go / internal/node/overview.go | 只读本机总览、独立观测历史、显式更新查询与公网实测登记 |
-| backup.go / system.go | 快照 CLI、网络、防火墙、管理器更新 |
-| internal/node/model.go / endpoints.go | 当前schema=9 State、稳定 ID、独立本地/客户端地址、结构校验 |
-| certificates.go / certificate_chain.go / certificate_files_linux.go / certificate_observation.go | 稳定证书资源、独立节点投影、显式导入完整路径验证、真实文件身份与权限、限量只读证书/日志观测；旧格式读取不依赖当前信任库，客户端指纹兼容另验 |
-| migration*.go / quiesce.go | QNBK3 typed资产、来源版本清单、停止证明、暂存/恢复journal、严格路径与自有备份保留；沿用既有认证加密 |
+| dashboard*.go / internal/node/overview.go | 只读本机总览（含落盘 X.509 证书有效期）、独立观测历史、显式更新查询与公网实测登记 |
+| backup.go / system.go | QNBK2/QNBK3 快照与 `--restore-monitor` CLI、网络、UFW/firewalld/nftables 防火墙、管理器更新 |
+| internal/node/model.go / transport.go / strict_json.go | 当前 schema=10 State、稳定 ID、独立本地/客户端地址、统一传输/多路复用与严格 JSON 解码校验 |
+| certificates.go / certificate_files_linux.go / certificate_observation.go | 稳定证书资源、落盘 X.509 链与私钥配对只读解析、限量辅助 journal CA 事件观测 |
+| migration*.go / quiesce.go | QNBK3 四类受管根（certs/acme/subscriptions/monitor）、来源版本清单、停止证明、暂存/恢复journal与自有备份保留 |
 | cmd/qingnode/certificates.go / migration_preflight.go | 私有证书输入、引用/共享影响预览、本机目标环境与路径映射；不在查询中签发或修复 |
-| topology*.go / failover.go / wireguard_pair.go | 独立远程出口、固定目标中转、引用/环/UDP 校验、实际图派生、主备决策和双端材料 |
-| state_format.go | State 显式版本解码入口，拒绝未知格式/字段，读取不落盘迁移 |
-| protocol_*.go / protocols.go | 各协议认证、校验、配置、URI、客户端格式与网络类型 |
-| store.go | 所有权、互斥锁、配置代、事务和回滚 |
+| topology*.go / topology_protocols.go / failover.go / wireguard_pair.go | 12 种远程出口（9 代理协议 + SOCKS5 + HTTP + 用户态 WireGuard）、固定目标中转、引用/环/UDP 校验、主备决策和双端材料 |
+| state_format.go | State 显式版本解码入口（schema 1..10），拒绝未知格式/字段，读取不落盘迁移 |
+| protocols.go / render.go / protocol_capabilities.go | 统一 `Adapter` 注册表、9 种协议与传输认证、服务端/客户端配置、URI/`vmess-v2rayn`/`tuic://` 与构建标签核对 |
+| store.go | 所有权、互斥锁、配置代、核心停止前安全钩子（`BeforeCoreStop`）、事务和回滚 |
 | impact.go / impact_runtime.go | 实际展示/导出/服务器/宿主影响，外部核心与受管服务文件校验材料 |
 | cmd/qingnode/batch.go | 原状态解析批量目标、整体候选校验、单次应用及只读预览 |
-| internal/probe / cmd/qingprobe | 独立版本化网络报告、预算/统计/对比、SOCKS5 测试及受控 UDP 回应；桌面助手不加载服务端 State |
-| core.go / releases.go / internal/platform | 官方下载、摘要、版本与本机systemd/OpenRC服务后端 |
+| internal/probe / cmd/qingprobe | 覆盖全协议传输/多路复用的网络报告、单轮核心校验缓存、Linux/macOS(`lsof`)/Windows 监听归属校验 |
+| internal/monitor / internal/coreapi | 周期监控、持久化流量采样账本（`traffic-ledger.json`）、6 类告警通知与只读 gRPC-Web 观测客户端 |
+| core.go / releases.go / internal/platform | 官方下载、HTTPS 镜像重写、渐进退避就绪轮询、内置摘要（`1.14.0`/`1.14.3`）与 systemd/OpenRC 后端 |
 | port_bindings.go / capabilities.go | 候选监听实际绑定预检、安装前本机能力；与远端链路证明分开 |
 | cmd/qingnode/endpoints.go / capabilities.go | 显式连接入口管理/外部材料、只读能力报告 |
-| cmd/qingnode/topology.go / egress_health.go / wireguard_pair.go | 严格拓扑批量、隔离出口图探测、显式主备应用与逐端配对材料 |
-| firewall.go / host.go / removal.go | UFW 效果、BBR、事务卸载 |
+| cmd/qingnode/topology.go / egress_health.go | 严格拓扑批量、隔离出口图探测、显式主备应用与逐端配对材料 |
+| firewall.go / firewall_firewalld.go / firewall_nftables.go / firewall_hy2_nft.go / removal.go | UFW、firewalld、独立 `table inet qingnode` 与 HY2 `table inet qingnode_hy2` 规则同步及事务卸载 |
 | internal/ui/catalog.go | 简体中文菜单文本及稳定键 |
 
-协议注册表是编译期适配，不从任意路径加载脚本。当前七协议仍各自接入参数创建/交互和测试，没有宣称完全插件化；完整英文尚未实现。能力登记的outbound指客户端配置导出，远程Egress由独立受限类型处理，仍只有SOCKS5/REALITY/SS2022/HY2/WireGuard，不由七协议注册表自动扩展。
+协议注册表是编译期适配（`protocols.go` `Adapter` 与 `topology_protocols.go` `egressAdapter`），不从任意路径加载脚本。能力登记的 `client_outbound` 指客户端配置导出，`server_egress` 指服务器远程 `Egress`（当前 9 种代理协议加上 `socks5`、`http` 与用户态 `wireguard` 共 12 种受限类型）。
 
 ## 交互与机器输出边界
 
@@ -66,15 +81,15 @@ install.sh：下载校验、账户/文件安装
 
 普通创建、安装完成摘要和默认节点信息不展示认证与完整链接；显式`export`、`info --show-secrets`等私有输出仍按原授权接口取得。版本化JSON不含节点用户密码、私钥或内部出口认证，不把root-only State开放为公共视图。普通错误清理控制序列并隐藏无效参数值中的潜在秘密，导出内容不经过人类文本折行器。
 
-人类菜单、总览和提示使用真实TTY宽度，中文宽字符与常见组合emoji按Unicode15.1表处理；NO_COLOR、TERM=dumb和非TTY使用纯文本，非TTY机器输出保持原结构。终端字体对模糊宽度仍可能不同。表单输入有字节上限，`:cancel`明确取消；隐藏口令同步等待并在SIGINT/SIGTERM后先恢复原termios，再返回130/143。程序不依赖raw模式、动画或隐藏光标。32/40/80列PTY、物理手机SSH和客户端GUI是三种独立证据，当前状态见本批记录。
+人类菜单、总览和提示使用真实TTY宽度，中文宽字符与常见组合emoji按Unicode15.1表处理；NO_COLOR、TERM=dumb和非TTY使用纯文本，非TTY机器输出保持原结构。终端字体对模糊宽度仍可能不同。表单输入有字节上限，`:cancel`明确取消；隐藏口令同步等待并在SIGINT/SIGTERM后先恢复原termios，再返回130/143。程序不依赖raw模式、动画或隐藏光标。32/40/80列PTY、物理手机SSH和客户端GUI是三种独立证据。
 
 ## 状态与身份
 
-State 保存 core_version、可选核心归档摘要、Firewall 模式、Nodes、项目 DNS，以及独立 Egresses、EgressPolicies、Forwards。Node 保存稳定 ID、名称、协议、本地 Listen/Port、主客户端 Host/ConnectPort、可选 AdditionalEndpoints、Enabled、Users、出口 EgressID、协议参数及可选创建/更新时间。空 EgressID 保持旧 direct。主端点 ID 为 default，最多 16 个额外显式 ID。`WithEndpoint` 只生成某次导出/探测用的客户端投影，返回值不能持久存回 State；原节点声明仍是编辑与事务的来源。旧节点迁移显式固定原 Port 为 ConnectPort；新 CLI 创建也显式保存。0.1.0 的历史创建时间未知时不虚构补填。
+State（当前 `schema = 10`）保存 `core_version`、可选核心归档摘要、`Firewall` 模式（`""` / `"ufw"` / `"firewalld"` / `"nftables"`）、`Nodes`、`Certificates`、`Devices`、`Observability`、`CredentialExpirations`、`TrafficQuotas`、项目 `DNS`，以及独立 `Egresses`、`EgressPolicies`、`Forwards`。Node 保存稳定 ID、名称、协议、可选 `Transport`、可选 `Multiplex`、本地 `Listen`/`Port`、主客户端 `Host`/`ConnectPort`、可选 `AdditionalEndpoints`、`Enabled`、`Users`、出口 `EgressID`、协议参数及可选创建/更新时间。空 `EgressID` 保持旧 direct。主端点 ID 为 `default`，最多 16 个额外显式 ID。`WithEndpoint` 只生成某次导出/探测用的客户端投影，返回值不能持久存回 State；原节点声明仍是编辑与事务的来源。旧节点迁移显式固定原 `Port` 为 `ConnectPort`；新 CLI 创建也显式保存。0.1.0 的历史创建时间未知时不虚构补填。
 
-REALITY 以 X25519 私钥、公钥、short ID、SNI、握手目标和 fingerprint 存储；flow=xtls-rprx-vision 与 TCP 由适配器派生，避免重复来源。SS2022 保存固定方法、独立服务密钥和每个用户独立密钥，用户客户端口令组合为 server:user。HY2 保存密码与 certificate_id，Certificates 统一保存 PEM、用户文件引用或 ACME；旧 Node.Certificate 仅读入内存投影，schema6不重复持久化私钥。普通节点编辑独立复制资源，共享资源更新显式影响所有引用；用户文件与ACME运行存储所有权分别处理。
+REALITY 以 X25519 私钥、公钥、short ID、SNI、握手目标和 fingerprint 存储；flow=xtls-rprx-vision 与 TCP 由适配器派生，避免重复来源。SS2022 保存固定方法、独立服务密钥和每个用户独立密钥，用户客户端口令组合为 server:user。需 TLS 证书的协议（`hysteria2`、`anytls`、`trojan`、`tuic`、`vless-tls`、`vmess-tls`）通过 `certificate_id` 引用 `Certificates` 资源（统一保存 PEM、用户文件引用或 ACME）；旧 Node.Certificate 仅读入内存投影，schema6 起不重复持久化私钥。普通节点编辑独立复制资源，共享资源更新显式影响所有引用；用户文件与ACME运行存储所有权分别处理。
 
-首次生成后持久保存；普通修改复用身份。时间戳仅在有意义的节点变更时更新。同一份 State 生成服务器、URI、二维码、sing-box JSON 与 Mihomo YAML。使用标准序列化器和进程参数数组，无 eval。
+首次生成后持久保存；普通修改复用身份。时间戳仅在有意义的节点变更时更新。同一份 State 生成服务器、URI/`vmess-v2rayn`、二维码、sing-box JSON 与 Mihomo YAML。使用标准序列化器和进程参数数组，无 eval。
 
 节点和凭据选择先在完整集合中匹配稳定 ID，再按名称匹配。名称与其他对象的 ID 相同不会改变 ID 的含义；原有名称查询仍可使用。状态文件读写共用 8 MiB 字节上限：正好达到上限的单份 JSON 可以读取，超限和额外 JSON 均拒绝；候选 State 编码超限时，在创建候选代之前退出，保留原状态、current 和服务。
 
@@ -102,23 +117,23 @@ systemd核心unit继续使用嵌入源文件 `internal/node/qingnode.service`；
 
 ## 配置事务
 
-持锁 → 读取 State → 比较实际派生运行配置、客户端对象、核心与受管服务输入、项目防火墙效果，并检查磁盘派生文件 → 写候选代并 fsync → 校验核心摘要/配置一致性/官方语法/证书日期/端口 → 再核对外部输入 → 写版本化事务记录 → 有宿主规则变化时添加所需项目 UFW 规则 → 原子切换 current → 有运行输入变化时按旧应用规则启停并核对 MainPID socket inode 与监听地址/端口 → 有宿主规则变化时删除过时项目规则 → 提交。
+持锁 → 读取 State → 比较实际派生运行配置、客户端对象、核心与受管服务输入、项目防火墙效果（UFW、firewalld 或独立 `table inet qingnode`），并检查磁盘派生文件 → 写候选代并 fsync → 校验核心摘要/配置一致性/官方语法/证书日期/端口 → 再核对外部输入 → 写版本化事务记录 → 有宿主规则变化时添加所需项目防火墙/HY2 重定向规则 → 原子切换 current → 有运行输入变化时执行 `BeforeCoreStop` 有界流量刷新并按旧应用规则启停，渐进退避核对 MainPID socket inode 与监听地址/端口 → 有宿主规则变化时收敛删除过时项目规则 → 提交。
 
-展示/导出与服务器运行/宿主效果分开比较，名称影响 URI/Mihomo 显示名，客户端 server/fingerprint 按实际导出对象识别。服务器和运行输入相同时，保存新 State 和历史却不调用 Activate/Stop，原本运行或停止、自启状态保持。运行变更仍按原规则应用：有启用节点、中转或用户态 WireGuard 监听时会启动/重启，即使此前临时 stop；所有受管监听停用或移除则停止。单独项目 UFW 规则变化同步规则，不单独重启核心。
+展示/导出与服务器运行/宿主效果分开比较，名称影响 URI/Mihomo 显示名，客户端 server/fingerprint 按实际导出对象识别。服务器和运行输入相同时，保存新 State 和历史却不调用 Activate/Stop，原本运行或停止、自启状态保持。运行变更仍按原规则应用：有启用节点、中转或用户态 WireGuard 监听时会启动/重启，即使此前临时 stop；所有受管监听停用或移除则停止。单独项目防火墙规则变化同步规则，不单独重启核心。
 
 外部输入校验材料记录核心路径/内容 SHA-256、受管 unit 文件来源/内容摘要和固定核心调用参数。它只覆盖本项目管理的 unit 文件，不声称核验已加载的全部 systemd 属性或管理员额外 drop-in；这些仍需真实宿主检查。元数据编辑不会重写 unit 或执行 daemon-reload。旧代缺失材料时，查询不写入；首次写入先校验候选再保存新代，避免第一次改名为了补材料重启。
 
-原状态和派生文件均未改变时不新建配置代、不换参数；派生文件损坏时仍完整检查并用保存的身份重建，原损坏代留作恢复材料。元数据回退与运行回退复用相同分类。失败候选未被事务引用则清理。提交前出错按影响回退指针、UFW 和之前的运行/停止状态；若恢复也失败保留记录并报告。断电后下一次写操作恢复未提交事务。
+原状态和派生文件均未改变时不新建配置代、不换参数；派生文件损坏时仍完整检查并用保存的身份重建，原损坏代留作恢复材料。元数据回退与运行回退复用相同分类。失败候选未被事务引用则清理。提交前出错按影响回退指针、受管防火墙规则和之前的运行/停止状态；若恢复也失败保留记录并报告。断电后下一次写操作恢复未提交事务。
 
-新事务用 `transaction_v2` envelope 保存 version=2、前后指针、原运行状态、运行/宿主变化。旧事务按旧重启/效果语义恢复；新记录不给旧管理器可误解的旧 top-level 指针，因此旧版拒绝 pending 新事务。降级前先用本批管理器恢复并确认无未完成记录，不删未知字段伪装兼容。第01/02批State为schema1；第03批HY2/DNS为2，第04批连接端点为3，第05批拓扑为4，第06批设备/标签为5，第07批证书资源为6，第08批观测API/凭据到期为7，第09批新协议语义与选项为8，第10批firewalld语义为9。当前旧1–8解码只在内存升级，restore/rollback写9。默认配置备份仍v1/v2，完整迁移使用QNBK3 typed v1与单独资产恢复记录。
+新事务用 `transaction_v2` envelope 保存 version=2、前后指针、原运行状态、运行/宿主变化。旧事务按旧重启/效果语义恢复；新记录不给旧管理器可误解的旧 top-level 指针，因此旧版拒绝 pending 新事务。降级前先用当前管理器恢复并确认无未完成记录，不删未知字段伪装兼容。第01/02批State为schema1；第03批HY2/DNS为2，第04批连接端点为3，第05批拓扑为4，第06批设备/标签为5，第07批证书资源为6，第08批观测API/凭据到期为7，第09批新协议语义与选项为8，第10批firewalld语义为9，当前v0.5.0因客户端增强、多传输/多路复用、HY2端口跳跃、原生nftables及流量配额升为schema10。旧1–9解码只在内存升级，restore/rollback写10。默认配置备份仍v1/v2，完整迁移使用QNBK3 typed v1（含certs/acme/subscriptions/monitor四根）与单独资产恢复记录。
 
-普通查询 list、info、export、render、check、core check、firewall status，以及 status、logs、doctor、overview 使用 Inspect 读取节点状态，不创建核心目录、不自动恢复或重启。节点选择菜单也走只读路径。部分查询发现事务记录会提示管理员显式执行 recover；查询读取 current 指向的状态并提示它尚未确认提交，不把打开信息页面当成恢复授权。写操作继续持 WithLock 锁，在修改前恢复未完成事务；显式 recover 也使用这个路径，可能恢复 current、项目防火墙规则及原服务状态。
+普通查询 list、info、export、render、check、core check、firewall status，以及 status、logs、doctor、overview、certificate list/status 使用 Inspect / InspectExisting 读取节点状态，不创建核心目录、不自动恢复或重启。节点选择菜单也走只读路径。部分查询发现事务记录会提示管理员显式执行 recover；查询读取 current 指向的状态并提示它尚未确认提交，不把打开信息页面当成恢复授权。写操作继续持 WithLock 锁，在修改前恢复未完成事务；显式 recover 也使用这个路径，可能恢复 current、项目防火墙规则及原服务状态。
 
 这里的“只读”指不改变节点配置或服务；导出可以写用户指定的输出文件，doctor 完成后在同一锁内另存自检历史。状态损坏不会伪报数据库正常。严重损坏的数据库/历史代不能凭空恢复，拒绝猜测参数。
 
 ## 首页与观测历史
 
-首页只读 State、私有 observations.json、/proc 与本地文件系统；systemd 属性查询最多等待 650ms。服务状态与客户端公网结果分开渲染。资源缺失显示未知，证书从 PEM 解析，ACME 实际签发期限未知时不猜测。
+首页只读 State、私有 observations.json、受管 `acme/` 证书目录、/proc 与本地文件系统；systemd 属性查询最多等待 650ms。服务状态与客户端公网结果分开渲染。资源缺失显示未知，证书优先从实际落盘 X.509 文件或 PEM 解析，ACME 尚未落盘时如实显示期限未知、不猜测签发时间。
 
 自检、成功备份、显式更新查询、管理员登记公网测试分别更新观测文件，在 Inspect 或已有操作锁内以 0600 原子写入，不改变配置代。读取拒绝符号链接、宽松权限、超限文件及未知字段。自检绑定完整 State 摘要；公网记录绑定节点、核心和 Firewall 模式，配置变化提示重验。历史不进入备份，不作为配置恢复依据，也不代表持续可用。
 
@@ -126,9 +141,9 @@ check-updates 在释放管理锁后并行查询两个固定 GitHub Release API�
 
 ## 系统边界
 
-网络测试与生产配置事务分开。`internal/probe` 不依赖 Store，不执行 Apply、recover、systemctl、UFW 或 sysctl；服务器 CLI 只读选择节点和用户，从现有官方客户端导出生成私有测试资料。代理测试启动独立官方 sing-box，目录和端口临时分配；普通入口测试只保留一个所选代理出站，内部出口图测试只保留明确的 detour 依赖闭包。两者失败均不改用 direct，不设置系统代理/TUN/全局路由。HTTPS 使用明确的本机 HTTP CONNECT transport，UDP 保留 TCP association 并发送标准 SOCKS5 UDP 帧，实际代理协议传输由官方核心负责。
+网络测试与生产配置事务分开。`internal/probe` 不依赖 Store，不执行 Apply、recover、systemctl、防火墙或 sysctl；服务器 CLI 只读选择节点和用户，从现有官方客户端导出生成私有测试资料。代理测试启动独立官方 sing-box，目录和端口临时分配；普通入口测试只保留一个所选代理出站，内部出口图测试只保留明确的 detour 依赖闭包。两者失败均不改用 direct，不设置系统代理/TUN/全局路由。HTTPS 使用明确的本机 HTTP CONNECT transport，UDP 保留 TCP association 并发送标准 SOCKS5 UDP 帧，实际代理协议传输由官方核心负责。
 
-隔离核心的临时 mixed 入站使用独立随机用户名/密码；SOCKS5 UDP 按 RFC 1929 完成认证且拒绝降级。随机认证只保护本机入口，不代替进程归属证明。就绪检测另要求该端口属于本次子进程 PID：Linux 读取监听 inode 和 `/proc/PID/fd`，Windows 查询 OWNER_PID TCP 表，失败拒绝测量；它与生产 systemd MainPID 检查是两个入口，不接管其他进程。
+隔离核心的临时 mixed 入站使用独立随机用户名/密码；SOCKS5 UDP 按 RFC 1929 完成认证且拒绝降级。随机认证只保护本机入口，不代替进程归属证明。就绪检测另要求该端口属于本次子进程 PID：Linux 读取监听 inode 和 `/proc/PID/fd`，macOS 通过 `lsof -Pan -p PID` 核对 `LISTEN`，Windows 查询 OWNER_PID TCP 表，失败拒绝测量；它与生产 systemd MainPID 检查是两个入口，不接管其他进程。
 
 自动测量使用独立 Profile/Report 格式，普通直连保持 `version: 1`；含内部出口的入口 Profile 和报告使用显式 `version: 2`，增加 `server_path_sha256`。它只绑定导出时实际选择的出口及 detour 闭包、核心和项目 DNS，不带落地凭据，也不能证明远端现在仍使用该配置。`NewProfile` 默认 v1，`WithServerPathDigest` 显式升级；CA 覆盖和启动失败报告均保留绑定，摘要不同拒绝直接对比。v1 不能夹带新字段，旧二进制拒绝 v2，未知版本不降级解析。
 
@@ -138,15 +153,35 @@ check-updates 在释放管理锁后并行查询两个固定 GitHub Release API�
 
 监听地址按 IP 实际含义比较，IPv6 展开与压缩写法视为相同，自有监听键统一但不重写 State。比较仍要求同一所属进程、传输层与本地端口。固定核心的 0.0.0.0 使用 IPv4 绑定；:: 采用通用 TCP/UDP 的自动双栈策略，没有 v6only JSON 字段，不能只看全局 bindv6only 或 proc 的 tcp6/udp6 保证真实族行为。本机/公网各地址族需分别收发验证。
 
-客户端 URI、QR/Base64、sing-box、Mihomo 与 Profile 统一读取所选 Host/ConnectPort；额外端点只投影客户端副本，不增加服务器入站或修改 SNI/REALITY 目标。影响分类遍历全部端点×用户，公开端点变化使客户端摘要/手动历史失效；服务器与项目规则相同时不调用服务重启。外部映射按协议列为待验证声明，不管理云 NAT；SS2022 单入口仍要求同一外部端口 TCP+UDP。
+客户端 URI/`vmess-v2rayn`、QR/Base64、sing-box、Mihomo 与 Profile 统一读取所选 Host/ConnectPort；额外端点只投影客户端副本，不增加服务器入站或修改 SNI/REALITY 目标。影响分类遍历全部端点×用户，公开端点变化使客户端摘要/手动历史失效；服务器与项目规则相同时不调用服务重启。外部映射按协议列为待验证声明，不管理云 NAT；SS2022 单入口仍要求同一外部端口 TCP+UDP。
 
 `ProbeCapabilities` 独立于 State：读取架构、init、可见资源、权限/容器、TUN 与固定路径/内核值；默认分 TCP4/UDP4/TCP6/UDP6 临时绑定与 32 字节回环，全部自有 socket 退出关闭。不实际写目录、创建 TUN、加载模块或调参。available 与 exercised、远端 unknown 分开；能力报告不能证明代理认证、服务沙箱或公网路径。
 
-UFW 自动管理仅针对已启用 UFW 中可识别的本项目注释标签；绝不调用 flush/reset/enable，不覆盖外部规则注释。先增后删，每次按编号删除前重新核对内容。SSH 端口和不确定规则保留。复杂混合防火墙策略、云安全组和共享 TCP 80 人工处理；外部并发改规则或后端不可用仍可能要求人工完成恢复。
+项目防火墙管理支持已启用 UFW（注释标签识别）、已启用 firewalld（受管双地址族 rich-rule 与 runtime/permanent 同步读回）及原生 `nftables`（仅维护独立自有表 `table inet qingnode`，`policy accept`）；绝不调用全局 flush/reset/enable，不覆盖外部规则。先增后删，删除前重新核对受管标识。SSH 端口和不确定规则保留。复杂混合防火墙策略、云安全组和共享 TCP 80 人工处理；外部并发改规则或后端不可用仍可能要求人工完成恢复。
 
 宿主网络是独立显式事务，`NetworkHost.Plan/Apply/Restore/Status` 只允许有限 TCP 算法、default_qdisc、rmem_max/wmem_max。原 `network bbr` 是 bbr+fq 的应用别名；计划只读，应用前保存原始文件与运行值、逐项写回核验。恢复仅在运行值仍等于本次值时回到原值，外部手改保留；受管文件遭外部编辑则拒绝覆盖。自有 sysctl 文件与私有原始快照不进入节点 State/配置代，节点 rollback 不擅自恢复宿主参数，卸载不改变用户网络选择。TCP BBR 与 HY2 用户态 QUIC BBR、默认 qdisc 与实际接口队列分别展示。
 
 宿主原始快照 version=1 不可变；pending version=2 持久记录 touched/restore_file，避免失败恢复改动从未尝试过的字段或误认本次已恢复的文件。正常 active version=1；保留外部手改的链式恢复用 version=2 active 记录调整后的文件检查点。只识别明确的格式组合，未知版本拒绝。有效内存由 `AvailableMemory` 取宿主 MemAvailable 和当前进程可见 cgroup v1/v2 祖先余额的最小值，约束证据缺失则未知，不把宿主 RAM 冒充容器可用内存；它不预留内存、不保证总 RSS，也不测量远端客户端或独立服务 cgroup。
+
+---
+
+## 历史版本与批次演进说明
+
+下方归整 `v0.3.x`–`v0.4.0` 及第 01–11 批开发阶段的历史演进与当时验证范围说明，供回溯参考；当前 `0.5.x` 架构与契约以上方总览及正文章节为准。
+
+### `0.3.2`–`0.4.0` 协议与传输收敛、探测及证书观测闭环
+
+- `0.3.2`–`0.4.0` 在既有 7 协议基础上引入 `vless-tls`、`vmess-tls` 及统一的 `ws`/`grpc`/`httpupgrade` 传输模型（`internal/node/transport.go`），扩充至 9 种底层协议及 11 个新增标准 TLS/传输组合，新增 `--format vmess-v2rayn` 导出，保持 `State schema = 9` 与默认官方核心 `1.14.0`（同步内置已核验的 `1.14.3` 官方归档摘要），补齐全部协议与传输组合的 `probe`/`monitor` 校验及落盘 X.509 证书链观测。
+
+### `0.3.1` 与第 10–11 批菜单整合及平台适配
+
+- `0.3.1` 与第 11 批将创建、节点管理、导出、状态诊断、备份更新、服务管理收束到直达菜单，高级设置承载证书、设备订阅和复杂拓扑，复用原 CLI 和配置事务；历史第 11 批验证见 [BATCH11.md](BATCH11.md)。
+- 第 10 批将宿主探测、包依赖、服务生命周期/定义、计划任务和防火墙效果集中到 `internal/platform` 与既有 `node` 后端。`systemd` 原 unit 保留，`OpenRC` 使用标准 `supervise-daemon`，订阅/监控共享服务管理接口；`State` 因新增 `firewalld` 值升为 `schema = 9`，旧 `1..8` 仅在内存迁移。详见 [PLATFORMS.md](PLATFORMS.md)、[BATCH10.md](BATCH10.md)。
+
+### 第 09 批协议分阶段扩展与前序批次记录
+
+- 第 09 批新增 `anytls`、`trojan`、`ss-aead`、`tuic`，当时 `State` 为 `schema = 8`（兼容 `1..7`），接入适配器、监听/业务能力登记与共享 TLS 证书投影；详见 [PROTOCOLS.md](PROTOCOLS.md)、[BATCH09.md](BATCH09.md)。
+- 前序第 01–08 批记录与证据分别见 [BATCH_01.md](BATCH_01.md)、[BATCH_02.md](BATCH_02.md)、[BATCH_03.md](BATCH_03.md)、[BATCH04.md](BATCH04.md)、[BATCH05.md](BATCH05.md)、[BATCH06.md](BATCH06.md)、[BATCH07.md](BATCH07.md)、[BATCH08.md](BATCH08.md)。
 
 ## 第 03 批的持久选择与适配
 

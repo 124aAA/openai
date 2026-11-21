@@ -88,6 +88,55 @@ func certificateLabel(n node.Node, now time.Time) string {
 	}
 	return fmt.Sprintf("剩余%d天；到期 %s", int(math.Floor(leaf.NotAfter.Sub(now).Hours()/24)), displayTime(leaf.NotAfter))
 }
+func observedCertificateLabel(s node.State, n node.Node, root string, now time.Time) string {
+	c := n.Certificate
+	if c == nil && n.CertificateID != "" {
+		if r, err := s.FindCertificate(n.CertificateID); err == nil {
+			c = &r.Certificate
+		}
+	}
+	if c == nil {
+		return "不适用（无需自有TLS证书）"
+	}
+	if root != "" && (c.Mode == "acme" || c.Mode == "file") {
+		var r node.CertificateResource
+		if n.CertificateID != "" {
+			if found, err := s.FindCertificate(n.CertificateID); err == nil {
+				r = *found
+			}
+		}
+		if r.ID == "" {
+			r = node.CertificateResource{ID: n.ID, Certificate: *c, LegacyStorage: c.Mode == "acme" && c.ACME == nil}
+		}
+		status, err := node.InspectCertificateResource(r, root, now)
+		if c.Mode == "acme" {
+			switch {
+			case err != nil || status.Status == "failed":
+				reason := status.Reason
+				if reason == "" && err != nil {
+					reason = err.Error()
+				}
+				return "ACME 落盘证书异常：" + reason
+			case (status.Status == "available" || status.Status == "expiring") && status.NotAfter != nil:
+				if status.NotAfter.Sub(now) < 24*time.Hour {
+					return "ACME 已落盘有效（不足1天，需续期；到期 " + displayTime(*status.NotAfter) + "）"
+				}
+				days := int(math.Floor(status.NotAfter.Sub(now).Hours() / 24))
+				return fmt.Sprintf("ACME 已落盘有效（剩余%d天；到期 %s）", days, displayTime(*status.NotAfter))
+			default:
+				return "ACME 管理，尚未观测到落盘证书，期限未知（需检查实际签发证书）"
+			}
+		}
+		if c.Mode == "file" && err == nil && (status.Status == "available" || status.Status == "expiring") && status.NotAfter != nil {
+			if status.NotAfter.Sub(now) < 24*time.Hour {
+				return "外部文件证书有效（不足1天，需续期；到期 " + displayTime(*status.NotAfter) + "）"
+			}
+			days := int(math.Floor(status.NotAfter.Sub(now).Hours() / 24))
+			return fmt.Sprintf("外部文件证书有效（剩余%d天；到期 %s）", days, displayTime(*status.NotAfter))
+		}
+	}
+	return certificateLabel(n, now)
+}
 func updateLabel(r updateRecord, installed string, core bool, now time.Time) string {
 	if r.CheckedAt.IsZero() {
 		return "尚未检查（主菜单9联网查询）"
@@ -138,9 +187,12 @@ func (a *app) overview(w io.Writer) error {
 		service = node.OverviewService(a.serviceRunner)
 	}
 	resources := node.OverviewResources(a.store.Root)
-	return renderOverview(w, s, h, err, historyErr, service, resources, a.offline, time.Now())
+	return renderOverviewWithRoot(w, s, h, err, historyErr, service, resources, a.offline, a.store.Root, time.Now())
 }
-func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, historyErr error, service node.ServiceOverview, r node.ResourceOverview, offline bool, now time.Time) (err error) {
+func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, historyErr error, service node.ServiceOverview, r node.ResourceOverview, offline bool, now time.Time) error {
+	return renderOverviewWithRoot(w, s, h, stateErr, historyErr, service, r, offline, "", now)
+}
+func renderOverviewWithRoot(w io.Writer, s node.State, h dashboardHistory, stateErr, historyErr error, service node.ServiceOverview, r node.ResourceOverview, offline bool, root string, now time.Time) (err error) {
 	human := ui.HumanWriter(w)
 	defer func() {
 		if flush := human.Flush(); err == nil {
@@ -233,7 +285,7 @@ func renderOverview(w io.Writer, s node.State, h dashboardHistory, stateErr, his
 		if node.EffectiveTransport(n) != "tcp" && n.Transport != nil {
 			protoLabel = fmt.Sprintf("%s (%s)", n.Protocol, node.ProtocolDisplaySummary(n))
 		}
-		fmt.Fprintf(w, "  %s [%s / %s]\n    证书：%s\n", n.Name, protoLabel, mode, certificateLabel(n, now))
+		fmt.Fprintf(w, "  %s [%s / %s]\n    证书：%s\n", n.Name, protoLabel, mode, observedCertificateLabel(s, n, root, now))
 		if historyErr != nil {
 			fmt.Fprintln(w, "    公网：记录不可用，待验证")
 		} else {

@@ -169,7 +169,7 @@ func (a *app) statusJSON(w io.Writer) error {
 			}
 			entry := statusNode{ID: n.ID, Name: text(n.Name), Protocol: n.Protocol, Enabled: n.Enabled,
 				Listen: net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), Endpoints: []statusEndpoint{}, CredentialCount: len(n.Users),
-				Certificate: text(certificateLabel(n, r.ObservedAt)), ClientVerification: v}
+				Certificate: text(observedCertificateLabel(s, n, a.store.Root, r.ObservedAt)), ClientVerification: v}
 			for _, ep := range node.EffectiveEndpoints(n) {
 				entry.Endpoints = append(entry.Endpoints, statusEndpoint{ep.ID, net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))})
 			}
@@ -284,11 +284,12 @@ func (a *app) nodeStatusJSON(w io.Writer, id string) error {
 			}
 			nodes = []node.Node{*n}
 		}
+		now := time.Now()
 		views := []statusNode{}
 		for _, n := range nodes {
 			entry := statusNode{ID: n.ID, Name: ui.SanitizeText(node.Redact(n.Name, s)), Protocol: n.Protocol, Enabled: n.Enabled,
 				Listen: net.JoinHostPort(n.Listen, strconv.Itoa(n.Port)), Endpoints: []statusEndpoint{}, CredentialCount: len(n.Users),
-				Certificate: certificateLabel(n, time.Now()), ClientVerification: statusVerification{TCP: "unknown", UDP: "unknown", Source: "unknown", Validity: "not-tested", Method: "not measured by info"}}
+				Certificate: observedCertificateLabel(s, n, a.store.Root, now), ClientVerification: statusVerification{TCP: "unknown", UDP: "unknown", Source: "unknown", Validity: "not-tested", Method: "not measured by info"}}
 			for _, ep := range node.EffectiveEndpoints(n) {
 				entry.Endpoints = append(entry.Endpoints, statusEndpoint{ep.ID, net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))})
 			}
@@ -311,7 +312,7 @@ func printMachineHelp() error {
 		ResultReceipt map[string]string `json:"execution_receipt"`
 		Notes         []string          `json:"notes"`
 	}{1, "qingnode [--offline --root DIR] COMMAND [OPTIONS]", map[string]string{"0": "success-or-help", "1": "error", "130": "interrupted-secret-input", "143": "terminated-secret-input"},
-		[]string{"help --json", "version --json", "overview --json", "status --json", "info --json", "list --json", "edit --preview --json", "batch --preview --json", "capabilities --json", "network status --json", "egress health --json", "protocols list", "doctor --json", "diagnose --json", "ports --json", "dns show --json", "dns diagnose --json", "hy2 show --json", "hy2 plan --json", "endpoint list --json", "egress list --json", "egress show --json", "egress policy list --json", "forward list --json", "device list --json", "device show --json", "expiration list --json", "subscription status --json"},
+		[]string{"help --json", "version --json", "overview --json", "status --json", "info --json", "list --json", "edit --preview --json", "batch --preview --json", "capabilities --json", "network status --json", "egress health --json", "protocols list", "doctor --json", "diagnose --json", "ports --json", "dns show --json", "dns diagnose --json", "hy2 show --json", "hy2 plan --json", "endpoint list --json", "egress list --json", "egress show --json", "egress policy list --json", "forward list --json", "device list --json", "device show --json", "expiration list --json", "quota list --json", "subscription status --json"},
 		map[string]string{"global_option": "--result-dir NEW_PRIVATE_DIRECTORY", "format": "version 1; started.json and atomically published result.json", "scope": "typed execution and observed Apply finalization; never captured stdout or arguments", "incomplete": "missing result.json, canceled, interrupted, help, failed, or running are not completed", "side_effects": "errors may follow committed configuration or host changes; inspect before retrying", "command_data": "use each command's JSON report or explicit private output separately"},
 		[]string{"Global options precede the command. Use COMMAND --help for its exact parameters.", "JSON diagnostics never contain State or authentication; export is the explicit private credential output.", "Input files are command-specific, bounded and validated. No implicit stdin JSON or shell execution.", "A completed local query is not a public connectivity or GUI acceptance result."}})
 }

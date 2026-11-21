@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -244,7 +246,7 @@ var protocolMenuChoices = []menuProtocolOption{
 	{"4", "anytls", "", "anytls", "AnyTLS（TCP，需要证书和支持的客户端）"},
 	{"5", "trojan", "", "trojan", "Trojan（标准TLS，支持TCP/WS/gRPC/HTTPUpgrade）"},
 	{"6", "ss-aead", "", "ss-aead", "传统 Shadowsocks（无需域名或证书）"},
-	{"7", "tuic", "", "tuic", "TUIC v5（UDP，需要证书；导出完整配置）"},
+	{"7", "tuic", "", "tuic", "TUIC v5（UDP，需要证书；支持 NEP-408 URI 与完整配置）"},
 	{"8", "vless-tls", "", "vless-tls", "VLESS + TLS（标准TLS，支持TCP/WS/gRPC/HTTPUpgrade）"},
 	{"9", "vmess-tls", "", "vmess-tls", "VMess + TLS（AEAD，支持TCP/WS/gRPC/HTTPUpgrade）"},
 }
@@ -279,11 +281,11 @@ func matchMenuProtocolChoice(choice string) (menuProtocolOption, bool) {
 func protocolMenuClientLabel(protocol string) string {
 	switch protocol {
 	case "anytls":
-		return "客户端完整配置已核对：sing-box 1.14.0/1.14.3、Mihomo 1.19.30；连接池设置不能用URI表达"
+		return "客户端完整配置已核对：sing-box 1.14.x、Mihomo >=1.19.0；连接池设置不能用URI表达"
 	case "trojan", "ss-aead", "vless-tls", "vmess-tls":
-		return "客户端完整配置已核对：sing-box 1.14.0/1.14.3、Mihomo 1.19.30"
+		return "客户端完整配置已核对：sing-box 1.14.x、Mihomo >=1.19.0"
 	case "tuic":
-		return "客户端完整配置已核对：sing-box 1.14.0/1.14.3、Mihomo 1.19.30；分享URI未核验"
+		return "客户端完整配置已核对：sing-box 1.14.x、Mihomo >=1.19.0；支持标准 NEP-408 tuic:// URI（客户端心跳仅完整配置可表达，服务端拥塞/超时/心跳仅在服务端入站生效）"
 	default:
 		return "客户端导出仍须按目标格式实际验证"
 	}
@@ -919,27 +921,83 @@ func (a *app) maintenanceMenu() error {
 			}
 			return errMenuCanceled
 		case "3":
-			if e := a.coreVersions(); e != nil {
-				return e
+			if !a.offline {
+				if e := a.coreVersions(); e != nil {
+					a.message("WARN", "联网查询最新核心版本未成功："+e.Error())
+				}
+			} else if _, statErr := os.Lstat(a.store.Root); statErr == nil {
+				_ = a.store.InspectExisting(func() error {
+					if s, loadErr := a.store.Load(); loadErr == nil {
+						fmt.Fprintf(os.Stderr, "当前核心版本：%s\n", s.CoreVersion)
+					}
+					return nil
+				})
 			}
-			v, e := a.wizardPrompt("目标版本（输入数字版本；留空返回）", "")
+			if vers := node.PinnedCoreVersions(runtime.GOARCH); len(vers) > 0 {
+				a.message("INFO", fmt.Sprintf("内置已核验官方归档摘要版本：%s（默认 %s；选择这些版本可留空 SHA-256）", strings.Join(vers, " / "), node.DefaultCore))
+			}
+			v, e := a.wizardPrompt("目标版本（如 1.14.3；留空返回）", "")
 			if e != nil {
 				return e
 			}
 			if v == "" {
 				return errMenuCanceled
 			}
-			sum, e := a.wizardPrompt("官方归档 SHA-256（默认锁定版本可留空）", "")
+			targetVer := strings.TrimPrefix(strings.TrimSpace(v), "v")
+			shaPrompt := "官方归档 SHA-256（未内置版本必填）"
+			if node.PinnedCoreArchiveSHA256(targetVer, runtime.GOARCH) != "" {
+				shaPrompt = "官方归档 SHA-256（已内置核验摘要，可留空）"
+			}
+			sum, e := a.wizardPrompt(shaPrompt, "")
 			if e != nil {
 				return e
 			}
-			return a.menuCommand([]string{"core", "update", "--version", strings.TrimPrefix(v, "v"), "--sha256", sum})
+			return a.menuCommand([]string{"core", "update", "--version", targetVer, "--sha256", sum})
 		case "4":
-			bundle, e := a.wizardPrompt("新版已解压发行包目录", "")
+			defaultTag := ""
+			if _, statErr := os.Lstat(a.store.Root); statErr == nil {
+				if h, hErr := readDashboardHistory(a.store.Root); hErr == nil {
+					if rec, ok := h.Updates["manager"]; ok && !rec.At.IsZero() && rec.Latest != "" && node.CompareVersion(rec.Latest, version) > 0 {
+						defaultTag = "v" + strings.TrimPrefix(rec.Latest, "v")
+						a.message("INFO", fmt.Sprintf("检测到已缓存的新版本记录：%s（当前 v%s，记录时间 %s）", defaultTag, version, displayTime(rec.At)))
+					}
+				}
+			}
+			fmt.Fprintln(ui.HumanWriter(os.Stderr), "\n更新 QingNode 管理器\n1 在线按版本更新（GitHub 官方发行包，自动校验 SHA256SUMS）\n2 从本地已解压发行包目录更新（--bundle）\n0 返回")
+			mode, e := a.wizardPrompt("选择更新方式", "1")
 			if e != nil {
 				return e
 			}
-			if err := a.menuCommand([]string{"self-update", "--bundle", bundle}); err != nil {
+			var updateArgs []string
+			switch mode {
+			case "0":
+				return errMenuCanceled
+			case "1":
+				promptLabel := "目标版本号（如 v0.4.1；留空返回）"
+				if defaultTag != "" {
+					promptLabel = "目标版本号（如 v0.4.1）"
+				}
+				targetVer, err := a.wizardPrompt(promptLabel, defaultTag)
+				if err != nil {
+					return err
+				}
+				if targetVer == "" {
+					return errMenuCanceled
+				}
+				if !strings.HasPrefix(targetVer, "v") {
+					targetVer = "v" + targetVer
+				}
+				updateArgs = []string{"self-update", "--version", targetVer}
+			case "2":
+				bundle, err := a.menuRequired("新版已解压发行包目录")
+				if err != nil {
+					return err
+				}
+				updateArgs = []string{"self-update", "--bundle", bundle}
+			default:
+				return menuInvalid()
+			}
+			if err := a.menuCommand(updateArgs); err != nil {
 				return err
 			}
 			a.message("OK", "管理器已更新，请重新运行 qingnode")
@@ -977,6 +1035,49 @@ func (a *app) maintenanceMenu() error {
 		return menuInvalid()
 	})
 }
+
+func (a *app) hasHostCommand(name string) bool {
+	lookPath := exec.LookPath
+	if a.lookPath != nil {
+		lookPath = a.lookPath
+	}
+	_, err := lookPath(name)
+	return err == nil
+}
+
+func (a *app) detectDefaultFirewallBackend() (string, string) {
+	configured := ""
+	if _, statErr := os.Lstat(a.store.Root); statErr == nil {
+		_ = a.store.InspectExisting(func() error {
+			if s, err := a.store.Load(); err == nil && (s.Firewall == "ufw" || s.Firewall == "firewalld" || s.Firewall == "nftables") {
+				configured = s.Firewall
+			}
+			return nil
+		})
+	}
+	hasUFW := a.hasHostCommand("ufw")
+	hasFirewalld := a.hasHostCommand("firewall-cmd")
+	hasNft := a.hasHostCommand("nft")
+	switch {
+	case hasFirewalld && !hasUFW:
+		return "firewalld", "本机检测到 firewalld（未检测到 ufw），默认选择 firewalld"
+	case hasUFW && !hasFirewalld:
+		return "ufw", "本机检测到 ufw（未检测到 firewalld），默认选择 ufw"
+	case hasUFW && hasFirewalld:
+		if configured == "firewalld" {
+			return "firewalld", "本机同时检测到 ufw 与 firewalld，默认沿用当前配置的 firewalld"
+		}
+		return "ufw", "本机同时检测到 ufw 与 firewalld，请确认当前实际启用的防火墙后端"
+	case hasNft:
+		return "nftables", "本机未检测到 ufw/firewalld，但检测到 nft，默认选择独立表 nftables（table inet qingnode）"
+	default:
+		if configured != "" {
+			return configured, "本机未检测到 ufw、firewall-cmd 或 nft；启用前请确认目标防火墙已安装并运行"
+		}
+		return "ufw", "本机未检测到 ufw、firewall-cmd 或 nft；启用前请确认目标防火墙已安装并运行"
+	}
+}
+
 func (a *app) systemMenu() error {
 	return a.taskMenu("system", func(choice string) error {
 		switch choice {
@@ -987,6 +1088,25 @@ func (a *app) systemMenu() error {
 			}
 			cmd := map[string]string{"1": "status", "2": "enable", "3": "disable", "4": "sync"}[c]
 			if cmd != "" {
+				var backend string
+				if cmd == "enable" {
+					defBackend, note := a.detectDefaultFirewallBackend()
+					a.message("INFO", note)
+					rawBackend, err := a.wizardPrompt("选择防火墙后端（1/ufw、2/firewalld 或 3/nftables）", defBackend)
+					if err != nil {
+						return err
+					}
+					switch strings.ToLower(strings.TrimSpace(rawBackend)) {
+					case "1", "ufw":
+						backend = "ufw"
+					case "2", "firewalld":
+						backend = "firewalld"
+					case "3", "nftables", "nft":
+						backend = "nftables"
+					default:
+						return errors.New("防火墙后端仅支持 ufw、firewalld 或 nftables")
+					}
+				}
 				if cmd != "status" {
 					if e := a.menuCommand([]string{"firewall", "status"}); e != nil {
 						return e
@@ -994,6 +1114,9 @@ func (a *app) systemMenu() error {
 					if !a.confirm("将修改本项目的宿主防火墙规则，不清空全局规则。输入yes继续") {
 						return errMenuCanceled
 					}
+				}
+				if cmd == "enable" {
+					return a.menuCommand([]string{"firewall", "enable", "--backend", backend})
 				}
 				return a.menuCommand([]string{"firewall", cmd})
 			}

@@ -85,16 +85,19 @@ func (a *app) certificates(args []string) error {
 					indexes = append(indexes, i)
 				}
 			}
+			now := time.Now().UTC()
 			reports := []any{}
 			for _, i := range indexes {
 				resource := st.Certificates[i]
-				status, err := node.InspectCertificateResource(resource, a.store.Root, time.Now().UTC())
+				status, err := node.InspectCertificateResource(resource, a.store.Root, now)
 				// Inspection errors become a safe failed observation. They do not
 				// repair files, trigger issuance, or change the running node.
 				report := map[string]any{"id": resource.ID, "name": resource.Name, "mode": resource.Certificate.Mode, "nodes": node.CertificateReferences(st, resource.ID), "status": status}
 				if err != nil {
 					report["inspection_error"] = node.Redact(err.Error(), st)
 				}
+				var journalPtr *node.CertificateJournalObservation
+				var journalErr error
 				if resource.Certificate.Mode == "acme" {
 					// A single explicit status target bounds journal work. Listing
 					// hundreds of resources must not run hundreds of system queries.
@@ -102,7 +105,9 @@ func (a *app) certificates(args []string) error {
 						if observer, ok := a.store.Backend.(interface {
 							InspectCertificateJournal(node.State, node.CertificateResource, time.Time) (node.CertificateJournalObservation, error)
 						}); ok {
-							observation, observationErr := observer.InspectCertificateJournal(st, resource, time.Now().UTC())
+							observation, observationErr := observer.InspectCertificateJournal(st, resource, now)
+							journalPtr = &observation
+							journalErr = observationErr
 							report["acme_events"] = observation
 							if observationErr != nil {
 								report["acme_events_error"] = node.Redact(observationErr.Error(), st)
@@ -114,9 +119,14 @@ func (a *app) certificates(args []string) error {
 						report["acme_events_limitation"] = "运行事件请使用 certificate status --id 证书ID；列表只观察当前证书资产"
 					}
 				}
+				obs := node.SummarizeCertificateObservation(status, err, journalPtr, journalErr)
+				report["disk_certificate_valid"] = obs.DiskValid
+				report["primary_source"] = obs.PrimarySource
+				report["recent_ca_event_state"] = obs.RecentCAEventState
+				report["observation_summary"] = node.Redact(obs.Summary, st)
 				reports = append(reports, report)
 			}
-			raw, err := json.MarshalIndent(map[string]any{"version": 1, "checked_at": time.Now().UTC(), "certificates": reports, "issuance_triggered": false}, "", "  ")
+			raw, err := json.MarshalIndent(map[string]any{"version": 1, "checked_at": now, "certificates": reports, "issuance_triggered": false}, "", "  ")
 			if err != nil {
 				return err
 			}

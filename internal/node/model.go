@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 )
 
-const Schema = 9
+const Schema = 10
 const DefaultCore = "1.14.0"
 
 type State struct {
@@ -32,6 +34,7 @@ type State struct {
 	Certificates          []CertificateResource  `json:"certificates,omitempty"`
 	Observability         *CoreObservation       `json:"observability,omitempty"`
 	CredentialExpirations []CredentialExpiration `json:"credential_expirations,omitempty"`
+	TrafficQuotas         []TrafficQuota         `json:"traffic_quotas,omitempty"`
 }
 type User struct {
 	ID       string `json:"id"`
@@ -40,12 +43,13 @@ type User struct {
 	Password string `json:"password,omitempty"`
 }
 type Reality struct {
-	ServerName  string `json:"server_name"`
-	Target      string `json:"target"`
-	PrivateKey  string `json:"private_key"`
-	PublicKey   string `json:"public_key"`
-	ShortID     string `json:"short_id"`
-	Fingerprint string `json:"fingerprint,omitempty"`
+	ServerName  string   `json:"server_name"`
+	Target      string   `json:"target"`
+	PrivateKey  string   `json:"private_key"`
+	PublicKey   string   `json:"public_key"`
+	ShortID     string   `json:"short_id"`
+	ShortIDs    []string `json:"short_ids,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
 }
 type Certificate struct {
 	Mode            string        `json:"mode"`
@@ -78,6 +82,7 @@ type Node struct {
 	AnyTLS              *AnyTLSOptions       `json:"anytls,omitempty"`
 	TUIC                *TUICOptions         `json:"tuic,omitempty"`
 	Transport           *TransportOptions    `json:"transport,omitempty"`
+	Multiplex           *MultiplexOptions    `json:"multiplex,omitempty"`
 	CreatedAt           string               `json:"created_at,omitempty"`
 	UpdatedAt           string               `json:"updated_at,omitempty"`
 }
@@ -150,6 +155,30 @@ var uuidRE = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[
 var versionRE = regexp.MustCompile(`^1\.14\.(0|[1-9][0-9]*)$`)
 
 func SupportedVersion(v string) bool { return versionRE.MatchString(v) }
+
+func SupportedMihomoVersion(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	nums := [3]int{}
+	for i, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return false
+		}
+		nums[i] = n
+	}
+	return nums[0] > 1 || (nums[0] == 1 && nums[1] >= 19)
+}
 func ValidHost(s string) bool {
 	return s != "" && len(s) <= 253 && (net.ParseIP(s) != nil || domainRE.MatchString(s))
 }
@@ -191,8 +220,8 @@ func (s State) validate(deferExternalFiles bool) error {
 			return errors.New("保存的核心归档摘要无效")
 		}
 	}
-	if s.Firewall != "" && s.Firewall != "ufw" && s.Firewall != "firewalld" {
-		return errors.New("自动防火墙仅支持已启用的 UFW/firewalld；其他后端使用手动模式")
+	if s.Firewall != "" && s.Firewall != "ufw" && s.Firewall != "firewalld" && s.Firewall != "nftables" {
+		return errors.New("自动防火墙仅支持已启用的 UFW/firewalld/nftables；其他后端使用手动模式")
 	}
 	if s.Schema != Schema {
 		return fmt.Errorf("不支持状态格式 %d（当前 %d），请使用匹配的管理器迁移", s.Schema, Schema)
@@ -213,6 +242,9 @@ func (s State) validate(deferExternalFiles bool) error {
 			return errors.New("协议专用设置不能用于其他协议")
 		}
 		if err := validateTransport(n); err != nil {
+			return fmt.Errorf("节点 %s：%w", n.Name, err)
+		}
+		if err := validateNodeMultiplex(n); err != nil {
 			return fmt.Errorf("节点 %s：%w", n.Name, err)
 		}
 		if err := ValidateNodeTags(n.Tags); err != nil {
@@ -270,14 +302,8 @@ func (s State) validate(deferExternalFiles bool) error {
 			credentials[c] = true
 		}
 		var protocolErr error
-		if deferExternalFiles && (n.Protocol == "anytls" || n.Protocol == "trojan") {
-			protocolErr = validateTLSNode(n, false)
-		} else if deferExternalFiles && (n.Protocol == "vless-tls" || n.Protocol == "vmess-tls") {
-			protocolErr = validateTLSUUIDNode(n, false)
-		} else if deferExternalFiles && n.Protocol == "hysteria2" {
-			protocolErr = validateHysteriaCertificate(n, false)
-		} else if deferExternalFiles && n.Protocol == "tuic" {
-			protocolErr = validateTUICCertificate(n, false)
+		if deferExternalFiles && adapter.ValidateRestore != nil {
+			protocolErr = adapter.ValidateRestore(n)
 		} else {
 			protocolErr = adapter.Validate(n)
 		}
@@ -294,7 +320,13 @@ func (s State) validate(deferExternalFiles bool) error {
 	if err := ValidateCredentialExpirations(s); err != nil {
 		return err
 	}
-	return validateBindingSet(StateBindings(s))
+	if err := ValidateTrafficQuotas(s); err != nil {
+		return err
+	}
+	if err := validateBindingSet(StateBindings(s)); err != nil {
+		return err
+	}
+	return validateHY2HopPortConflicts(s)
 }
 
 // Keep expired but structurally valid certificates readable for backup/disable/repair.

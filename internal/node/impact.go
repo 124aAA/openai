@@ -91,12 +91,17 @@ func hostInput(st State) any {
 		if rules[i].Port != rules[j].Port {
 			return rules[i].Port < rules[j].Port
 		}
+		if rules[i].PortEnd != rules[j].PortEnd {
+			return rules[i].PortEnd < rules[j].PortEnd
+		}
 		return rules[i].Tag < rules[j].Tag
 	})
+	redirects := RequiredHY2Redirects(st)
 	return struct {
 		Service, Firewall string
 		Rules             []FirewallRule
-	}{ServiceUnit, st.Firewall, rules}
+		HY2Redirects      []HY2RedirectRule
+	}{ServiceUnit, st.Firewall, rules, redirects}
 }
 
 func displayInput(n Node) any {
@@ -169,7 +174,10 @@ func nodeHostInput(n *Node, st State) any {
 	x := NewState()
 	x.Firewall = st.Firewall
 	x.Nodes = []Node{*n}
-	return RequiredRules(x)
+	return struct {
+		Rules        []FirewallRule
+		HY2Redirects []HY2RedirectRule
+	}{RequiredRules(x), RequiredHY2Redirects(x)}
 }
 
 func compareImpact(old, next State, root string) (ChangeImpact, error) {

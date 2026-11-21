@@ -53,7 +53,7 @@ func TestProtocolMenuIsReadOnlyAndExplainsClientBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wanted := range []string{"离线配置可生成；运行能力未验证", "sing-box 1.14.0/1.14.3", "Mihomo 1.19.30", "分享URI未核验"} {
+	for _, wanted := range []string{"离线配置可生成；运行能力未验证", "sing-box 1.14.x", "Mihomo >=1.19.0", "NEP-408 tuic:// URI"} {
 		if !strings.Contains(printed, wanted) {
 			t.Fatalf("menu hid %q", wanted)
 		}
@@ -125,16 +125,31 @@ func TestProtocolMenuRejectsInvalidInstalledCoreBeforeWizardInput(t *testing.T) 
 	}
 }
 
-func TestTUICExportMenuOffersFullConfigAfterUnsupportedURI(t *testing.T) {
+func TestTUICExportMenuOffersNEP408URIAndFullConfigFallbackOnClientHeartbeat(t *testing.T) {
 	a, _ := protocolMenuFixture(t, "tuic", 35512)
+	uriPath := filepath.Join(t.TempDir(), "tuic.uri")
+	a.in = bufio.NewReader(strings.NewReader("1\n1\n" + uriPath + "\n"))
+	if _, err := captureProtocolMenuStderr(t, a.exportWizard); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(uriPath); err != nil || !strings.HasPrefix(strings.TrimSpace(string(b)), "tuic://") {
+		t.Fatalf("menu did not export NEP-408 tuic:// URI: %v %q", err, b)
+	}
+
+	if err := a.changeTopology(false, func(st *node.State) error {
+		st.Nodes[0].TUIC = &node.TUICOptions{ClientHeartbeat: "1500ms"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "tuic-client.json")
 	a.in = bufio.NewReader(strings.NewReader("1\n1\n4\n" + path + "\n"))
 	printed, err := captureProtocolMenuStderr(t, a.exportWizard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(printed, "尚未验证通用TUIC分享URI") || !strings.Contains(printed, "目标客户端版本：1.14.0") {
-		t.Fatal("export menu hid the unsupported URI or actual full-config target", printed)
+	if !strings.Contains(printed, "NEP-408") || !strings.Contains(printed, "目标客户端版本：1.14.0") {
+		t.Fatal("export menu hid the unsupported ClientHeartbeat URI warning or actual full-config target", printed)
 	}
 	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), `"type": "tuic"`) {
 		t.Fatal("menu did not export a full TUIC client config", err)

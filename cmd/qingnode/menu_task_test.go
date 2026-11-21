@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"qingnode/internal/node"
 	"qingnode/internal/ui"
@@ -224,5 +225,147 @@ func TestRound2MenuAndInstallWorkflowImprovements(t *testing.T) {
 	}
 	if stAfter.Nodes[0].Certificate.ServerName != "cdn.example.com" || stAfter.Nodes[0].Users[0].UUID != n.Users[0].UUID || stAfter.Nodes[0].Transport.Type != "ws" {
 		t.Fatalf("TLS SNI edit corrupted node state: %+v", stAfter.Nodes[0])
+	}
+}
+
+type noopFirewallBackend struct {
+	node.OfflineBackend
+}
+
+func TestMaintenanceMenuOnlineAndBundleSelfUpdate(t *testing.T) {
+	wApp, _ := menuFixture(t, "")
+	wApp.offline = false
+	var gotArgs []string
+	wApp.selfUpdateFn = func(args []string) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	if err := wApp.updateHistory(func(h *dashboardHistory) {
+		h.Updates = map[string]updateRecord{
+			"manager": {
+				Latest:    "9.9.1",
+				Installed: version,
+				At:        time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+				CheckedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+			},
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Choice 4 -> mode 1 (online) -> Enter accepts cached v9.9.1
+	wApp.in.Reset(strings.NewReader("4\n1\n\n"))
+	stderrOut, err := captureProtocolMenuStderr(t, func() error { return wApp.maintenanceMenu() })
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF after self-update, got %v", err)
+	}
+	if !strings.Contains(stderrOut, "v9.9.1") {
+		t.Fatalf("expected cached update hint in menu stderr, got: %s", stderrOut)
+	}
+	wantOnline := []string{"--reinstall", "--repo", "124aAA/openai", "--version", "v9.9.1"}
+	if !reflect.DeepEqual(gotArgs, wantOnline) {
+		t.Fatalf("got selfUpdate args %v, want %v", gotArgs, wantOnline)
+	}
+
+	// Choice 4 -> mode 1 (online) -> bare version 0.4.2 normalizes to v0.4.2
+	gotArgs = nil
+	wApp.in.Reset(strings.NewReader("4\n1\n0.4.2\n"))
+	if err := wApp.maintenanceMenu(); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF after explicit online self-update, got %v", err)
+	}
+	wantExplicit := []string{"--reinstall", "--repo", "124aAA/openai", "--version", "v0.4.2"}
+	if !reflect.DeepEqual(gotArgs, wantExplicit) {
+		t.Fatalf("got explicit selfUpdate args %v, want %v", gotArgs, wantExplicit)
+	}
+}
+
+func TestSystemMenuFirewallBackendSelectionAndACMEPort80Notice(t *testing.T) {
+	wApp, _ := menuFixture(t, "")
+	wApp.offline = false
+	wApp.store.Backend = noopFirewallBackend{}
+	wApp.lookPath = func(name string) (string, error) {
+		if name == "firewall-cmd" {
+			return "/usr/bin/firewall-cmd", nil
+		}
+		return "", os.ErrNotExist
+	}
+	// System menu 1 (firewall) -> 2 (enable) -> Enter accepts auto-detected firewalld -> yes -> 0 -> 0
+	wApp.in.Reset(strings.NewReader("1\n2\n\nyes\n0\n"))
+	stderrOut, err := captureProtocolMenuStderr(t, func() error {
+		_, e := wizardOutput(t, func() error { return wApp.systemMenu() })
+		return e
+	})
+	if err != nil {
+		t.Fatalf("systemMenu firewalld enable failed: %v", err)
+	}
+	if !strings.Contains(stderrOut, "firewalld") {
+		t.Fatalf("expected firewalld detection prompt, got: %s", stderrOut)
+	}
+	st, err := wApp.store.Load()
+	if err != nil || st.Firewall != "firewalld" {
+		t.Fatalf("expected State.Firewall == firewalld, got %q (err=%v)", st.Firewall, err)
+	}
+
+	// Verify nodeNeedsACMEHTTP01Port80 with shared CertificateID across http-01, dns-01, and tls-alpn-01.
+	httpCert := node.CertificateResource{
+		ID: "cert-http01",
+		Certificate: node.Certificate{
+			Mode:       "acme",
+			ServerName: "http.example.com",
+			Email:      "ops@example.com",
+			ACME:       &node.ACMESettings{Challenge: "http-01"},
+		},
+	}
+	dnsCert := node.CertificateResource{
+		ID: "cert-dns01",
+		Certificate: node.Certificate{
+			Mode:       "acme",
+			ServerName: "dns.example.com",
+			Email:      "ops@example.com",
+			ACME:       &node.ACMESettings{Challenge: "dns-01", DNS01: &node.ACMEDNS01{Provider: "cloudflare", APIToken: "secret"}},
+		},
+	}
+	alpnCert := node.CertificateResource{
+		ID: "cert-alpn01",
+		Certificate: node.Certificate{
+			Mode:       "acme",
+			ServerName: "alpn.example.com",
+			Email:      "ops@example.com",
+			ACME:       &node.ACMESettings{Challenge: "tls-alpn-01"},
+		},
+	}
+	st.Certificates = []node.CertificateResource{httpCert, dnsCert, alpnCert}
+	if !nodeNeedsACMEHTTP01Port80(st, node.Node{Enabled: true, CertificateID: "cert-http01"}) {
+		t.Fatal("shared http-01 certificate did not report TCP 80 requirement")
+	}
+	if nodeNeedsACMEHTTP01Port80(st, node.Node{Enabled: true, CertificateID: "cert-dns01"}) {
+		t.Fatal("shared dns-01 certificate falsely reported TCP 80 requirement")
+	}
+	if nodeNeedsACMEHTTP01Port80(st, node.Node{Enabled: true, CertificateID: "cert-alpn01"}) {
+		t.Fatal("shared tls-alpn-01 certificate falsely reported TCP 80 requirement")
+	}
+}
+
+func TestMaintenanceMenuCoreUpdateUsesPinned1143Digest(t *testing.T) {
+	wApp, _ := menuFixture(t, "")
+	var gotVer, gotSum string
+	wApp.installCoreFn = func(root, v, sum, archive string) error {
+		gotVer, gotSum = v, sum
+		return nil
+	}
+	wApp.in.Reset(strings.NewReader("3\n1.14.3\n\n0\n"))
+	stderrOut, err := captureProtocolMenuStderr(t, func() error { return wApp.maintenanceMenu() })
+	if err != nil {
+		t.Fatalf("maintenanceMenu core update 1.14.3 failed: %v", err)
+	}
+	if !strings.Contains(stderrOut, "1.14.3") || !strings.Contains(stderrOut, "已内置核验摘要") {
+		t.Fatalf("expected pinned 1.14.3 prompt hint, got: %s", stderrOut)
+	}
+	st, err := wApp.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotVer != "1.14.3" || gotSum == "" || st.CoreVersion != "1.14.3" || st.CoreArchiveSHA256 != gotSum {
+		t.Fatalf("unexpected core update result: gotVer=%q gotSum=%q state=(%q, %q)", gotVer, gotSum, st.CoreVersion, st.CoreArchiveSHA256)
 	}
 }

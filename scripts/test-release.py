@@ -61,6 +61,11 @@ def fixture_probe_archive(path, target, wrong_arch=False, corrupt=False):
         binary[:2] = b'MZ'; binary[60:64] = (64).to_bytes(4, 'little')
         binary[64:68] = b'PE\0\0'; binary[68:70] = (0xaa64 if wrong_arch else 0x8664).to_bytes(2, 'little')
         binary[88:90] = (0x20b).to_bytes(2, 'little')
+    elif target.startswith('darwin-'):
+        binary[0:4] = (0xfeedfacf).to_bytes(4, 'little')
+        want_arm64 = (target == 'darwin-arm64') != wrong_arch
+        binary[4:8] = (0x0100000c if want_arm64 else 0x01000007).to_bytes(4, 'little')
+        binary[12:16] = (2).to_bytes(4, 'little')
     else:
         binary[:6] = b'\x7fELF\x02\x01'
         binary[18:20] = (183 if (target == 'linux-arm64') != wrong_arch else 62).to_bytes(2, 'little')
@@ -150,7 +155,7 @@ class FakeGitHub:
             return copy.deepcopy(self.current_release)
         if method == "PATCH" and path == "/releases/1":
             if set(self.files) != self.expected_names:
-                raise AssertionError("published before all seven assets existed")
+                raise AssertionError("published before all nine assets existed")
             self.current_release.update(value)
             return copy.deepcopy(self.current_release)
         raise AssertionError("unexpected offline mutation")
@@ -172,7 +177,7 @@ class ReleaseTests(unittest.TestCase):
         self.api.expected_names = set(self.assets)
 
     def test_batch08_named_documents_are_required_and_preserved(self):
-        required = {"docs/MONITORING.md", "docs/BATCH08.md", "docs/PROTOCOLS.md", "docs/BATCH09.md", "docs/PLATFORMS.md", "docs/BATCH10.md", "docs/WORKFLOWS.md", "docs/BATCH11.md"}
+        required = {"docs/GUIDE.md", "docs/MONITORING.md", "docs/BATCH08.md", "docs/PROTOCOLS.md", "docs/BATCH09.md", "docs/PLATFORMS.md", "docs/BATCH10.md", "docs/WORKFLOWS.md", "docs/BATCH11.md"}
         self.assertTrue(required <= guard.PACKAGE_FILES)
         for arch in ("amd64", "arm64"):
             path = self.dist / f"qingnode-{VERSION[1:]}-linux-{arch}.tar.gz"
@@ -409,13 +414,13 @@ class ReleaseTests(unittest.TestCase):
 
     def test_extra_local_artifact_is_refused(self):
         (self.dist / "extra.txt").write_text("extra")
-        with self.assertRaisesRegex(ValueError, "exactly seven"):
+        with self.assertRaisesRegex(ValueError, "exactly nine"):
             guard.validate_local(self.dist, VERSION, SHA, REPO)
 
     def test_all_five_binaries_are_required_and_manifest_schema_is_explicit(self):
         self.assertEqual(2, self.manifest['schema'])
-        self.assertEqual(5, len(self.manifest['archives']))
-        self.assertEqual(7, len(self.assets))
+        self.assertEqual(7, len(self.manifest['archives']))
+        self.assertEqual(9, len(self.assets))
         for target in guard.PROBE_TARGETS:
             with self.subTest(target=target):
                 name = guard.probe_name(VERSION, target)

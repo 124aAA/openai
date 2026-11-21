@@ -214,10 +214,16 @@ func TestDeviceClientStrategiesVersionGatesAndBuiltinRules(t *testing.T) {
 	if _, err := ExportDeviceProfile(s, p, "sing-box", "1.15.0", false); err == nil {
 		t.Fatal("untested sing-box version guessed")
 	}
-	if _, err := ExportDeviceProfile(s, p, "mihomo", "1.19.31", false); err == nil {
-		t.Fatal("untested Mihomo version guessed")
+	if _, err := ExportDeviceProfile(s, p, "mihomo", "1.18.9", false); err == nil {
+		t.Fatal("unsupported Mihomo version accepted")
+	}
+	if _, err := ExportDeviceProfile(s, p, "sing-box", "1.14.9", false); err != nil {
+		t.Fatal("compatible sing-box 1.14.x patch version rejected", err)
 	}
 	p.Strategy, p.Routing = "fallback", "basic"
+	if _, err := ExportDeviceProfile(s, p, "mihomo", "1.19.31", false); err != nil {
+		t.Fatal("compatible Mihomo >=1.19.0 version rejected", err)
+	}
 	p.Bindings[0], p.Bindings[2] = p.Bindings[2], p.Bindings[0]
 	if _, err := ExportDeviceProfile(s, p, "sing-box", "1.14.0", false); err == nil {
 		t.Fatal("sing-box was given a fake fallback strategy")
@@ -234,12 +240,12 @@ func TestDeviceClientStrategiesVersionGatesAndBuiltinRules(t *testing.T) {
 	if group["type"] != "fallback" || group["empty-fallback"] != "REJECT" || group["timeout"] != 5000 || group["tolerance"] != nil || group["proxies"].([]any)[0] != deviceExportName(s.Nodes[2], s.Nodes[2].Users[0], p.Bindings[0]) {
 		t.Fatal("fallback priority, fail-closed behavior or client timeout lost")
 	}
-	if len(doc["rules"].([]any)) != 5 || r.RuleSource.ID != "private-rfc1918-rfc4193-v1" || !strings.Contains(r.RuleSource.CacheStatus, "no external") {
+	if len(doc["rules"].([]any)) != 10 || r.RuleSource.ID != "private-special-cidrs-v2" || !strings.Contains(r.RuleSource.CacheStatus, "no external") {
 		t.Fatal("minimal built-in split source or cache provenance lost")
 	}
 	p.Strategy, p.TestURL = "manual", ""
 	r, err = ExportDeviceProfile(s, p, "sing-box", "1.14.3", false)
-	if err != nil || !bytes.Contains(r.Content, []byte(`"DIRECT"`)) || !bytes.Contains(r.Content, []byte(`"fc00::/7"`)) {
+	if err != nil || !bytes.Contains(r.Content, []byte(`"DIRECT"`)) || !bytes.Contains(r.Content, []byte(`"ip_is_private": true`)) || !bytes.Contains(r.Content, []byte(`"100.64.0.0/10"`)) || !bytes.Contains(r.Content, []byte(`"fc00::/7"`)) {
 		t.Fatal("explicit basic split missing", err)
 	}
 }

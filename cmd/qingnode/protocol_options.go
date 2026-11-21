@@ -10,10 +10,12 @@ import (
 )
 
 type protocolOptionsRequest struct {
-	Version int                 `json:"version"`
-	NodeID  string              `json:"node_id"`
-	AnyTLS  *node.AnyTLSOptions `json:"anytls,omitempty"`
-	TUIC    *node.TUICOptions   `json:"tuic,omitempty"`
+	Version   int                    `json:"version"`
+	NodeID    string                 `json:"node_id"`
+	AnyTLS    *node.AnyTLSOptions    `json:"anytls,omitempty"`
+	TUIC      *node.TUICOptions      `json:"tuic,omitempty"`
+	Transport *node.TransportOptions `json:"transport,omitempty"`
+	Multiplex *node.MultiplexOptions `json:"multiplex,omitempty"`
 }
 
 func (a *app) protocols(args []string) error {
@@ -59,19 +61,46 @@ func (a *app) protocols(args []string) error {
 		if e != nil || n.ID != request.NodeID {
 			return errors.New("需要节点稳定ID")
 		}
-		switch n.Protocol {
-		case "anytls":
-			if request.AnyTLS == nil || request.TUIC != nil {
-				return errors.New("AnyTLS需要anytls对象；用空对象恢复默认")
+		if request.AnyTLS == nil && request.TUIC == nil && request.Transport == nil && request.Multiplex == nil {
+			return errors.New("请提供至少一项匹配当前节点协议的设置对象（anytls / tuic / transport / multiplex）")
+		}
+		if request.AnyTLS != nil {
+			if n.Protocol != "anytls" {
+				return errors.New("anytls 设置仅适用于 AnyTLS 节点")
 			}
 			n.AnyTLS = request.AnyTLS
-		case "tuic":
-			if request.TUIC == nil || request.AnyTLS != nil {
-				return errors.New("TUIC需要tuic对象；用空对象恢复默认")
+		}
+		if request.TUIC != nil {
+			if n.Protocol != "tuic" {
+				return errors.New("tuic 设置仅适用于 TUIC 节点")
 			}
 			n.TUIC = request.TUIC
-		default:
-			return errors.New("此协议没有本批可管理的高级选项")
+		}
+		if request.Transport != nil {
+			if !node.ProtocolSupportsTransport(n.Protocol) && n.Protocol != "reality" {
+				return errors.New("此协议不支持 transport 传输层设置")
+			}
+			if request.Transport.Type == "" || request.Transport.Type == "tcp" {
+				if *request.Transport != (node.TransportOptions{Type: request.Transport.Type}) {
+					return errors.New("恢复默认 TCP 传输层时不能附带其他 transport 参数")
+				}
+				n.Transport = nil
+			} else {
+				n.Transport = request.Transport
+			}
+		}
+		if request.Multiplex != nil {
+			if !node.ProtocolSupportsMultiplex(n.Protocol) {
+				return errors.New("此协议不支持 multiplex 多路复用设置")
+			}
+			if !request.Multiplex.Enabled {
+				if *request.Multiplex != (node.MultiplexOptions{}) {
+					return errors.New("停用 multiplex 时请使用空对象 {} 或不附带其他参数")
+				}
+				n.Multiplex = nil
+			} else {
+				n.Multiplex = request.Multiplex
+			}
 		}
 		return st.Validate()
 	}

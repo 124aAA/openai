@@ -1,12 +1,12 @@
 # 证书资源与续期
 
-这是第 07 批未发行源码的接口。公开 v0.2.8 包不因此更新。默认核心仍为官方 sing-box 1.14.0，1.14.3 单独验证；两版均需要 `with_acme`，HY2 还需要 `with_quic`。本批实测、失败与环境边界见 [BATCH07.md](BATCH07.md)，完整加密搬迁见 [MIGRATION.md](MIGRATION.md)。
+当前源码（`0.5.0`）提供共享证书资源管理、免手写 JSON 的交互式证书创建/更新/绑定向导（主菜单 `6 高级设置 → 3 证书与域名`）及落盘 X.509 证书链状态解析。默认核心仍为官方 sing-box 1.14.0，1.14.3 单独验证；两版均需要 `with_acme`，HY2/TUIC 还需要 `with_quic`。历史第 07 批实测、失败与环境边界见 [BATCH07.md](BATCH07.md)，完整加密搬迁见 [MIGRATION.md](MIGRATION.md)。
 
 证书资源是保存证书材料的独立对象，有稳定 ID；节点通过 `certificate_id` 引用它。PEM 内容、用户自己的文件引用、核心管理的 ACME 是三种互斥模式。共享资源更新会影响所有引用节点，普通节点编辑则为该节点创建独立资源，避免连带修改。节点 UUID、密码、REALITY 密钥与证书资源是不同身份，更新证书不轮换代理认证。
 
 ## 导入、绑定与更新
 
-私有输入文件必须是本机普通文件、权限 0600，不接受链接；不要把私钥或 DNS Token 放进命令行。格式为 `version: 1`，未知字段、重复字段、null 和多余 JSON 均拒绝。PEM 示例中的内容须替换为完整证书链与匹配私钥：
+交互菜单用户可直接进入 `6 高级设置 → 3 证书与域名`，按提示选择 `ACME HTTP-01`、`ACME DNS-01`（支持 `cloudflare` / `alidns` / `acmedns`，API Token 隐藏回显）、`ACME TLS-ALPN-01` 或引用本机已有证书文件（`mode: file`）。若使用 JSON 导入，私有输入文件必须是本机普通文件、权限 0600，不接受链接；不要把私钥或 DNS Token 放进命令行。格式为 `version: 1`，未知字段、重复字段、null 和多余 JSON 均拒绝。PEM 示例中的内容须替换为完整证书链与匹配私钥：
 
 ```json
 {
@@ -38,7 +38,7 @@ qingnode certificate update --id aabbccddeeff0011 --file /私有目录/new-certi
 
 旧 State 与备份读取保留原来的结构/相邻签名校验，不因新机器的信任库不同就丢掉恢复材料；这不证明旧链完整或客户端可以连接。显式重新导入/更新旧资源会执行上述完整路径校验。签名链校验不等于目标客户端信任该 CA，私有 CA 仍须在客户端明确安装信任。
 
-目前资源绑定用于 HY2，优先选择 ECDSA P-256/P-384 或合适的 RSA。通用证书资源、服务端与备份不把客户端限制混进结构校验：旧 Ed25519 证书仍保留。sing-box 的默认 Chrome QUIC 指纹不支持 Ed25519，因此完整客户端配置和节点集合遇到该组合会明确拒绝，`allow_lossy` 也不能绕过；用户已经明确选择 `disable_chrome_parrot: true` 时保留该选择，不自动关闭指纹。Mihomo 没有此 Chrome 路径，能力单独校验。URI 无法表达这种高级选择，继续沿用有损提示并推荐完整配置。正常 X.509 证书可解析，不等于每个客户端均可连接。
+共享证书资源覆盖全部 6 种标准 TLS 协议（`hysteria2`、`anytls`、`trojan`、`tuic`、`vless-tls`、`vmess-tls`），优先选择 ECDSA P-256/P-384 或合适的 RSA。通用证书资源、服务端与备份不把客户端限制混进结构校验：旧 Ed25519 证书仍保留。sing-box 的默认 Chrome QUIC 指纹不支持 Ed25519，因此完整客户端配置和节点集合遇到该组合会明确拒绝，`allow_lossy` 也不能绕过；用户已经明确选择 `disable_chrome_parrot: true` 时保留该选择，不自动关闭指纹。Mihomo 导入 Trojan/VLESS/VMess URI 默认采用 Chrome 指纹，同样拒绝静态 Ed25519 证书分享链接。URI 无法表达高级选择时继续沿用有损提示并推荐完整配置。正常 X.509 证书可解析，不等于每个客户端均可连接。
 
 解除引用需给运行节点换上另一张证书，不能让 HY2 变成无 TLS：
 

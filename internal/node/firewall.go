@@ -18,16 +18,25 @@ type Firewall struct {
 }
 type FirewallRule struct {
 	Port         int
+	PortEnd      int
 	Network, Tag string
 }
+
+func (r FirewallRule) ufwPortSpec() string {
+	if r.PortEnd > r.Port {
+		return fmt.Sprintf("%d:%d", r.Port, r.PortEnd)
+	}
+	return strconv.Itoa(r.Port)
+}
+
 type ufwRule struct {
 	FirewallRule
 	Number   int
 	External bool
 }
 
-var ufwLine = regexp.MustCompile(`^\[\s*([0-9]+)\]\s+([0-9]+)/(tcp|udp)(?:\s+\(v6\))?\s+ALLOW IN\s+Anywhere(?:\s+\(v6\))?(?:\s+#\s*(.*))?\s*$`)
-var ourTag = regexp.MustCompile(`^qingnode:[a-f0-9]{16}:(tcp|udp)$`)
+var ufwLine = regexp.MustCompile(`^\[\s*([0-9]+)\]\s+([0-9]+(?::[0-9]+)?)/(tcp|udp)(?:\s+\(v6\))?\s+ALLOW IN\s+Anywhere(?:\s+\(v6\))?(?:\s+#\s*(.*))?\s*$`)
+var ourTag = regexp.MustCompile(`^qingnode:[a-f0-9]{16}:(?:hy2hop:)?(tcp|udp)$`)
 
 func (f Firewall) run(args ...string) ([]byte, error) {
 	r := f.Execute
@@ -54,16 +63,22 @@ func (f Firewall) rules() ([]ufwRule, error) {
 			continue
 		}
 		n, _ := strconv.Atoi(m[1])
-		p, _ := strconv.Atoi(m[2])
+		var p, pEnd int
+		if startStr, endStr, hasRange := strings.Cut(m[2], ":"); hasRange {
+			p, _ = strconv.Atoi(startStr)
+			pEnd, _ = strconv.Atoi(endStr)
+		} else {
+			p, _ = strconv.Atoi(m[2])
+		}
 		tag := strings.TrimSpace(m[4])
 		owned := ourTag.MatchString(tag) && strings.HasSuffix(tag, ":"+m[3])
-		rules = append(rules, ufwRule{FirewallRule: FirewallRule{Port: p, Network: m[3], Tag: tag}, Number: n, External: !owned})
+		rules = append(rules, ufwRule{FirewallRule: FirewallRule{Port: p, PortEnd: pEnd, Network: m[3], Tag: tag}, Number: n, External: !owned})
 	}
 	return rules, nil
 }
 func RequiredRules(s State) []FirewallRule {
 	var rules []FirewallRule
-	if s.Firewall != "ufw" && s.Firewall != "firewalld" {
+	if s.Firewall != "ufw" && s.Firewall != "firewalld" && s.Firewall != "nftables" {
 		return rules
 	}
 	seen := map[string]bool{}
@@ -79,12 +94,22 @@ func RequiredRules(s State) []FirewallRule {
 			seen[tag] = true
 		}
 	}
+	for _, hop := range RequiredHY2Redirects(s) {
+		tag := "qingnode:" + hop.NodeID + ":hy2hop:udp"
+		if !seen[tag] {
+			rules = append(rules, FirewallRule{Port: hop.PortStart, PortEnd: hop.PortEnd, Network: "udp", Tag: tag})
+			seen[tag] = true
+		}
+	}
 	// ACME TCP 80 is reported separately; never take ownership of a web server's port.
 	return rules
 }
 func (f Firewall) Check(s State) error {
 	if s.Firewall == "firewalld" {
 		return f.firewalldCheck(s)
+	}
+	if s.Firewall == "nftables" {
+		return f.nftablesCheck(s)
 	}
 	if s.Firewall != "ufw" {
 		return nil
@@ -112,6 +137,9 @@ func (f Firewall) Sync(s State, prune bool) error {
 	if s.Firewall == "firewalld" {
 		return f.firewalldSync(s, prune)
 	}
+	if s.Firewall == "nftables" {
+		return f.nftablesSync(s, prune)
+	}
 	rules, e := f.rules()
 	if e != nil {
 		return e
@@ -120,7 +148,7 @@ func (f Firewall) Sync(s State, prune bool) error {
 	for _, want := range wanted {
 		exists := false
 		for _, r := range rules {
-			if r.Port == want.Port && r.Network == want.Network {
+			if r.Port == want.Port && r.PortEnd == want.PortEnd && r.Network == want.Network {
 				exists = true
 				break
 			}
@@ -129,7 +157,7 @@ func (f Firewall) Sync(s State, prune bool) error {
 		if exists {
 			continue
 		}
-		if _, e = f.run("allow", "in", "proto", want.Network, "to", "any", "port", strconv.Itoa(want.Port), "comment", want.Tag); e != nil {
+		if _, e = f.run("allow", "in", "proto", want.Network, "to", "any", "port", want.ufwPortSpec(), "comment", want.Tag); e != nil {
 			return fmt.Errorf("添加项目 UFW 规则失败：%w", e)
 		}
 	}
@@ -151,7 +179,7 @@ func (f Firewall) Sync(s State, prune bool) error {
 		}
 		keep := false
 		for _, want := range wanted {
-			if r.Port == want.Port && r.Network == want.Network {
+			if r.Port == want.Port && r.PortEnd == want.PortEnd && r.Network == want.Network {
 				keep = true
 				break
 			}
@@ -189,16 +217,36 @@ func (b SystemBackend) PrepareEffects(old, next State) error {
 		return errors.New("切换自动防火墙后端前须先停用旧受管模式")
 	}
 	if next.Firewall == "firewalld" {
-		return (Firewall{Execute: b.Execute}).firewalldSync(next, false)
+		if err := (Firewall{Execute: b.Execute}).firewalldSync(next, false); err != nil {
+			return err
+		}
+	} else if old.Firewall == "nftables" || next.Firewall == "nftables" {
+		if err := (Firewall{Execute: b.Execute}).nftablesSyncTransition(old, next, false); err != nil {
+			return err
+		}
+	} else if old.Firewall == "ufw" || next.Firewall == "ufw" {
+		if err := (Firewall{Execute: b.Execute}).Sync(next, false); err != nil {
+			return err
+		}
 	}
-	if old.Firewall != "ufw" && next.Firewall != "ufw" {
-		return nil
+	if len(RequiredHY2Redirects(next)) > 0 {
+		if err := (HY2Redirect{Execute: b.Execute}).Sync(next); err != nil {
+			return err
+		}
 	}
-	return (Firewall{Execute: b.Execute}).Sync(next, false)
+	return nil
 }
 func (b SystemBackend) FinishEffects(old, next State) error {
+	if len(RequiredHY2Redirects(old)) > 0 || len(RequiredHY2Redirects(next)) > 0 {
+		if err := (HY2Redirect{Execute: b.Execute}).Sync(next); err != nil {
+			return err
+		}
+	}
 	if old.Firewall == "firewalld" || next.Firewall == "firewalld" {
 		return (Firewall{Execute: b.Execute}).firewalldSync(next, true)
+	}
+	if old.Firewall == "nftables" || next.Firewall == "nftables" {
+		return (Firewall{Execute: b.Execute}).nftablesSyncTransition(old, next, true)
 	}
 	if old.Firewall != "ufw" && next.Firewall != "ufw" {
 		return nil

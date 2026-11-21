@@ -7,9 +7,65 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
+
+var (
+	unmappedOverflowOnce sync.Once
+	unmappedOverflowUID  uint32
+	unmappedOverflowOK   bool
+)
+
+func parseUnmappedOverflowUID(overflowRaw, uidMapRaw string) (uint32, bool) {
+	overflowStr := strings.TrimSpace(overflowRaw)
+	if overflowStr == "" {
+		return 0, false
+	}
+	overflow, err := strconv.ParseUint(overflowStr, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(strings.TrimSpace(uidMapRaw), "\n")
+	parsed := 0
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 3 {
+			return 0, false
+		}
+		inside, e1 := strconv.ParseUint(fields[0], 10, 64)
+		_, e2 := strconv.ParseUint(fields[1], 10, 64)
+		length, e3 := strconv.ParseUint(fields[2], 10, 64)
+		if e1 != nil || e2 != nil || e3 != nil || length == 0 {
+			return 0, false
+		}
+		end := inside + length
+		if end < inside || 0 >= inside && 0 < end || overflow >= inside && overflow < end {
+			return 0, false
+		}
+		parsed++
+	}
+	if parsed == 0 {
+		return 0, false
+	}
+	return uint32(overflow), true
+}
+
+func unmappedHostAncestorUID(uid uint32) bool {
+	unmappedOverflowOnce.Do(func() {
+		ob, e1 := os.ReadFile("/proc/sys/kernel/overflowuid")
+		mb, e2 := os.ReadFile("/proc/self/uid_map")
+		if e1 == nil && e2 == nil {
+			unmappedOverflowUID, unmappedOverflowOK = parseUnmappedOverflowUID(string(ob), string(mb))
+		}
+	})
+	return unmappedOverflowOK && uid == unmappedOverflowUID
+}
 
 func owner(info os.FileInfo) (uint32, uint32, uint64, error) {
 	s, ok := info.Sys().(*syscall.Stat_t)
@@ -20,8 +76,9 @@ func owner(info os.FileInfo) (uint32, uint32, uint64, error) {
 }
 
 // Every path ancestor must already be a real directory. A root-owned sticky
-// temporary directory is the only writable ancestor exception. The directory
-// descriptor is then pinned; a later pathname replacement cannot redirect I/O.
+// temporary directory is the only writable ancestor exception (including host
+// root surfaced as unmapped overflowuid in a rootless user namespace). The
+// directory descriptor is then pinned; a later pathname replacement cannot redirect I/O.
 func trustedRoot(dir string, allowSticky bool) (*os.Root, os.FileInfo, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, nil, errors.New("publication path must be absolute")
@@ -36,10 +93,12 @@ func trustedRoot(dir string, allowSticky bool) (*os.Root, os.FileInfo, error) {
 			return nil, nil, errors.New("publication path must contain real directories")
 		}
 		uid, _, _, err := owner(info)
-		if err != nil || uid != 0 && uid != uint32(os.Geteuid()) {
+		ancestor := p != clean || allowSticky
+		rootOwned := uid == 0 || (ancestor && unmappedHostAncestorUID(uid))
+		if err != nil || !rootOwned && uid != uint32(os.Geteuid()) {
 			return nil, nil, errors.New("publication path has an untrusted owner")
 		}
-		if info.Mode().Perm()&0022 != 0 && !((p != clean || allowSticky) && uid == 0 && info.Mode()&os.ModeSticky != 0) {
+		if info.Mode().Perm()&0022 != 0 && !(ancestor && rootOwned && info.Mode()&os.ModeSticky != 0) {
 			return nil, nil, errors.New("publication path is writable by another user")
 		}
 	}
@@ -312,3 +371,97 @@ func Read(dir string) (Snapshot, error) {
 	}
 	return Decode(b)
 }
+
+type snapshotFileKey struct {
+	dev       uint64
+	ino       uint64
+	size      int64
+	mtimeSec  int64
+	mtimeNsec int64
+}
+
+type SnapshotCache struct {
+	dir     string
+	mu      sync.RWMutex
+	valid   bool
+	key     snapshotFileKey
+	cached  IndexedSnapshot
+	decodes uint64
+}
+
+func NewSnapshotCache(dir string) *SnapshotCache {
+	return &SnapshotCache{dir: dir}
+}
+
+func (c *SnapshotCache) Decodes() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.decodes
+}
+
+func (c *SnapshotCache) Read() (IndexedSnapshot, error) {
+	r, dirInfo, e := openDirectory(c.dir, false)
+	if e != nil {
+		return IndexedSnapshot{}, e
+	}
+	defer r.Close()
+	if e = checkMarker(r, dirInfo); e != nil {
+		return IndexedSnapshot{}, e
+	}
+	f, e := openNoFollow(r, SnapshotName, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if e != nil {
+		return IndexedSnapshot{}, errors.New("cannot open publication file")
+	}
+	defer f.Close()
+	fi, e := f.Stat()
+	if e != nil || !fi.Mode().IsRegular() {
+		return IndexedSnapshot{}, errors.New("publication file is not regular")
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return IndexedSnapshot{}, errors.New("cannot inspect publication ownership")
+	}
+	duid, dgid, _, de := owner(dirInfo)
+	links := uint64(st.Nlink)
+	if de != nil || st.Uid != duid || st.Gid != dgid || links > 1 || fi.Mode().Perm() != 0640 {
+		return IndexedSnapshot{}, errors.New("publication file permissions or ownership are invalid")
+	}
+	k := snapshotFileKey{
+		dev:       uint64(st.Dev),
+		ino:       uint64(st.Ino),
+		size:      st.Size,
+		mtimeSec:  int64(st.Mtim.Sec),
+		mtimeNsec: int64(st.Mtim.Nsec),
+	}
+	if links == 1 {
+		c.mu.RLock()
+		if c.valid && c.key == k {
+			hit := c.cached
+			c.mu.RUnlock()
+			return hit, nil
+		}
+		c.mu.RUnlock()
+	}
+	b, e := io.ReadAll(io.LimitReader(f, int64(MaxSnapshotBytes)+1))
+	if e != nil || len(b) > MaxSnapshotBytes {
+		return IndexedSnapshot{}, errors.New("publication file exceeds its limit or cannot be read")
+	}
+	snap, e := Decode(b)
+	if e != nil {
+		return IndexedSnapshot{}, e
+	}
+	idx, e := BuildIndex(snap)
+	if e != nil {
+		return IndexedSnapshot{}, e
+	}
+	if links == 1 {
+		c.mu.Lock()
+		c.key = k
+		c.cached = idx
+		c.valid = true
+		c.decodes++
+		c.mu.Unlock()
+	}
+	return idx, nil
+}
+
