@@ -28,22 +28,56 @@ import (
 	"time"
 )
 
+var (
+	graphPortMu  sync.Mutex
+	graphPortSet = map[int]bool{}
+	graphPorts   []int
+)
+
 func graphFreePort(t *testing.T, network string) int {
 	t.Helper()
-	if network == "udp4" {
-		c, err := net.ListenPacket(network, "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
+	graphPortMu.Lock()
+	defer graphPortMu.Unlock()
+	var held []interface{ Close() error }
+	defer func() {
+		for _, c := range held {
+			_ = c.Close()
 		}
-		defer c.Close()
-		return c.LocalAddr().(*net.UDPAddr).Port
+	}()
+	for attempt := 0; attempt < 256; attempt++ {
+		var p int
+		var closer interface{ Close() error }
+		if network == "udp4" {
+			c, err := net.ListenPacket(network, "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p = c.LocalAddr().(*net.UDPAddr).Port
+			closer = c
+		} else {
+			l, err := net.Listen(network, "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p = l.Addr().(*net.TCPAddr).Port
+			closer = l
+		}
+		if graphPortSet[p] {
+			held = append(held, closer)
+			continue
+		}
+		_ = closer.Close()
+		graphPortSet[p] = true
+		graphPorts = append(graphPorts, p)
+		if len(graphPorts) > 256 {
+			evict := graphPorts[0]
+			graphPorts = graphPorts[1:]
+			delete(graphPortSet, evict)
+		}
+		return p
 	}
-	l, err := net.Listen(network, "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("unable to allocate distinct graph ephemeral port")
+	return 0
 }
 
 // Fixture configs are private, freshly created, and never printed on failure:

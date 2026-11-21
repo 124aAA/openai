@@ -22,19 +22,55 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
 
+var (
+	freePortMu   sync.Mutex
+	recentPorts  []int
+	recentPortSet = map[int]bool{}
+)
+
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, e := net.Listen("tcp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	freePortMu.Lock()
+	defer freePortMu.Unlock()
+	var held []io.Closer
+	defer func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+	for attempt := 0; attempt < 256; attempt++ {
+		l, e := net.Listen("tcp", "127.0.0.1:0")
+		if e != nil {
+			t.Fatal(e)
+		}
+		p := l.Addr().(*net.TCPAddr).Port
+		if recentPortSet[p] {
+			held = append(held, l)
+			continue
+		}
+		u, ue := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(p))
+		if ue != nil {
+			held = append(held, l)
+			continue
+		}
+		_ = u.Close()
+		_ = l.Close()
+		recentPortSet[p] = true
+		recentPorts = append(recentPorts, p)
+		if len(recentPorts) > 512 {
+			evict := recentPorts[0]
+			recentPorts = recentPorts[1:]
+			delete(recentPortSet, evict)
+		}
+		return p
 	}
-	p := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return p
+	t.Fatal("unable to allocate distinct ephemeral loopback port")
+	return 0
 }
 func makeCert(t *testing.T) (string, string) {
 	t.Helper()
